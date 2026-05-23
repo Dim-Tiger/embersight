@@ -1,0 +1,55 @@
+[project]
+name = "embersight-agent"
+version = "0.1.0"
+description = "EmberSight LangGraph agent service for CAL FIRE IMT support"
+requires-python = ">=3.11"
+readme = "../README.md"
+
+dependencies = [
+    # Web service
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "pydantic>=2.7",
+    # LangGraph + LLMs
+    "langgraph>=1.0",
+    "langgraph-checkpoint-sqlite>=2.0",
+    "langchain>=0.3",
+    "langchain-core>=0.3",
+    "langchain-anthropic>=0.3",
+    "langchain-openai>=0.2",
+    # Geo / scientific (filled in pass 2)
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "geopandas>=1.0",
+    "rasterio>=1.3",
+    "rioxarray>=0.15",
+    "networkx>=3.3",
+]
+
+[dependency-groups]
+# Heavyweight scientific deps. PEP 735 dep groups, NOT installed by
+# default. Pull them with `uv sync --group science` when you need them
+# for real tool runs (pass 2).
+science = [
+    "herbie-data",
+    "SynopticPy",
+    "pyretechnics",
+    "osmnx>=2.0",
+    "landfire",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/embersight_agent"]
+
+[tool.uv]
+package = true
+# Don't auto-install the heavyweight `science` group. Opt in with
+# `uv sync --group science` when needed.
+default-groups = []

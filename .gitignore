@@ -1,0 +1,31 @@
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+.pnpm-store/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv/
+dist/
+build/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# Runtime
+/tmp/embersight.db
+*.sqlite
+*.sqlite-journal
