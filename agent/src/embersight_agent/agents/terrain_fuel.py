@@ -231,13 +231,25 @@ async def run(state: AgentState) -> dict[str, Any]:
     if narrative is None:
         narrative = _stub_narrative(incident.name, fuel, terrain, canopy)
 
+    # Flat projections — contract with spread_simulation._extract_terrain_fuel.
+    # Spread expects top-level string `fuel_model` (FBFM40 code), `slope_pct`
+    # (degrees converted to percent), and `aspect_deg` (dominant cardinal).
+    flat_fuel_code = _dominant_fuel_code(fuel)
+    flat_slope_pct = _slope_deg_to_pct(terrain)
+    flat_aspect_deg = _dominant_aspect_deg(terrain)
+
     output = AgentOutput(
         agent=AGENT_NAME,
         narrative=narrative,
         payload={
+            # Flat keys: contract with spread_simulation._extract_terrain_fuel.
+            "fuel_model": flat_fuel_code,
+            "slope_pct": flat_slope_pct,
+            "aspect_deg": flat_aspect_deg,
+            # Detailed structures for the UI / debugging.
             "bbox": list(bbox),
             "aoi_radius_km": AOI_RADIUS_KM,
-            "fuel_model": fuel,
+            "fuel_detail": fuel,
             "terrain": terrain,
             "canopy": canopy,
             "key_findings": _key_findings(fuel, terrain, canopy),
@@ -248,6 +260,58 @@ async def run(state: AgentState) -> dict[str, Any]:
         citation_bundle=_build_citations(fuel, terrain, canopy, model_called),
     )
     return {"outputs": {AGENT_NAME: output}}
+
+
+_ASPECT_CARDINAL_DEG = {
+    "N": 0.0, "NE": 45.0, "E": 90.0, "SE": 135.0,
+    "S": 180.0, "SW": 225.0, "W": 270.0, "NW": 315.0,
+    "FLAT": 0.0,
+}
+
+
+def _dominant_fuel_code(fuel: dict) -> str:
+    """Pull the FBFM40 code from the top-ranked class, or a safe default."""
+    classes = fuel.get("dominant_classes") or []
+    if classes:
+        code = classes[0].get("code")
+        if isinstance(code, str) and code:
+            return code
+    return "GS2"
+
+
+def _slope_deg_to_pct(terrain: dict) -> float:
+    """Convert mean slope in degrees to percent (tan(deg)*100).
+
+    Returns a 15% default when terrain data is missing — same default
+    spread_simulation uses internally.
+    """
+    slope = (terrain.get("slope_deg") or {}) if isinstance(terrain, dict) else {}
+    mean_deg = slope.get("mean")
+    if mean_deg is None:
+        return 15.0
+    try:
+        import math as _m
+
+        return round(_m.tan(_m.radians(float(mean_deg))) * 100.0, 1)
+    except (TypeError, ValueError):
+        return 15.0
+
+
+def _dominant_aspect_deg(terrain: dict) -> float:
+    """Pick the dominant aspect cardinal direction and return its centre azimuth.
+
+    Returns 225.0 (SW) by default — matches spread_simulation's hardcoded
+    fallback so degraded behavior is deterministic.
+    """
+    aspect_dist = (
+        (terrain.get("aspect_distribution") or {})
+        if isinstance(terrain, dict)
+        else {}
+    )
+    if not aspect_dist:
+        return 225.0
+    top_card, _ = max(aspect_dist.items(), key=lambda kv: kv[1])
+    return float(_ASPECT_CARDINAL_DEG.get(str(top_card).upper(), 225.0))
 
 
 # --------------------------------------------------------------------------- #
