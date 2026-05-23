@@ -28,6 +28,20 @@ async function safeJson<T>(url: string, init?: RequestInit): Promise<T | null> {
   }
 }
 
+/** Normalize a fire name for duplicate detection: strip "fire/incident/complex", lowercase, strip punctuation. */
+function normName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\s+(fire|incident|complex)\s*$/i, "")
+    .replace(/[^a-z0-9]/g, "")
+    .trim();
+}
+
+/** True if two lat/lon pairs are within ~15 km of each other. */
+function isNearby(lat1: number, lon1: number, lat2: number, lon2: number): boolean {
+  return Math.abs(lat1 - lat2) < 0.14 && Math.abs(lon1 - lon2) < 0.18;
+}
+
 export async function GET() {
   const [calfire, wfigs] = await Promise.all([
     safeJson<any[]>(CALFIRE),
@@ -62,11 +76,18 @@ export async function GET() {
       const [lon, lat] = f?.geometry?.coordinates ?? [];
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const p = f?.properties ?? {};
+      const name: string = p?.IncidentName ?? "Unnamed Incident";
       const id = `wfigs:${p?.IrwinID ?? p?.UniqueFireIdentifier ?? `${lat},${lon}`}`;
+
+      // Skip if already represented by a CAL FIRE entry (same name or nearby location)
+      const n = normName(name);
+      if (merged.some((m) => normName(m.name) === n || isNearby(lat, lon, m.lat, m.lon))) continue;
+      // Also skip exact ID duplicate
       if (merged.some((m) => m.id === id)) continue;
+
       merged.push({
         id,
-        name: p?.IncidentName ?? "Unnamed Incident",
+        name,
         lat,
         lon,
         acres: typeof p?.DailyAcres === "number" ? p.DailyAcres : null,
@@ -74,7 +95,11 @@ export async function GET() {
           typeof p?.PercentContained === "number"
             ? p.PercentContained / 100
             : null,
-        started_at: p?.FireDiscoveryDateTime ?? null,
+        started_at: p?.FireDiscoveryDateTime
+            ? typeof p.FireDiscoveryDateTime === "number"
+              ? new Date(p.FireDiscoveryDateTime).toISOString()
+              : String(p.FireDiscoveryDateTime)
+            : null,
         source: "wfigs",
       });
     }

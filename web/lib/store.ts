@@ -55,6 +55,8 @@ export type Store = {
   clearEvents: () => void;
   upsertInterrupt: (i: PendingInterrupt) => void;
   removeInterrupt: (id?: string) => void;
+  restartCount: number;
+  requestRestart: () => void;
 };
 
 const DEFAULT_VIEWPORT: MapViewport = {
@@ -71,6 +73,7 @@ export const useStore = create<Store>((set) => ({
   operationalPeriod: 1,
   agentEvents: [],
   pendingInterrupts: [],
+  restartCount: 0,
   setSelectedIncident: (id) => set({ selectedIncidentId: id }),
   setSelectedThread: (id) => set({ selectedThreadId: id }),
   setActiveTab: (t) => set({ activeTab: t }),
@@ -79,6 +82,7 @@ export const useStore = create<Store>((set) => ({
   appendEvent: (e) =>
     set((s) => ({ agentEvents: [...s.agentEvents.slice(-499), e] })),
   clearEvents: () => set({ agentEvents: [] }),
+  requestRestart: () => set((s) => ({ restartCount: s.restartCount + 1 })),
   upsertInterrupt: (i) =>
     set((s) => {
       const id = i.interrupt.id;

@@ -12,6 +12,7 @@ import {
   Route,
   Wind,
 } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { AgentFeed } from "./components/panels/AgentFeed";
 import { ApprovalQueue } from "./components/panels/ApprovalQueue";
 import { EvacuationTab } from "./components/panels/EvacuationTab";
@@ -36,15 +37,29 @@ export default function Page() {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
+  const restartCount = useStore((s) => s.restartCount);
   const { data: incidents } = useIncidents();
   const { start } = useAgentStream();
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
 
+  // Single authoritative place that starts the agent — fires once per incident
+  // change, or when the user explicitly requests a restart (restartCount).
+  const lastStartedRef = useRef<{ id: string; count: number } | null>(null);
+  useEffect(() => {
+    if (!selectedIncidentId || !incidents) return;
+    if (
+      lastStartedRef.current?.id === selectedIncidentId &&
+      lastStartedRef.current?.count === restartCount
+    ) return;
+    const inc = incidents.find((i) => i.id === selectedIncidentId);
+    if (!inc) return;
+    lastStartedRef.current = { id: selectedIncidentId, count: restartCount };
+    start(inc);
+  }, [selectedIncidentId, restartCount, incidents, start]);
+
   const handleIncidentChange = (id: string) => {
     setSelectedIncident(id || null);
-    const inc = incidents?.find((i) => i.id === id);
-    if (inc) start(inc);
   };
 
   return (

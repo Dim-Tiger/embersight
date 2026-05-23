@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 export const revalidate = 300;
 
 const WFIGS_PERIMETERS =
-  "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Perimeters_Current/FeatureServer/0/query";
+  "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Interagency_Perimeters_Current/FeatureServer/0/query";
 
 /** Loose GUID/UUID validator — only allow hex digits, hyphens, braces */
 function isSafeId(s: string): boolean {
@@ -31,8 +31,8 @@ export async function GET(req: NextRequest) {
   // Prefer IrwinID lookup for WFIGS incidents (more precise)
   if (rawIrwinId && isSafeId(rawIrwinId)) {
     params = new URLSearchParams({
-      where: `IrwinID='${rawIrwinId}'`,
-      outFields: "IrwinID,poly_IncidentName,GISAcres,CreateDate",
+      where: `poly_IRWINID='${rawIrwinId}'`,
+      outFields: "poly_IRWINID,poly_IncidentName,poly_GISAcres,poly_CreateDate",
       f: "geojson",
     });
   } else {
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
       geometryType: "esriGeometryPoint",
       spatialRel: "esriSpatialRelIntersects",
       inSR: "4326",
-      outFields: "IrwinID,poly_IncidentName,GISAcres,CreateDate",
+      outFields: "poly_IRWINID,poly_IncidentName,poly_GISAcres,poly_CreateDate",
       f: "geojson",
     });
   }
@@ -59,3 +59,4 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(null);
   }
 }
+

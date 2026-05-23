@@ -31,46 +31,55 @@ export function useAgentStream() {
       const ctrl = new AbortController();
       abortRef.current = ctrl;
 
-      const res = await fetch("/api/agent/stream", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          incident,
-          operational_period: operationalPeriod,
-          thread_id: threadId,
-        }),
-        signal: ctrl.signal,
-      });
+      try {
+        const res = await fetch("/api/agent/stream", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            incident,
+            operational_period: operationalPeriod,
+            thread_id: threadId,
+          }),
+          signal: ctrl.signal,
+        });
 
-      if (!res.ok || !res.body) {
+        if (!res.ok || !res.body) {
+          appendEvent({
+            ts: Date.now(),
+            kind: "error",
+            data: `stream ${res.status}`,
+          });
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          // SSE frames separated by \n\n
+          let idx;
+          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            handleFrame(frame, {
+              appendEvent,
+              upsertInterrupt,
+              threadId,
+            });
+          }
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return; // intentional abort
         appendEvent({
           ts: Date.now(),
           kind: "error",
-          data: `stream ${res.status}`,
+          data: err instanceof Error ? err.message : String(err),
         });
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        // SSE frames separated by \n\n
-        let idx;
-        while ((idx = buffer.indexOf("\n\n")) !== -1) {
-          const frame = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-          handleFrame(frame, {
-            appendEvent,
-            upsertInterrupt,
-            threadId,
-          });
-        }
       }
     },
     [appendEvent, clearEvents, operationalPeriod, setSelectedThread, upsertInterrupt],

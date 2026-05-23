@@ -128,9 +128,17 @@ async def _run_and_stream(
 
 
 def _safe(value: Any) -> Any:
-    """Best-effort JSON-safe coercion (Pydantic models, etc.)."""
+    """Best-effort JSON-safe coercion (Pydantic models → dicts, recursive)."""
+    from pydantic import BaseModel as _BaseModel  # local import avoids circulars
+    if isinstance(value, _BaseModel):
+        return _safe(value.model_dump())
+    if isinstance(value, dict):
+        return {k: _safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_safe(v) for v in value]
     try:
-        json.dumps(value, default=str)
+        import json as _json
+        _json.dumps(value)
         return value
     except Exception:  # noqa: BLE001
         return str(value)
