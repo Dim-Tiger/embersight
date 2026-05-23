@@ -235,6 +235,83 @@ def _deterministic_narrative(fused: dict[str, Any]) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Flat-key projection for downstream consumers
+# --------------------------------------------------------------------------- #
+
+
+def _flat_wx_keys(
+    rtma: dict[str, Any],
+    hrrr_hourly: list[dict[str, Any]],
+    critical: dict[str, Any] | None,
+    raws: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the richest source into the flat keys spread_simulation expects.
+
+    Source preference per key: RTMA now → HRRR f=0 → critical window → latest RAWS.
+    Defaults match spread_simulation's hardcoded fallbacks (15 mph @ 270°,
+    20% RH, 90°F) so the degraded path stays deterministic.
+    """
+
+    def _first_non_none(*candidates: Any) -> Any:
+        for c in candidates:
+            if c is not None:
+                return c
+        return None
+
+    hrrr0 = next(
+        (h for h in hrrr_hourly if h.get("fxx") == 0),
+        None,
+    ) or {}
+    crit = critical or {}
+    raws_latest: dict[str, Any] = {}
+    for st in raws.get("stations", []):
+        latest = st.get("latest") or {}
+        raws_latest = {
+            "wind_speed_mph": (latest.get("wind_speed") or {}).get("value"),
+            "wind_dir_deg": (latest.get("wind_direction") or {}).get("value"),
+            "temp_f": (latest.get("air_temp") or {}).get("value"),
+            "rh_pct": (latest.get("relative_humidity") or {}).get("value"),
+        }
+        break
+
+    wind_speed = _first_non_none(
+        rtma.get("wind_speed_mph"),
+        hrrr0.get("wind_speed_mph"),
+        crit.get("wind_speed_mph"),
+        raws_latest.get("wind_speed_mph"),
+        15.0,
+    )
+    wind_dir = _first_non_none(
+        rtma.get("wind_direction_deg"),
+        hrrr0.get("wind_direction_deg"),
+        crit.get("wind_direction_deg"),
+        raws_latest.get("wind_dir_deg"),
+        270.0,
+    )
+    temp_f = _first_non_none(
+        rtma.get("temp_f"),
+        hrrr0.get("temp_f"),
+        crit.get("temp_f"),
+        raws_latest.get("temp_f"),
+        90.0,
+    )
+    rh = _first_non_none(
+        rtma.get("rh_pct"),
+        hrrr0.get("rh_pct"),
+        crit.get("rh_pct"),
+        raws_latest.get("rh_pct"),
+        20.0,
+    )
+    return {
+        "wind_speed_mph": float(wind_speed),
+        "wind_dir_deg": float(wind_dir),
+        "temp_f": float(temp_f),
+        "rh_pct": float(rh),
+        "fuel_moisture": {},  # weather_wind has no fuel-moisture pipeline yet
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Concurrent fetch
 # --------------------------------------------------------------------------- #
 
@@ -378,10 +455,23 @@ async def run(state: AgentState) -> dict:
         reasoning_trace_id=str(uuid.uuid4()),
     )
 
+    # Flat top-level keys for downstream consumers (spread_simulation).
+    # Source preference: RTMA now → HRRR f=0 → critical window → first RAWS.
+    # Defaults match spread_simulation's `_extract_weather` fallbacks so a
+    # silent-degrade path remains deterministic.
+    flat = _flat_wx_keys(rtma, hrrr_hourly, critical, raws)
+
     output = AgentOutput(
         agent=AGENT_NAME,
         narrative=narrative,
         payload={
+            # Flat keys: contract with spread_simulation._extract_weather.
+            "wind_speed_mph": flat["wind_speed_mph"],
+            "wind_dir_deg": flat["wind_dir_deg"],
+            "temp_f": flat["temp_f"],
+            "rh_pct": flat["rh_pct"],
+            "fuel_moisture": flat["fuel_moisture"],
+            # Detailed structures for the UI / debugging.
             "red_flag": red_flag,
             "critical_window": critical,
             "hrrr_hourly": hrrr_hourly,

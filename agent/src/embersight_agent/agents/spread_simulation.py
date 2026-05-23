@@ -169,16 +169,39 @@ def _cones_to_geojson(
     lat0: float,
     lon0: float,
     polygon_local_to_geojson_fn: Any,
-) -> dict:
-    """Convert monte_carlo_cone output to {hour: [gj_p25, gj_p50, gj_p75, gj_p95]}."""
-    out: dict = {}
+) -> tuple[dict, dict]:
+    """Convert monte_carlo_cone output to two parallel dicts:
+
+    - ``cones`` — primary, ``{"1h": gj_p50, "6h": gj_p50, "12h": gj_p50, "24h": gj_p50}``.
+      One GeoJSON polygon per horizon (the p50 ensemble band). This is the
+      canonical "expected cone" consumed by ``values_at_risk`` and
+      ``evacuation_intelligence`` for spatial intersection.
+    - ``cone_bands`` — detail, ``{"1h": {"p25": gj, "p50": gj, "p75": gj, "p95": gj}, ...}``.
+      Full quantile bands for richer UI rendering (uncertainty fans).
+
+    Keys are strings ("1h", "6h", "12h", "24h") because every downstream
+    consumer reads string keys.
+    """
+    cones: dict = {}
+    bands_out: dict = {}
     for h in (1, 6, 12, 24):
-        if h not in mc_result:
-            out[h] = [None, None, None, None]
+        key = f"{h}h"
+        entry = mc_result.get(h)
+        if entry is None:
+            cones[key] = None
+            bands_out[key] = {"p25": None, "p50": None, "p75": None, "p95": None}
             continue
-        bands = mc_result[h].get("bands", [None, None, None, None])
-        out[h] = [polygon_local_to_geojson_fn(b, lat0, lon0) for b in bands]
-    return out
+        raw_bands = entry.get("bands", [None, None, None, None])
+        gj_bands = [polygon_local_to_geojson_fn(b, lat0, lon0) for b in raw_bands]
+        # raw_bands is [p25, p50, p75, p95]; canonical cone = p50.
+        cones[key] = gj_bands[1] if len(gj_bands) > 1 else None
+        bands_out[key] = {
+            "p25": gj_bands[0] if len(gj_bands) > 0 else None,
+            "p50": gj_bands[1] if len(gj_bands) > 1 else None,
+            "p75": gj_bands[2] if len(gj_bands) > 2 else None,
+            "p95": gj_bands[3] if len(gj_bands) > 3 else None,
+        }
+    return cones, bands_out
 
 
 # --------------------------------------------------------------------------- #
@@ -267,7 +290,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     # ------------------------------------------------------------------ #
     # 5. GeoJSON cones for downstream agents
     # ------------------------------------------------------------------ #
-    cones_geojson = _cones_to_geojson(
+    cones_geojson, cone_bands = _cones_to_geojson(
         mc_result, lat0, lon0, tools["polygon_local_to_geojson"]
     )
 
@@ -439,6 +462,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901
         payload={
             "key_findings": key_findings,
             "cones": cones_geojson,
+            "cone_bands": cone_bands,
             "head_ros_chains_per_hr": round(meta.get("ros_fpm_mean", 0.0) * 60.0 / 66.0, 2),
             "head_ros_fpm_mean": round(meta.get("ros_fpm_mean", 0.0), 1),
             "head_ros_fpm_std": round(meta.get("ros_fpm_std", 0.0), 1),
@@ -473,7 +497,13 @@ def _low_confidence_output(incident_name: str, reason: str) -> AgentOutput:
         narrative=f"[{AGENT_NAME}] {reason}",
         payload={
             "key_findings": [reason],
-            "cones": {"1": None, "6": None, "12": None, "24": None},
+            "cones": {"1h": None, "6h": None, "12h": None, "24h": None},
+            "cone_bands": {
+                "1h": {"p25": None, "p50": None, "p75": None, "p95": None},
+                "6h": {"p25": None, "p50": None, "p75": None, "p95": None},
+                "12h": {"p25": None, "p50": None, "p75": None, "p95": None},
+                "24h": {"p25": None, "p50": None, "p75": None, "p95": None},
+            },
             "head_ros_chains_per_hr": None,
             "flame_length_ft": None,
             "trigger_breaches": [],
@@ -578,10 +608,18 @@ if __name__ == "__main__":
         print(f"head ROS     : {out.payload.get('head_ros_chains_per_hr')} chains/hr")
         print(f"flame length : {out.payload.get('flame_length_ft')} ft")
         cones = out.payload.get("cones", {})
+        bands = out.payload.get("cone_bands", {})
         for h in (1, 6, 12, 24):
-            bands = cones.get(h, [None, None, None, None])
-            has_p25 = bands[0] is not None if bands else False
-            print(f"  cone {h:2d}h   : {'p25 present' if has_p25 else 'MISSING'}")
+            key = f"{h}h"
+            cone_p50 = cones.get(key)
+            band_p25 = (bands.get(key) or {}).get("p25")
+            has_p50 = cone_p50 is not None
+            has_p25 = band_p25 is not None
+            print(
+                f"  cone {h:2d}h   : "
+                f"{'p50 present' if has_p50 else 'MISSING p50'}, "
+                f"{'p25 band present' if has_p25 else 'MISSING p25 band'}"
+            )
         print()
 
     # ------------------------------------------------------------------ #

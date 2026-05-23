@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync*)",
+      "Bash(uv pip*)",
+      "Bash(uv tree*)",
+      "Bash(uv lock*)",
+      "Bash(uv export*)",
+      "Bash(uv run pytest*)",
+      "Bash(uv run python -m embersight_agent*)",
+      "Bash(uv run python -c *)",
+      "Bash(uv run ruff*)",
+      "Bash(uv run mypy*)",
+      "Bash(uv run pyright*)",
+      "Bash(pnpm install*)",
+      "Bash(pnpm ls*)",
+      "Bash(pnpm typecheck*)",
+      "Bash(pnpm lint*)",
+      "Bash(pnpm build*)",
+      "Bash(pnpm test*)",
+      "Bash(curl -s http://localhost:*)",
+      "Bash(curl http://localhost:*)",
+      "Bash(curl -fsS http://localhost:*)",
+      "Bash(curl -X POST http://localhost:*)",
+      "Bash(mkdir -p *)",
+      "Bash(rm -f /tmp/*)",
+      "Bash(rm /tmp/*)"
+    ]
+  }
+}
