@@ -18,6 +18,28 @@ export type AgentEvent = {
   run_id?: string;
 };
 
+export type CitationBundle = {
+  datasets?: Array<{
+    name?: string;
+    version?: string | null;
+    timestamp?: string | null;
+    url?: string | null;
+  }>;
+  models?: Array<{ name?: string; version?: string | null }>;
+  reasoning_trace_id?: string | null;
+};
+
+export type AgentOutput = {
+  agent: string;
+  narrative: string;
+  payload: Record<string, unknown>;
+  confidence: number;
+  confidence_driver?: string;
+  citation_bundle?: CitationBundle;
+};
+
+export type AgentStatus = "pending" | "running" | "done" | "error";
+
 export type PendingInterrupt = {
   thread_id: string;
   interrupt: {
@@ -38,6 +60,14 @@ export type MapViewport = {
   zoom: number;
 };
 
+export type ChatMessage = {
+  id: string;
+  role: "user" | "agent";
+  text: string;
+  ts: number;
+  agentName?: string;
+};
+
 export type Store = {
   selectedIncidentId: string | null;
   selectedThreadId: string | null;
@@ -45,14 +75,34 @@ export type Store = {
   mapViewport: MapViewport;
   operationalPeriod: number;
   agentEvents: AgentEvent[];
+  agentOutputs: Record<string, AgentOutput>;
+  agentStatuses: Record<string, AgentStatus>;
   pendingInterrupts: PendingInterrupt[];
+  streaming: boolean;
+  done: boolean;
+  errorMessage: string | null;
+  connectionStatus: "idle" | "posting" | "responded" | "consuming" | "closed";
+  chunkCount: number;
+  frameCount: number;
+  chat: ChatMessage[];
+  pendingUserQuery: string | null;
   setSelectedIncident: (id: string | null) => void;
   setSelectedThread: (id: string | null) => void;
   setActiveTab: (t: Tab) => void;
   setViewport: (v: MapViewport) => void;
   setOperationalPeriod: (n: number) => void;
   appendEvent: (e: AgentEvent) => void;
-  clearEvents: () => void;
+  setAgentOutput: (name: string, output: AgentOutput) => void;
+  setAgentStatus: (name: string, status: AgentStatus) => void;
+  clearRun: () => void;
+  setStreaming: (b: boolean) => void;
+  setDone: (b: boolean) => void;
+  setError: (m: string | null) => void;
+  setConnectionStatus: (s: Store["connectionStatus"]) => void;
+  incChunk: () => void;
+  incFrame: () => void;
+  appendChat: (m: ChatMessage) => void;
+  setPendingUserQuery: (q: string | null) => void;
   upsertInterrupt: (i: PendingInterrupt) => void;
   removeInterrupt: (id?: string) => void;
   restartCount: number;
@@ -72,7 +122,17 @@ export const useStore = create<Store>((set) => ({
   mapViewport: DEFAULT_VIEWPORT,
   operationalPeriod: 1,
   agentEvents: [],
+  agentOutputs: {},
+  agentStatuses: {},
   pendingInterrupts: [],
+  streaming: false,
+  done: false,
+  errorMessage: null,
+  connectionStatus: "idle",
+  chunkCount: 0,
+  frameCount: 0,
+  chat: [],
+  pendingUserQuery: null,
   restartCount: 0,
   setSelectedIncident: (id) => set({ selectedIncidentId: id }),
   setSelectedThread: (id) => set({ selectedThreadId: id }),
@@ -81,7 +141,34 @@ export const useStore = create<Store>((set) => ({
   setOperationalPeriod: (n) => set({ operationalPeriod: n }),
   appendEvent: (e) =>
     set((s) => ({ agentEvents: [...s.agentEvents.slice(-499), e] })),
-  clearEvents: () => set({ agentEvents: [] }),
+  setAgentOutput: (name, output) =>
+    set((s) => ({
+      agentOutputs: { ...s.agentOutputs, [name]: output },
+      agentStatuses: { ...s.agentStatuses, [name]: "done" },
+    })),
+  setAgentStatus: (name, status) =>
+    set((s) => ({ agentStatuses: { ...s.agentStatuses, [name]: status } })),
+  clearRun: () =>
+    set({
+      agentEvents: [],
+      agentOutputs: {},
+      agentStatuses: {},
+      pendingInterrupts: [],
+      streaming: false,
+      done: false,
+      errorMessage: null,
+      connectionStatus: "idle",
+      chunkCount: 0,
+      frameCount: 0,
+    }),
+  setStreaming: (b) => set({ streaming: b }),
+  setDone: (b) => set({ done: b }),
+  setError: (m) => set({ errorMessage: m }),
+  setConnectionStatus: (s) => set({ connectionStatus: s }),
+  incChunk: () => set((s) => ({ chunkCount: s.chunkCount + 1 })),
+  incFrame: () => set((s) => ({ frameCount: s.frameCount + 1 })),
+  appendChat: (m) => set((s) => ({ chat: [...s.chat.slice(-199), m] })),
+  setPendingUserQuery: (q) => set({ pendingUserQuery: q }),
   requestRestart: () => set((s) => ({ restartCount: s.restartCount + 1 })),
   upsertInterrupt: (i) =>
     set((s) => {
@@ -98,3 +185,29 @@ export const useStore = create<Store>((set) => ({
       ),
     })),
 }));
+
+export const AGENT_ORDER = [
+  "orchestrator",
+  "weather_wind",
+  "terrain_fuel",
+  "values_at_risk",
+  "routing_staging",
+  "spread_simulation",
+  "resource_recommendation",
+  "evacuation_intelligence",
+  "master_ic",
+] as const;
+
+export type AgentName = (typeof AGENT_ORDER)[number];
+
+export const AGENT_LABELS: Record<string, string> = {
+  orchestrator: "Orchestrator",
+  weather_wind: "Weather & Wind",
+  terrain_fuel: "Terrain & Fuel",
+  values_at_risk: "Values at Risk",
+  routing_staging: "Routing & Staging",
+  spread_simulation: "Spread Simulation",
+  resource_recommendation: "Resources",
+  evacuation_intelligence: "Evacuation Intel",
+  master_ic: "Master IC",
+};

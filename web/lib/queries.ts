@@ -1,6 +1,8 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { consumeAgentSse } from "@/lib/sse";
+import { useStore } from "@/lib/store";
 
 export type Incident = {
   id: string;
@@ -72,6 +74,12 @@ export function usePerimeter(
   });
 }
 
+/**
+ * Resume a paused interrupt. We must actually consume the SSE body so the
+ * FastAPI generator keeps running (the EventSourceResponse generator only
+ * advances while its body is being read). Continuation events are routed
+ * back into the same store through `consumeResumeStream`.
+ */
 export async function postResume(
   threadId: string,
   decision: Record<string, unknown>,
@@ -81,7 +89,14 @@ export async function postResume(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ thread_id: threadId, decision }),
   });
-  if (!r.ok) throw new Error(`resume ${r.status}`);
-  // We don't need to consume the SSE response here; the active stream
-  // listener picks up subsequent events for the thread.
+  if (!r.ok || !r.body) throw new Error(`resume ${r.status}`);
+  // Pump the resumed SSE through the same store handlers. We fire-and-forget
+  // so the approval button returns immediately; continuation events keep
+  // flowing into the dashboard as the graph advances post-interrupt.
+  const store = useStore.getState();
+  store.setStreaming(true);
+  store.setDone(false);
+  void consumeAgentSse(r.body, threadId).finally(() => {
+    useStore.getState().setStreaming(false);
+  });
 }
