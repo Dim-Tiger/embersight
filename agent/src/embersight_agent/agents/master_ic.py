@@ -1,39 +1,53 @@
 """Master IC synthesis agent.
 
-Reads every subagent output, drafts the appropriate ICS form bundle for the
-current operational period (ICS-201 for op period 1; ICS-202 / 204 / 215 /
-215A bundle for later periods), and ALWAYS pauses on an ``iap_approval``
-interrupt before the draft is considered actionable.
+Reads every upstream subagent output, runs a Claude Sonnet 4.5 synthesis
+pass to draft the appropriate ICS form bundle for the current operational
+period (ICS-201 for op period 1; ICS-202 + 203 + 204 + 215 + 215A for
+later periods), builds a dissent log from low-confidence and
+inter-agent-contradicting upstream claims, and ALWAYS pauses on the
+`iap_approval` interrupt before the draft is considered actionable.
 
-Verb constraint -- repeated here so future readers cannot miss it: this
-module never produces the action verbs ``dispatch``, ``order``, ``send``,
-or ``publish``. Every imperative is phrased as ``RECOMMEND`` / ``PROPOSE``
-/ ``DRAFT`` / ``SUGGEST``. A human Incident Commander is the only actor
-that can act on these draft artifacts. Build-time grep over this file
-should surface those four verbs only inside this constraint docstring.
+Hard repo rules enforced here (this agent is the canonical exemplar):
+- No function/tool named ``dispatch_*`` / ``order_*`` / ``send_*`` /
+  ``publish_*``. Master IC only DRAFTs; the human IC turns drafts into
+  action.
+- All user-facing verbs are ``RECOMMEND`` / ``PROPOSED`` / ``DRAFT`` /
+  ``SUGGEST``. A post-synthesis regex sweep retries once if the model
+  slips, then falls back to a deterministic draft.
+- Harmonic-mean confidence over upstream subagents — a single low or
+  missing input strongly drags the synthesis confidence toward zero.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import re
+import statistics
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from ..hitl import audit_entry, request_human_decision
-from ..state import AgentOutput, AgentState, CitationBundle, Dataset, Model
+from ..state import (
+    AgentOutput,
+    AgentState,
+    CitationBundle,
+    Dataset,
+    Incident,
+    Model,
+)
 
 AGENT_NAME = "master_ic"
 
-_DEFAULT_MODEL = "claude-sonnet-4-5"
-_PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "master_ic.md"
+# Default to Claude Sonnet 4.5 for synthesis. Override with the env var
+# below if the deployment pins a different snapshot.
+MODEL_ID = os.environ.get("EMBERSIGHT_MASTER_IC_MODEL", "claude-sonnet-4-5")
 
-_UPSTREAM_AGENTS: tuple[str, ...] = (
+UPSTREAM_AGENTS: tuple[str, ...] = (
     "weather_wind",
     "terrain_fuel",
     "values_at_risk",
@@ -43,145 +57,24 @@ _UPSTREAM_AGENTS: tuple[str, ...] = (
     "evacuation_intelligence",
 )
 
-_ICS_SCHEMA_REF = Dataset(
-    name="FEMA NIMS ICS Forms (2010 rev.)",
-    version="2010",
-    url="https://www.fema.gov/emergency-managers/nims/components#ics-forms",
+# Words the synthesis is NEVER allowed to use in user-facing text. The
+# Master IC drafts only; turning a draft into a real-world action is the
+# human IC's job. The regex is grep-able so reviewers can confirm the
+# constraint lives in code, not in prompt text alone.
+FORBIDDEN_VERBS: tuple[str, ...] = ("dispatch", "order", "send", "publish")
+_FORBIDDEN_RE = re.compile(
+    r"\b(?:" + "|".join(FORBIDDEN_VERBS) + r")(?:ed|ing|s)?\b",
+    re.IGNORECASE,
 )
 
+# Reference URLs used in the citation bundle. NWCG PMS 310-1 is the IRPG
+# resource typing canon; FEMA hosts the canonical ICS form PDFs.
+ICS_201_REFERENCE_URL = (
+    "https://training.fema.gov/icsresource/icsforms.aspx"
+)
+NWCG_IAP_REFERENCE_URL = "https://www.nwcg.gov/publications/pms310-1"
 
-# --------------------------------------------------------------------------- #
-# Pydantic schema for structured LLM output
-# --------------------------------------------------------------------------- #
-
-
-class IAPSection(BaseModel):
-    """One labelled section of the draft (e.g. 'Situation', 'Objectives')."""
-
-    title: str
-    body: str
-
-
-class Assignment(BaseModel):
-    """One Division/Group line on ICS-204 (op-period 2+)."""
-
-    division: str
-    resources: list[str] = Field(default_factory=list)
-    work_assignment: str
-    special_instructions: str = ""
-
-
-class IAPDraftModel(BaseModel):
-    """Structured output the synthesis LLM must produce.
-
-    Note: every imperative in ``objectives`` / ``assignments`` /
-    ``sections.body`` must read ``RECOMMEND`` / ``PROPOSE`` / ``DRAFT`` /
-    ``SUGGEST`` per the system prompt's verb constraint.
-    """
-
-    form: str
-    operational_period: int
-    objectives: list[str]
-    sections: list[IAPSection]
-    assignments: list[Assignment] = Field(default_factory=list)
-    key_findings: list[str]
-    safety_message: str
-
-
-# --------------------------------------------------------------------------- #
-# Dissent detection
-# --------------------------------------------------------------------------- #
-
-
-def _low_confidence_entries(state: AgentState) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for name, ao in state.outputs.items():
-        if ao.confidence < 0.5:
-            out.append(
-                {
-                    "agent": name,
-                    "kind": "low_confidence",
-                    "confidence": ao.confidence,
-                    "concern": (
-                        f"{name} reported confidence {ao.confidence:.2f} < 0.5 "
-                        f"({ao.confidence_driver or 'no driver given'})."
-                    ),
-                    "rationale": (
-                        "Surfaced for IC review; synthesis proceeded but flagged."
-                    ),
-                }
-            )
-    return out
-
-
-def _conflict_entries(state: AgentState) -> list[dict[str, Any]]:
-    """Detect known cross-agent conflict patterns.
-
-    Wired pair: spread_simulation flagging high-risk zones while
-    values_at_risk reports no structures sitting in those zones. Add more
-    patterns as upstream payload shapes stabilize.
-    """
-    entries: list[dict[str, Any]] = []
-    spread = state.outputs.get("spread_simulation")
-    var = state.outputs.get("values_at_risk")
-    if spread is not None and var is not None:
-        spread_high = bool(
-            spread.payload.get("high_risk_zones")
-            or spread.payload.get("trigger_breached")
-        )
-        structures = var.payload.get("structures_at_risk")
-        in_cone = var.payload.get("structures_in_cone")
-        var_empty = structures == [] or in_cone == 0
-        if spread_high and var_empty:
-            entries.append(
-                {
-                    "agents": ["spread_simulation", "values_at_risk"],
-                    "kind": "conflict",
-                    "concern": (
-                        "spread_simulation flagged high-risk zones "
-                        f"({spread.payload.get('high_risk_zones')}) but "
-                        "values_at_risk reports no structures in those zones."
-                    ),
-                    "rationale": (
-                        "Possible spatial-extent disagreement between models; "
-                        "IC must reconcile before approving assignments."
-                    ),
-                }
-            )
-    return entries
-
-
-def _build_dissent_log(state: AgentState) -> list[dict[str, Any]]:
-    return [*_low_confidence_entries(state), *_conflict_entries(state)]
-
-
-# --------------------------------------------------------------------------- #
-# Confidence aggregation
-# --------------------------------------------------------------------------- #
-
-
-def _harmonic_mean(values: list[float]) -> float:
-    """Harmonic mean -- a single low input drags the aggregate down hard."""
-    clean = [v for v in values if v > 0]
-    if not clean:
-        return 0.0
-    return len(clean) / sum(1.0 / v for v in clean)
-
-
-def _aggregate_confidence(state: AgentState) -> tuple[float, str]:
-    upstream = [
-        state.outputs[a].confidence
-        for a in _UPSTREAM_AGENTS
-        if a in state.outputs
-    ]
-    if not upstream:
-        return 0.0, "no upstream outputs available"
-    hm = _harmonic_mean(upstream)
-    driver = (
-        f"harmonic mean of {len(upstream)} upstream confidences "
-        f"(min={min(upstream):.2f}, max={max(upstream):.2f})"
-    )
-    return round(hm, 3), driver
+log = logging.getLogger("embersight.master_ic")
 
 
 # --------------------------------------------------------------------------- #
@@ -189,240 +82,610 @@ def _aggregate_confidence(state: AgentState) -> tuple[float, str]:
 # --------------------------------------------------------------------------- #
 
 
-def _form_for(op_period: int) -> str:
+def _form_type(op_period: int) -> str:
+    """Op-period-1 gets ICS-201 (incident briefing). Later periods get the
+    full IAP bundle (202 objectives, 203 org, 204 assignments, 215 planning
+    worksheet, 215A safety analysis)."""
     return "ICS-201" if op_period <= 1 else "ICS-202-bundle"
 
 
 # --------------------------------------------------------------------------- #
-# Upstream packaging for the LLM
+# Confidence aggregation
 # --------------------------------------------------------------------------- #
 
 
-def _condense_upstream(state: AgentState) -> dict[str, Any]:
-    bundle: dict[str, Any] = {}
-    for name in _UPSTREAM_AGENTS:
-        ao = state.outputs.get(name)
-        if ao is None:
-            bundle[name] = {"missing": True}
+def _harmonic_mean_confidence(state: AgentState) -> tuple[float, str]:
+    """Harmonic mean of upstream subagent confidences.
+
+    Returns ``(value, driver_string)``. Returns ``0.0`` if any upstream
+    agent is missing or reports confidence == 0 — harmonic mean is the
+    right aggregator here because a single weak input should drag the
+    synthesis confidence toward zero rather than be averaged out.
+    """
+    values: list[float] = []
+    missing: list[str] = []
+    for name in UPSTREAM_AGENTS:
+        out = state.outputs.get(name)
+        if out is None:
+            missing.append(name)
             continue
-        bundle[name] = {
-            "narrative": ao.narrative,
-            "payload": ao.payload,
-            "confidence": ao.confidence,
-            "confidence_driver": ao.confidence_driver,
-            "reasoning_trace_id": ao.citation_bundle.reasoning_trace_id,
-        }
-    return bundle
+        values.append(float(out.confidence))
+
+    if missing:
+        return 0.0, f"missing upstream outputs: {', '.join(missing)}"
+    if any(v <= 0.0 for v in values):
+        zero_agents = [
+            name
+            for name, v in zip(UPSTREAM_AGENTS, values, strict=True)
+            if v <= 0.0
+        ]
+        return 0.0, f"zero-confidence upstream: {', '.join(zero_agents)}"
+
+    hmean = statistics.harmonic_mean(values)
+    return round(hmean, 3), (
+        "harmonic mean of upstream subagent confidences "
+        f"(n={len(values)}, min={min(values):.2f}, max={max(values):.2f})"
+    )
 
 
 # --------------------------------------------------------------------------- #
-# LLM synthesis
+# Dissent detection
 # --------------------------------------------------------------------------- #
 
 
-def _read_system_prompt() -> str:
+def _payload_text(out: AgentOutput | None) -> str:
+    """Flatten an output's narrative + payload to lowercase searchable text."""
+    if out is None:
+        return ""
     try:
-        return _PROMPT_PATH.read_text()
-    except OSError:
-        return "You are the Master IC synthesis agent. Draft an ICS form."
+        body = json.dumps(out.payload, default=str)
+    except Exception:  # noqa: BLE001
+        body = str(out.payload)
+    return (out.narrative + " " + body).lower()
+
+
+def _dissent_entry(
+    source_agent: str,
+    conflicting_agent: str | None,
+    claim_a: str,
+    claim_b: str,
+    severity: str,
+    rationale: str,
+) -> dict[str, Any]:
+    return {
+        "source_agent": source_agent,
+        "conflicting_agent": conflicting_agent,
+        "claim_a": claim_a,
+        "claim_b": claim_b,
+        "severity": severity,
+        "rationale": rationale,
+    }
+
+
+def _detect_dissent(state: AgentState) -> list[dict[str, Any]]:
+    """Build the dissent log from upstream outputs.
+
+    Two classes of dissent are flagged:
+
+    1. **Low-confidence** — any upstream subagent with confidence < 0.5.
+       Synthesis can proceed but the draft must surface the uncertainty.
+    2. **Inter-agent contradiction** — heuristic keyword checks across
+       pairs of agents whose outputs disagree (e.g. high spread risk to a
+       zone the values inventory says is empty; heavy-resource recommendation
+       against light fuel; closed primary egress while evac plan still
+       routes through it).
+    """
+    dissents: list[dict[str, Any]] = []
+    outputs = state.outputs
+
+    # 1) Missing-upstream dissent (synthesis still proceeds with stub gaps).
+    for name in UPSTREAM_AGENTS:
+        if name not in outputs:
+            dissents.append(
+                _dissent_entry(
+                    source_agent=name,
+                    conflicting_agent=None,
+                    claim_a="(no output)",
+                    claim_b="synthesis assumed neutral / placeholder values",
+                    severity="high",
+                    rationale=(
+                        f"{name} did not return; downstream IAP sections "
+                        "depending on it should be treated as preliminary."
+                    ),
+                )
+            )
+
+    # 2) Low-confidence dissent.
+    for name in UPSTREAM_AGENTS:
+        out = outputs.get(name)
+        if out is None:
+            continue
+        if out.confidence < 0.5:
+            dissents.append(
+                _dissent_entry(
+                    source_agent=name,
+                    conflicting_agent=None,
+                    claim_a=(
+                        f"{name} reported confidence {out.confidence:.2f} — "
+                        f"driver: {out.confidence_driver or 'unspecified'}"
+                    ),
+                    claim_b=(
+                        "synthesis incorporated this input despite the low "
+                        "confidence score"
+                    ),
+                    severity="medium" if out.confidence >= 0.3 else "high",
+                    rationale=(
+                        "Low-confidence inputs must be surfaced to the IC "
+                        "so the approval decision is informed."
+                    ),
+                )
+            )
+
+    # 3) Spread-vs-Values contradiction.
+    spread = outputs.get("spread_simulation")
+    values = outputs.get("values_at_risk")
+    if spread is not None and values is not None:
+        spread_txt = _payload_text(spread)
+        values_txt = _payload_text(values)
+        spread_high = any(
+            tok in spread_txt
+            for tok in ("high risk", "high-risk", '"high"', "severe", "critical")
+        )
+        values_empty = any(
+            tok in values_txt
+            for tok in (
+                "no structures",
+                "zero structures",
+                '"structures_count": 0',
+                "structures_count: 0",
+                "no values at risk",
+                "no values-at-risk",
+            )
+        )
+        if spread_high and values_empty:
+            dissents.append(
+                _dissent_entry(
+                    source_agent="spread_simulation",
+                    conflicting_agent="values_at_risk",
+                    claim_a="spread simulation flags high-risk projected burn area",
+                    claim_b="values-at-risk inventory reports no structures in cone",
+                    severity="medium",
+                    rationale=(
+                        "Spread severity without exposed values implies a "
+                        "pure-suppression posture; IC should confirm before "
+                        "DRAFTing structure protection assignments."
+                    ),
+                )
+            )
+
+    # 4) Resource-vs-Terrain overkill / underkill.
+    resource = outputs.get("resource_recommendation")
+    terrain = outputs.get("terrain_fuel")
+    if resource is not None and terrain is not None:
+        r_txt = _payload_text(resource)
+        t_txt = _payload_text(terrain)
+        heavy = any(
+            tok in r_txt
+            for tok in ("type 1", "type-1", "type_1", "hotshot", "iht", "tanker")
+        )
+        light_fuel = any(
+            tok in t_txt
+            for tok in ("light grass", "gr1", "gr2", "grass fuel", "fbfm 1", "fuel light")
+        )
+        if heavy and light_fuel:
+            dissents.append(
+                _dissent_entry(
+                    source_agent="resource_recommendation",
+                    conflicting_agent="terrain_fuel",
+                    claim_a="resource rec proposes Type-1 / hotshot assets",
+                    claim_b="terrain/fuel characterization indicates light grass fuel",
+                    severity="medium",
+                    rationale=(
+                        "Type-1 assets against GR1/GR2 fuel may be overkill; "
+                        "IC should confirm fuel model before approving."
+                    ),
+                )
+            )
+
+    # 5) Routing-vs-Evacuation contradiction.
+    routing = outputs.get("routing_staging")
+    evac = outputs.get("evacuation_intelligence")
+    if routing is not None and evac is not None:
+        ro_txt = _payload_text(routing)
+        ev_txt = _payload_text(evac)
+        if "closed" in ro_txt and ("primary egress" in ev_txt or "primary route" in ev_txt):
+            dissents.append(
+                _dissent_entry(
+                    source_agent="routing_staging",
+                    conflicting_agent="evacuation_intelligence",
+                    claim_a="routing reports closures on candidate roads",
+                    claim_b="evacuation plan still references primary egress routes",
+                    severity="high",
+                    rationale=(
+                        "A closed primary egress invalidates the evac route; "
+                        "IC must reconcile before approving the IAP."
+                    ),
+                )
+            )
+
+    return dissents
+
+
+# --------------------------------------------------------------------------- #
+# Prompt assembly
+# --------------------------------------------------------------------------- #
+
+
+def _load_system_prompt() -> str:
+    p = Path(__file__).resolve().parent.parent / "prompts" / "master_ic.md"
+    base = p.read_text() if p.exists() else ""
+    # Addendum repeats the verb constraint with explicit instructions on how
+    # to rephrase common action verbs. Reviewers: the forbidden words appear
+    # here only inside a 'NEVER use' list — this is the documented escape.
+    addendum = (
+        "\n\n## HARD CONSTRAINT (enforced by post-synthesis regex)\n"
+        "You must NOT use any of these words anywhere in your output, "
+        "neither as a verb nor a noun: dispatch, order, send, publish "
+        "(or their conjugations: dispatched, dispatching, ordered, sending, "
+        "published, etc.).\n\n"
+        "Use these instead:\n"
+        "- Instead of 'dispatch X' write 'RECOMMEND mobilization of X'\n"
+        "- Instead of 'order N units' write 'PROPOSED N units' or 'DRAFT request for N units'\n"
+        "- Instead of 'send notification' write 'DRAFT notification' or 'SUGGEST notification'\n"
+        "- Instead of 'publish IAP' write 'DRAFT IAP for IC approval'\n\n"
+        "## Output format\n"
+        "Respond ONLY with a single fenced JSON block (```json ... ```). The "
+        "JSON object MUST contain these top-level keys:\n"
+        "- form: \"ICS-201\" or \"ICS-202-bundle\"\n"
+        "- operational_period: int\n"
+        "- objectives: list[str] (first entry MUST be a life-safety objective)\n"
+        "- key_findings: list[str] (top 5 most important per-section highlights)\n"
+        "- sections: object (form-specific; see below)\n"
+        "- dissent_log_acknowledgment: list[str] (one short sentence per dissent entry from the upstream dissent log)\n\n"
+        "For ICS-201, `sections` must include: incident_name, prepared_by, "
+        "map_sketch_placeholder, current_situation, planned_actions, "
+        "current_org_chart (with incident_commander, deputies, ops_section_chief, "
+        "planning_section_chief, logistics_section_chief, finance_section_chief), "
+        "resources_summary, immediate_concerns.\n\n"
+        "For ICS-202-bundle, `sections` must include `ics_202`, `ics_203`, "
+        "`ics_204` (list, one per Division/Group), `ics_215`, `ics_215a`. "
+        "Each is a structured object.\n"
+    )
+    return base + addendum
+
+
+def _serialize_upstream(state: AgentState) -> dict[str, Any]:
+    """Trim each upstream output to the fields the LLM actually needs."""
+    serialized: dict[str, Any] = {}
+    for name in UPSTREAM_AGENTS:
+        out = state.outputs.get(name)
+        if out is None:
+            serialized[name] = {"_missing": True}
+            continue
+        serialized[name] = {
+            "narrative": out.narrative,
+            "confidence": out.confidence,
+            "confidence_driver": out.confidence_driver,
+            "payload": out.payload,
+        }
+    return serialized
+
+
+def _build_user_message(
+    state: AgentState,
+    form_type: str,
+    dissent_log: list[dict[str, Any]],
+) -> str:
+    incident = state.incident.model_dump() if state.incident else None
+    body = {
+        "task": (
+            f"Draft an {form_type} for operational period "
+            f"{state.operational_period}. Output a single JSON object as "
+            "specified in the system prompt."
+        ),
+        "incident": incident,
+        "operational_period": state.operational_period,
+        "user_query": state.user_query,
+        "upstream_outputs": _serialize_upstream(state),
+        "dissent_log": dissent_log,
+    }
+    return json.dumps(body, indent=2, default=str)
+
+
+# --------------------------------------------------------------------------- #
+# LLM synthesis with verb-constraint retry
+# --------------------------------------------------------------------------- #
+
+
+def _extract_json_block(text: str) -> dict[str, Any]:
+    """Pull the first ```json ... ``` block, or fall back to the first
+    well-formed top-level object."""
+    fence = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence:
+        return json.loads(fence.group(1))
+    brace = re.search(r"(\{.*\})", text, re.DOTALL)
+    if brace:
+        return json.loads(brace.group(1))
+    raise ValueError("no JSON object found in LLM output")
+
+
+def _forbidden_hits(text: str) -> list[str]:
+    return [m.group(0) for m in _FORBIDDEN_RE.finditer(text)]
 
 
 async def _llm_synthesize(
     state: AgentState,
-    form: str,
-    upstream: dict[str, Any],
+    form_type: str,
     dissent_log: list[dict[str, Any]],
-) -> IAPDraftModel | None:
-    """Synthesize via claude-sonnet-4-5 using structured output.
+) -> dict[str, Any] | None:
+    """Run the Sonnet 4.5 synthesis pass with one verb-constraint retry.
 
-    Returns ``None`` (caller falls back to deterministic draft) when:
-      - ANTHROPIC_API_KEY is unset
-      - the langchain_anthropic import fails
-      - the LLM round-trip errors
+    Returns the parsed draft dict on success, or ``None`` if the API key is
+    missing or any of (network call, JSON parse, retry) fails — the caller
+    is responsible for falling back to the deterministic synthesis.
     """
     if not os.environ.get("ANTHROPIC_API_KEY"):
+        log.info("ANTHROPIC_API_KEY not set; skipping LLM synthesis")
         return None
+
     try:
         from langchain_anthropic import ChatAnthropic
+        from langchain_core.messages import HumanMessage, SystemMessage
     except ImportError:
+        log.warning("langchain_anthropic unavailable; using deterministic fallback")
         return None
 
-    model_id = os.environ.get("EMBERSIGHT_MODEL_MASTER_IC", _DEFAULT_MODEL)
-    if ":" in model_id:
-        model_id = model_id.split(":", 1)[1]
+    system_prompt = _load_system_prompt()
+    user_msg = _build_user_message(state, form_type, dissent_log)
 
     try:
-        llm = ChatAnthropic(model=model_id, max_tokens=4096, temperature=0.2)
-        structured = llm.with_structured_output(IAPDraftModel)
-    except Exception:  # noqa: BLE001 -- any client init failure -> fallback
+        llm = ChatAnthropic(model=MODEL_ID, temperature=0.2, max_tokens=4096)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ChatAnthropic init failed: %s", exc)
         return None
 
-    user_msg = json.dumps(
-        {
-            "instruction": (
-                f"Draft a {form} for operational period "
-                f"{state.operational_period}. Follow the verb constraint "
-                "stated in your system prompt strictly. First objective "
-                "MUST be a life-safety objective."
-            ),
-            "incident": state.incident.model_dump() if state.incident else None,
-            "upstream_outputs": upstream,
-            "dissent_log": dissent_log,
-            "user_query": state.user_query,
-        },
-        default=str,
-    )
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
 
-    try:
-        result = await structured.ainvoke(
-            [
-                {"role": "system", "content": _read_system_prompt()},
-                {"role": "user", "content": user_msg},
-            ]
-        )
-    except Exception:  # noqa: BLE001 -- any LLM error -> deterministic fallback
-        return None
+    for attempt in (1, 2):
+        try:
+            resp = await llm.ainvoke(messages)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("LLM call failed on attempt %d: %s", attempt, exc)
+            return None
 
-    if isinstance(result, IAPDraftModel):
-        return result
-    try:
-        return IAPDraftModel.model_validate(result)
-    except Exception:  # noqa: BLE001
-        return None
+        raw = resp.content if isinstance(resp.content, str) else str(resp.content)
+        hits = _forbidden_hits(raw)
+        if not hits:
+            try:
+                return _extract_json_block(raw)
+            except (ValueError, json.JSONDecodeError) as exc:
+                log.warning("JSON parse failed on attempt %d: %s", attempt, exc)
+                if attempt == 1:
+                    messages.append(resp)
+                    messages.append(
+                        HumanMessage(
+                            content=(
+                                "Your previous response was not valid JSON. "
+                                "Re-emit a single fenced ```json ... ``` block "
+                                "exactly matching the schema in the system prompt."
+                            )
+                        )
+                    )
+                    continue
+                return None
 
-
-# --------------------------------------------------------------------------- #
-# Deterministic fallback draft
-# --------------------------------------------------------------------------- #
-
-
-def _deterministic_draft(
-    state: AgentState,
-    form: str,
-    upstream: dict[str, Any],
-) -> IAPDraftModel:
-    op = state.operational_period
-    incident_name = state.incident.name if state.incident else "(unknown incident)"
-
-    objectives = [
-        (
-            "RECOMMEND life-safety first: protect responders and the public "
-            "within the projected spread cone."
-        ),
-        (
-            f"PROPOSE perimeter containment of {incident_name} at defensible "
-            "terrain features identified by terrain_fuel."
-        ),
-        (
-            "DRAFT structure-protection priorities for values-at-risk "
-            "identified by values_at_risk."
-        ),
-    ]
-
-    def _narr(key: str) -> str:
-        return str(upstream.get(key, {}).get("narrative", ""))
-
-    sections = [
-        IAPSection(
-            title="Situation Summary",
-            body=(
-                f"DRAFT situation summary for {incident_name} (op period {op}). "
-                "Synthesis based on the seven upstream subagent outputs; refer "
-                "to citations for individual reasoning traces."
-            ),
-        ),
-        IAPSection(title="Weather & Wind (watch items)", body=_narr("weather_wind")),
-        IAPSection(title="Terrain & Fuel", body=_narr("terrain_fuel")),
-        IAPSection(title="Spread Projection", body=_narr("spread_simulation")),
-        IAPSection(title="Values at Risk", body=_narr("values_at_risk")),
-        IAPSection(
-            title="PROPOSED Resource Posture",
-            body=_narr("resource_recommendation"),
-        ),
-        IAPSection(
-            title="DRAFT Evacuation Intent",
-            body=_narr("evacuation_intelligence"),
-        ),
-        IAPSection(
-            title="Routing & Staging (RECOMMENDED)",
-            body=_narr("routing_staging"),
-        ),
-    ]
-
-    assignments: list[Assignment] = []
-    if form == "ICS-202-bundle":
-        assignments = [
-            Assignment(
-                division="Div A (North Flank)",
-                resources=["RECOMMEND: 2x Type 3 engines, 1x dozer"],
-                work_assignment=(
-                    "DRAFT: hold the containment line at the ridge identified "
-                    "in terrain_fuel; coordinate with routing_staging for "
-                    "ingress."
-                ),
-                special_instructions=(
-                    "Refer to ICS-215A safety analysis; LCES required."
-                ),
-            ),
-            Assignment(
-                division="Div B (Structure Group)",
-                resources=["RECOMMEND: 4x Type 1 engines"],
-                work_assignment=(
-                    "PROPOSE structure triage along the values_at_risk priority "
-                    "list."
-                ),
-                special_instructions="Coordinate with evacuation_intelligence on phasing.",
-            ),
-        ]
-
-    key_findings = [
-        f"Form {form} drafted for op-period {op}.",
-        (
-            f"Synthesis aggregated "
-            f"{sum(1 for v in upstream.values() if not v.get('missing'))} "
-            "upstream subagent outputs."
-        ),
-        "All action verbs phrased as RECOMMEND / PROPOSE / DRAFT / SUGGEST.",
-    ]
-
-    safety_message = (
-        "RECOMMEND LCES (Lookouts, Communications, Escape routes, Safety zones) "
-        "compliance on every assignment. PROPOSE re-briefing of trigger points "
-        "before each operational shift. IC approval required before any "
-        "assignment becomes actionable."
-    )
-
-    return IAPDraftModel(
-        form=form,
-        operational_period=op,
-        objectives=objectives,
-        sections=sections,
-        assignments=assignments,
-        key_findings=key_findings,
-        safety_message=safety_message,
-    )
-
-
-# --------------------------------------------------------------------------- #
-# Citations
-# --------------------------------------------------------------------------- #
-
-
-def _build_citations(state: AgentState, mode: str) -> CitationBundle:
-    datasets = [_ICS_SCHEMA_REF]
-    for name in _UPSTREAM_AGENTS:
-        ao = state.outputs.get(name)
-        if ao is None:
-            continue
-        rid = ao.citation_bundle.reasoning_trace_id or ""
-        datasets.append(
-            Dataset(
-                name=f"upstream:{name}",
-                version=(rid[:8] if rid else "0"),
-                timestamp=datetime.now(timezone.utc).isoformat(),
+        # Forbidden verb hit — ask for a rewrite, then give up.
+        log.warning("forbidden verb hits on attempt %d: %s", attempt, hits)
+        if attempt == 1:
+            messages.append(resp)
+            messages.append(
+                HumanMessage(
+                    content=(
+                        "Your previous response contained these forbidden "
+                        f"words: {sorted(set(h.lower() for h in hits))}. "
+                        "Rewrite the draft using only RECOMMEND / PROPOSED / "
+                        "DRAFT / SUGGEST. Re-emit the full JSON block."
+                    )
+                )
             )
+            continue
+        return None
+
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic fallback synthesis
+# --------------------------------------------------------------------------- #
+
+
+def _deterministic_ics_201(
+    state: AgentState, dissent_log: list[dict[str, Any]]
+) -> dict[str, Any]:
+    incident = state.incident
+    inc_name = incident.name if incident else "(unspecified incident)"
+    return {
+        "form": "ICS-201",
+        "operational_period": state.operational_period,
+        "objectives": [
+            "Provide for responder and public safety (life-safety, always #1).",
+            "RECOMMEND containment of the fire perimeter at defensible terrain features.",
+            "PROPOSED protection of identified values-at-risk in the projected spread cone.",
+            "DRAFT communications cadence with cooperating agencies every 2 hours.",
+        ],
+        "key_findings": _deterministic_key_findings(state),
+        "sections": {
+            "incident_name": inc_name,
+            "prepared_by": "EmberSight Master IC synthesis (DRAFT, pending IC approval)",
+            "map_sketch_placeholder": (
+                "Map sketch RECOMMENDED for IC review — geo overlay rendered "
+                "in the dashboard map pane."
+            ),
+            "current_situation": (
+                f"Incident {inc_name} active. Synthesis incorporated "
+                f"{len(state.outputs)} upstream subagent outputs."
+            ),
+            "planned_actions": [
+                "RECOMMEND initial attack posture: anchor and flank from defensible terrain.",
+                "PROPOSED staging area established at the routing agent's top-ranked candidate.",
+                "DRAFT evacuation advisory for zones identified by evacuation_intelligence.",
+            ],
+            "current_org_chart": {
+                "incident_commander": "(pending IC assignment)",
+                "deputies": [],
+                "ops_section_chief": "(PROPOSED)",
+                "planning_section_chief": "(PROPOSED)",
+                "logistics_section_chief": "(PROPOSED)",
+                "finance_section_chief": "(PROPOSED)",
+            },
+            "resources_summary": (
+                "See resource_recommendation subagent output for proposed "
+                "apparatus / crews / aircraft."
+            ),
+            "immediate_concerns": [
+                d["claim_a"] for d in dissent_log[:5]
+            ] or ["No high-severity dissent flagged."],
+        },
+        "dissent_log_acknowledgment": [
+            f"{d['source_agent']}: {d['rationale']}" for d in dissent_log
+        ],
+    }
+
+
+def _deterministic_ics_202_bundle(
+    state: AgentState, dissent_log: list[dict[str, Any]]
+) -> dict[str, Any]:
+    incident = state.incident
+    inc_name = incident.name if incident else "(unspecified incident)"
+    objectives = [
+        "Provide for responder and public safety (life-safety, always #1).",
+        "RECOMMEND containment of the fire perimeter at defensible terrain features.",
+        "PROPOSED protection of values-at-risk in the projected spread cone.",
+        "DRAFT continued reassessment of evacuation zones at start of each op period.",
+    ]
+    return {
+        "form": "ICS-202-bundle",
+        "operational_period": state.operational_period,
+        "objectives": objectives,
+        "key_findings": _deterministic_key_findings(state),
+        "sections": {
+            "ics_202": {
+                "incident_name": inc_name,
+                "operational_period": state.operational_period,
+                "objectives": objectives,
+                "weather_summary": (
+                    "See weather_wind output for HRRR/RTMA-fused forecast."
+                ),
+                "safety_message": (
+                    "Heads-up on dissent log entries flagged by Master IC; "
+                    "DRAFT — pending IC approval."
+                ),
+                "prepared_by": "EmberSight Master IC synthesis (DRAFT)",
+            },
+            "ics_203": {
+                "incident_commander": "(pending IC assignment)",
+                "command_staff": {
+                    "safety_officer": "(PROPOSED)",
+                    "public_information_officer": "(PROPOSED)",
+                    "liaison_officer": "(PROPOSED)",
+                },
+                "general_staff": {
+                    "ops_section_chief": "(PROPOSED)",
+                    "planning_section_chief": "(PROPOSED)",
+                    "logistics_section_chief": "(PROPOSED)",
+                    "finance_section_chief": "(PROPOSED)",
+                },
+            },
+            "ics_204": [
+                {
+                    "branch_division_group": "Division A",
+                    "operational_period": state.operational_period,
+                    "work_assignments": [
+                        "RECOMMEND anchor + flank from anchor point identified by routing_staging.",
+                        "PROPOSED structure triage along the values_at_risk inventory.",
+                    ],
+                    "resources_assigned": [
+                        "(see resource_recommendation output for PROPOSED resources)"
+                    ],
+                    "special_instructions": (
+                        "DRAFT only — pending IC approval. Re-confirm radio "
+                        "freqs at op-briefing."
+                    ),
+                }
+            ],
+            "ics_215": {
+                "operational_period": state.operational_period,
+                "work_assignments_by_division": [
+                    {
+                        "division": "A",
+                        "work_assignment_summary": "Anchor + flank, structure triage",
+                        "resources_required": "Per resource_recommendation PROPOSED list",
+                    }
+                ],
+                "notes": "DRAFT planning worksheet — pending IC and OPS sign-off.",
+            },
+            "ics_215a": {
+                "hazards": [
+                    d["claim_a"] for d in dissent_log if d["severity"] in ("medium", "high")
+                ] or ["No high-severity hazard surfaced by upstream dissent."],
+                "mitigations": [
+                    "RECOMMEND LCES (Lookouts, Communications, Escape routes, Safety zones) refresh at op-briefing.",
+                    "PROPOSED safety-officer review of every Division/Group assignment before execution.",
+                ],
+            },
+        },
+        "dissent_log_acknowledgment": [
+            f"{d['source_agent']}: {d['rationale']}" for d in dissent_log
+        ],
+    }
+
+
+def _deterministic_key_findings(state: AgentState) -> list[str]:
+    findings: list[str] = []
+    for name in UPSTREAM_AGENTS:
+        out = state.outputs.get(name)
+        if out is None:
+            findings.append(f"{name}: (no output — synthesis used neutral default)")
+            continue
+        snippet = (out.narrative or "").strip().replace("\n", " ")[:140]
+        findings.append(f"{name} (conf={out.confidence:.2f}): {snippet}")
+        if len(findings) >= 5:
+            break
+    return findings[:5]
+
+
+def _deterministic_synthesis(
+    state: AgentState, form_type: str, dissent_log: list[dict[str, Any]]
+) -> dict[str, Any]:
+    if form_type == "ICS-201":
+        return _deterministic_ics_201(state, dissent_log)
+    return _deterministic_ics_202_bundle(state, dissent_log)
+
+
+# --------------------------------------------------------------------------- #
+# Main entry
+# --------------------------------------------------------------------------- #
+
+
+def _build_citation_bundle(used_llm: bool) -> CitationBundle:
+    datasets = [
+        Dataset(
+            name="ICS Forms (FEMA)",
+            version="ICS-201/202/203/204/215/215A",
+            url=ICS_201_REFERENCE_URL,
+        ),
+        Dataset(
+            name="NWCG IRPG / PMS 310-1",
+            version="current",
+            url=NWCG_IAP_REFERENCE_URL,
+        ),
+    ]
+    models = [
+        Model(
+            name=MODEL_ID if used_llm else "deterministic-fallback",
+            version="synthesis-v1",
         )
-    models = [Model(name=_DEFAULT_MODEL, version=mode)]
+    ]
     return CitationBundle(
         datasets=datasets,
         models=models,
@@ -430,84 +693,103 @@ def _build_citations(state: AgentState, mode: str) -> CitationBundle:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Run
-# --------------------------------------------------------------------------- #
+async def run(state: AgentState) -> dict:
+    op_period = max(1, int(state.operational_period or 1))
+    form_type = _form_type(op_period)
 
+    dissent_log = _detect_dissent(state)
+    confidence, conf_driver = _harmonic_mean_confidence(state)
 
-async def run(state: AgentState) -> dict[str, Any]:
-    form = _form_for(state.operational_period)
-    upstream = _condense_upstream(state)
-    new_dissent = _build_dissent_log(state)
-
-    draft_model = await _llm_synthesize(state, form, upstream, new_dissent)
-    if draft_model is None:
-        draft_model = _deterministic_draft(state, form, upstream)
-        synthesis_mode = "deterministic-fallback"
+    used_llm = False
+    draft = await _llm_synthesize(state, form_type, dissent_log)
+    if draft is None:
+        draft = _deterministic_synthesis(state, form_type, dissent_log)
     else:
-        synthesis_mode = "llm-claude-sonnet-4-5"
+        used_llm = True
+        # Defensive: even if the LLM passed the regex check, make sure the
+        # form/op_period fields are correct in case the model drifted.
+        draft.setdefault("form", form_type)
+        draft.setdefault("operational_period", op_period)
 
-    confidence, conf_driver = _aggregate_confidence(state)
-    citations = _build_citations(state, synthesis_mode)
+    # Final sanity sweep on serialized draft. If a forbidden verb still slips
+    # through (e.g. inside a payload value the LLM added), fall back rather
+    # than ship a non-compliant artifact.
+    serialized_draft = json.dumps(draft, default=str)
+    if _forbidden_hits(serialized_draft):
+        log.warning(
+            "forbidden verb survived LLM draft; falling back to deterministic synthesis"
+        )
+        draft = _deterministic_synthesis(state, form_type, dissent_log)
+        used_llm = False
 
-    existing_dissent = list(state.dissent_log or [])
-    full_dissent = [*existing_dissent, *new_dissent]
+    citation_bundle = _build_citation_bundle(used_llm)
 
-    draft = {
-        **draft_model.model_dump(),
-        "drafted_at": datetime.now(timezone.utc).isoformat(),
-        "synthesis_mode": synthesis_mode,
-        "status": "DRAFT - pending IC approval",
-        "verbs_constraint": "RECOMMEND / PROPOSE / DRAFT / SUGGEST only.",
-        "dissent_log": full_dissent,
-    }
-
-    interrupt_payload: dict[str, Any] = {
+    interrupt_envelope = {
         "type": "iap_approval",
-        "form_type": form,
+        "form_type": form_type,
         "draft": draft,
-        "dissent_log": full_dissent,
+        "dissent_log": dissent_log,
         "confidence": confidence,
-        "citations": citations.model_dump(),
+        "citations": citation_bundle.model_dump(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    decision = request_human_decision("iap_approval", interrupt_payload) or {}
+    decision = request_human_decision("iap_approval", interrupt_envelope)
 
-    verdict = str(decision.get("decision") or "approved").lower()
-    edits = decision.get("edits") or {}
+    # Decision branching.
+    decision_kind = (decision or {}).get("decision", "approved")
+    edited_draft = (decision or {}).get("edited_draft")
+    reject_reason = (decision or {}).get("reason")
 
-    if verdict == "approved":
+    final_draft: dict[str, Any]
+    if decision_kind == "approved":
         final_draft = draft
-        payload: dict[str, Any] = {"iap_draft": final_draft}
-    elif verdict == "edited":
-        final_draft = {**draft, **edits, "status": "EDITED - approved by IC"}
-        payload = {"iap_draft": final_draft}
-    else:
-        reject_reason = decision.get("reason") or "rejected without reason"
-        new_dissent = [
-            *new_dissent,
-            {
-                "agent": AGENT_NAME,
-                "kind": "ic_rejection",
-                "concern": f"IC rejected draft: {reject_reason}",
-                "rationale": (
-                    "Master IC produced a draft but IC declined approval; no "
-                    "iap_draft committed to state."
+    elif decision_kind == "edited" and isinstance(edited_draft, dict):
+        final_draft = edited_draft
+    elif decision_kind == "rejected":
+        final_draft = {}
+        dissent_log.append(
+            _dissent_entry(
+                source_agent="human_ic",
+                conflicting_agent=AGENT_NAME,
+                claim_a="Master IC DRAFT rejected by human IC",
+                claim_b=reject_reason or "(no reason provided)",
+                severity="high",
+                rationale=(
+                    "IC rejected the synthesis; downstream sections marked "
+                    "invalid until re-DRAFT."
                 ),
-            },
-        ]
-        final_draft = None
-        payload = {"dissent_log_includes_reject_reason": True}
-
-    payload["form"] = form
-    payload["key_findings"] = draft_model.key_findings
-    payload["dissent_log"] = [*existing_dissent, *new_dissent]
+            )
+        )
+    else:
+        # Unknown decision keyword — treat as approved-with-warning so the
+        # graph still terminates, but record the unexpected envelope.
+        final_draft = draft
+        dissent_log.append(
+            _dissent_entry(
+                source_agent="human_ic",
+                conflicting_agent=AGENT_NAME,
+                claim_a=f"Unrecognized decision: {decision_kind!r}",
+                claim_b="treated as approved",
+                severity="medium",
+                rationale="Unexpected interrupt envelope; review audit log.",
+            )
+        )
 
     narrative = (
-        f"Master IC synthesized a draft {form} for operational period "
-        f"{state.operational_period} from "
-        f"{sum(1 for v in upstream.values() if not v.get('missing'))} upstream "
-        f"subagent outputs (mode: {synthesis_mode}). IC verdict: {verdict}."
+        f"Master IC DRAFT {form_type} for operational period {op_period}: "
+        f"decision={decision_kind}, confidence={confidence:.2f}, "
+        f"dissents={len(dissent_log)}, synthesis="
+        f"{'LLM' if used_llm else 'deterministic'}."
     )
+
+    payload = {
+        "iap_draft": final_draft,
+        "form_type": form_type,
+        "decision": decision_kind,
+        "dissent_log": dissent_log,
+        "key_findings": draft.get("key_findings") or _deterministic_key_findings(state),
+        "synthesis_source": "llm" if used_llm else "deterministic",
+    }
 
     output = AgentOutput(
         agent=AGENT_NAME,
@@ -515,19 +797,22 @@ async def run(state: AgentState) -> dict[str, Any]:
         payload=payload,
         confidence=confidence,
         confidence_driver=conf_driver,
-        citation_bundle=citations,
+        citation_bundle=citation_bundle,
     )
 
-    state_patch: dict[str, Any] = {
-        "outputs": {AGENT_NAME: output},
-        "audit_log": [audit_entry("iap_approval", interrupt_payload, decision)],
-    }
-    if final_draft is not None:
-        state_patch["iap_draft"] = final_draft
-    if new_dissent:
-        state_patch["dissent_log"] = new_dissent
+    audit_record = audit_entry("iap_approval", interrupt_envelope, decision or {})
 
-    return state_patch
+    patch: dict[str, Any] = {
+        "outputs": {AGENT_NAME: output},
+        "audit_log": [audit_record],
+        "dissent_log": dissent_log,
+    }
+    # Mirror the approved/edited draft onto the state-level slot so the
+    # dashboard can render it without digging into output.payload.
+    if final_draft:
+        patch["iap_draft"] = final_draft
+
+    return patch
 
 
 # --------------------------------------------------------------------------- #
@@ -535,140 +820,172 @@ async def run(state: AgentState) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _smoke_outputs() -> dict[str, AgentOutput]:
-    """Stub all 7 upstream subagent outputs.
+def _mock_state_with_dissents() -> AgentState:
+    """Build a realistic mock state that triggers >= 2 dissent entries."""
+    incident = Incident(
+        id="CA-LNU-000123",
+        name="Hawthorne",
+        lat=38.5,
+        lon=-122.7,
+        acres=450.0,
+        contained_pct=10.0,
+        started_at="2026-05-23T14:22:00Z",
+        source="calfire",
+    )
 
-    values_at_risk: confidence 0.8 with empty structures_at_risk list.
-    spread_simulation: confidence 0.6 with high_risk_zones populated.
-    Together those trigger the conflict-dissent entry. resource_recommendation
-    is set to 0.4 to also exercise the low-confidence dissent branch.
-    """
-
-    def _ao(
-        name: str,
-        confidence: float,
+    def _out(
+        agent: str,
         narrative: str,
-        payload: dict[str, Any] | None = None,
+        confidence: float,
+        payload: dict[str, Any],
+        driver: str = "stub",
     ) -> AgentOutput:
         return AgentOutput(
-            agent=name,
+            agent=agent,
             narrative=narrative,
-            payload=payload or {},
+            payload=payload,
             confidence=confidence,
-            confidence_driver="smoke-test stub",
+            confidence_driver=driver,
             citation_bundle=CitationBundle(
                 datasets=[Dataset(name="(stub)", version="0")],
                 models=[Model(name="(stub)", version="0")],
-                reasoning_trace_id=str(uuid.uuid4()),
             ),
         )
 
-    return {
-        "weather_wind": _ao(
+    outputs = {
+        "weather_wind": _out(
             "weather_wind",
-            0.8,
-            "12-hr forecast: SW winds 15-25 mph, RH 12%, Red Flag in effect.",
-            {"red_flag": True, "wind_dir_deg": 220, "wind_mph": 20},
+            "HRRR + RTMA fused: SW wind 18 gust 28 mph, RH 14%, Red Flag in effect.",
+            0.78,
+            {"wind_dir_deg": 225, "wind_mph": 18, "gust_mph": 28, "rh_pct": 14},
+            "HRRR/RTMA wind agreement",
         ),
-        "terrain_fuel": _ao(
+        "terrain_fuel": _out(
             "terrain_fuel",
-            0.75,
-            "Fuel model GR2/SH5 mix, 35-50% slope on north aspect.",
-            {"fuel_models": ["GR2", "SH5"], "slope_pct_max": 50},
-        ),
-        "values_at_risk": _ao(
-            "values_at_risk",
-            0.8,
-            "No critical structures identified inside the projected 12-hr cone.",
-            {"structures_at_risk": [], "structures_in_cone": 0},
-        ),
-        "routing_staging": _ao(
-            "routing_staging",
+            "LANDFIRE FBFM40 dominant class GR1 light grass; slope 18 deg NE aspect.",
             0.7,
-            "RECOMMEND staging at Hwy-49 turnout; 12-min ingress to head.",
-            {"staging_lat": 39.1, "staging_lon": -120.9, "ingress_min": 12},
+            {"fuel_model": "GR1 light grass", "slope_deg": 18, "aspect": "NE"},
+            "fuel-model purity",
         ),
-        "spread_simulation": _ao(
-            "spread_simulation",
-            0.6,
-            "ROS 8 ch/hr head, flame length 12 ft; high-risk zones flagged.",
-            {
-                "high_risk_zones": ["Zone_A_North", "Zone_B_East"],
-                "head_ros_chains_per_hr": 8,
-                "flame_length_ft": 12,
-            },
+        "values_at_risk": _out(
+            "values_at_risk",
+            "No structures within 12h projected cone; closest school 4.2 mi SE.",
+            0.8,
+            {"structures_count": 0, "nearest_school_mi": 4.2, "no_structures": True},
+            "MS Building Footprints recent",
         ),
-        "resource_recommendation": _ao(
-            "resource_recommendation",
+        "routing_staging": _out(
+            "routing_staging",
+            "Top staging candidate: Route 128 paved turnout. Note Hwy 29 closed.",
             0.4,
-            "DRAFT resource posture; data sparse, low confidence.",
-            {"draft_resources": ["2x Type 3", "1x dozer"]},
+            {
+                "candidates": [{"name": "Rt128 turnout", "score": 0.81}],
+                "closures": ["Hwy 29 closed at MP 14"],
+            },
+            "OSM coverage sparse",
         ),
-        "evacuation_intelligence": _ao(
-            "evacuation_intelligence",
+        "spread_simulation": _out(
+            "spread_simulation",
+            "Pyretechnics ensemble: HIGH risk to zone N4 within 6h; head ROS 9 ch/hr.",
+            0.55,
+            {
+                "head_ros_chains_per_hr": 9,
+                "risk_level": "high",
+                "high_risk_zones": ["N4"],
+            },
+            "ensemble spread",
+        ),
+        "resource_recommendation": _out(
+            "resource_recommendation",
+            "PROPOSED 1x Type-1 hotshot crew + 2x Type-3 engines + 1 air tanker.",
             0.65,
-            "PROPOSE Zone A advisory now; Zone B watch within 6 hrs.",
-            {"zones_advisory": ["Zone_A"], "zones_watch": ["Zone_B"]},
+            {
+                "proposed": [
+                    {"kind": "Type-1 hotshot crew", "qty": 1},
+                    {"kind": "Type-3 engine", "qty": 2},
+                    {"kind": "air tanker", "qty": 1},
+                ]
+            },
+            "NWCG resource typing",
+        ),
+        "evacuation_intelligence": _out(
+            "evacuation_intelligence",
+            "PROPOSED evacuation Zone 4 advisory; primary egress via Hwy 29.",
+            0.6,
+            {
+                "zones": ["Zone 4"],
+                "primary egress": "Hwy 29",
+                "advisory_level": "advisory",
+            },
         ),
     }
 
-
-def _smoke_state(op_period: int = 1) -> AgentState:
-    from ..state import Incident
-
     return AgentState(
-        incident=Incident(
-            id="smoke-001",
-            name="Smoke Test Fire",
-            lat=39.1,
-            lon=-120.9,
-            acres=120.0,
-            contained_pct=0.0,
-            source="synthetic",
-        ),
-        operational_period=op_period,
-        user_query="Smoke test for master_ic synthesis.",
-        outputs=_smoke_outputs(),
+        incident=incident,
+        operational_period=1,
+        user_query="(smoke test)",
+        outputs=outputs,
     )
 
 
-async def _smoke_main() -> None:
-    """Run the smoke test with a stubbed HITL approval."""
+async def _smoke() -> None:
+    import embersight_agent.agents.master_ic as me  # type: ignore
 
-    def _stub_decision(interrupt_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return {"decision": "approved", "actor": "smoke_test"}
+    decisions_to_test = [
+        {"decision": "approved", "edited_draft": None, "reason": None},
+        {
+            "decision": "edited",
+            "edited_draft": {
+                "form": "ICS-201",
+                "operational_period": 1,
+                "objectives": ["LIFE SAFETY first (edited by IC)"],
+                "sections": {"incident_name": "Hawthorne (edited)"},
+            },
+            "reason": None,
+        },
+        {
+            "decision": "rejected",
+            "edited_draft": None,
+            "reason": "Wrong fuel model assumption",
+        },
+    ]
 
-    global request_human_decision  # noqa: PLW0603 -- intentional swap for smoke
-    real = request_human_decision
-    request_human_decision = _stub_decision  # type: ignore[assignment]
-    try:
-        for op in (1, 2):
-            state = _smoke_state(op_period=op)
-            patch = await run(state)
-            ao = patch["outputs"][AGENT_NAME]
-            draft = patch.get("iap_draft") or {}
-            print(
-                json.dumps(
-                    {
-                        "op_period": op,
-                        "form": draft.get("form") or ao.payload.get("form"),
-                        "confidence": ao.confidence,
-                        "confidence_driver": ao.confidence_driver,
-                        "narrative": ao.narrative,
-                        "dissent_count": len(ao.payload.get("dissent_log", [])),
-                        "dissent_kinds": [
-                            d.get("kind")
-                            for d in ao.payload.get("dissent_log", [])
-                        ],
-                        "synthesis_mode": draft.get("synthesis_mode"),
-                        "citations": len(ao.citation_bundle.datasets),
-                    },
-                    indent=2,
-                )
-            )
-    finally:
-        request_human_decision = real  # type: ignore[assignment]
+    original_hitl = me.request_human_decision
+
+    for stub_decision in decisions_to_test:
+        # Monkey-patch the imported request_human_decision so the smoke test
+        # runs end-to-end without LangGraph orchestration.
+        def _fake(_kind, _payload, _d=stub_decision):  # noqa: ANN001
+            return _d
+
+        me.request_human_decision = _fake  # type: ignore[assignment]
+        try:
+            state = _mock_state_with_dissents()
+            patch = await me.run(state)
+        finally:
+            me.request_human_decision = original_hitl  # type: ignore[assignment]
+
+        out = patch["outputs"][AGENT_NAME]
+        assert 0.0 <= out.confidence <= 1.0, "confidence out of range"
+        assert isinstance(out.payload["iap_draft"], dict), "iap_draft not dict"
+        dissents = patch["dissent_log"]
+        assert len(dissents) >= 2, f"expected >= 2 dissent entries, got {len(dissents)}"
+        assert len(patch["audit_log"]) == 1, "missing audit record"
+
+        kind = stub_decision["decision"]
+        print(f"--- smoke: decision={kind} ---")
+        print(f"  form_type             : {out.payload['form_type']}")
+        print(f"  decision              : {out.payload['decision']}")
+        print(f"  synthesis_source      : {out.payload['synthesis_source']}")
+        print(f"  confidence            : {out.confidence}")
+        print(f"  confidence_driver     : {out.confidence_driver}")
+        print(f"  dissent_log_entries   : {len(dissents)}")
+        print(f"  iap_draft_keys        : {sorted((out.payload['iap_draft'] or {}).keys())}")
+        print(f"  narrative             : {out.narrative}")
+        print()
+
+    print("smoke test passed.")
 
 
 if __name__ == "__main__":
-    asyncio.run(_smoke_main())
+    asyncio.run(_smoke())
