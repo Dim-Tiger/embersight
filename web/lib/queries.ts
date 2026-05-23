@@ -50,6 +50,28 @@ export function useWeather(lat: number | null, lon: number | null) {
   });
 }
 
+export function usePerimeter(
+  lat: number | null,
+  lon: number | null,
+  irwinId?: string | null,
+) {
+  return useQuery({
+    queryKey: ["perimeter", lat, lon, irwinId],
+    enabled: lat != null && lon != null,
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        lat: String(lat),
+        lon: String(lon),
+      });
+      if (irwinId) params.set("irwinId", irwinId);
+      const r = await fetch(`/api/perimeter?${params}`);
+      if (!r.ok) return null;
+      return r.json() as Promise<GeoJSON.FeatureCollection | null>;
+    },
+    refetchInterval: 5 * 60_000,
+  });
+}
+
 export async function postResume(
   threadId: string,
   decision: Record<string, unknown>,

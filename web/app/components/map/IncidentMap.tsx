@@ -1,9 +1,9 @@
 "use client";
 
-import { useIncidents, type Incident } from "@/lib/queries";
+import { useIncidents, usePerimeter, type Incident } from "@/lib/queries";
 import { useStore } from "@/lib/store";
 import maplibregl from "maplibre-gl";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAgentStream } from "../panels/useAgentStream";
 
 const CARTO_DARK =
@@ -13,12 +13,23 @@ export function IncidentMap() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
+  const [mapLoaded, setMapLoaded] = useState(false);
 
   const { data: incidents } = useIncidents();
   const viewport = useStore((s) => s.mapViewport);
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
   const { start } = useAgentStream();
+
+  const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
+  const irwinId = selectedIncidentId?.startsWith("wfigs:")
+    ? selectedIncidentId.slice(6)
+    : null;
+  const { data: perimeter } = usePerimeter(
+    selectedIncident?.lat ?? null,
+    selectedIncident?.lon ?? null,
+    irwinId,
+  );
 
   // Init map
   useEffect(() => {
@@ -30,15 +41,17 @@ export function IncidentMap() {
       zoom: viewport.zoom,
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    map.on("load", () => setMapLoaded(true));
     mapRef.current = map;
     return () => {
       map.remove();
       mapRef.current = null;
+      setMapLoaded(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Render incident markers as plain DOM (deck.gl wiring lands in pass 2)
+  // Render incident markers
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !incidents) return;
@@ -70,16 +83,45 @@ export function IncidentMap() {
     }
   }, [incidents, setSelectedIncident, start]);
 
+  // Render fire perimeter polygon
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    // Clean up previous perimeter layers/sources
+    if (map.getLayer("perimeter-fill")) map.removeLayer("perimeter-fill");
+    if (map.getLayer("perimeter-outline")) map.removeLayer("perimeter-outline");
+    if (map.getSource("perimeter")) map.removeSource("perimeter");
+
+    if (!perimeter?.features?.length) return;
+
+    map.addSource("perimeter", { type: "geojson", data: perimeter });
+    map.addLayer({
+      id: "perimeter-fill",
+      type: "fill",
+      source: "perimeter",
+      paint: {
+        "fill-color": "#f97316",
+        "fill-opacity": 0.12,
+      },
+    });
+    map.addLayer({
+      id: "perimeter-outline",
+      type: "line",
+      source: "perimeter",
+      paint: {
+        "line-color": "#f97316",
+        "line-width": 2,
+        "line-opacity": 0.85,
+        "line-dasharray": [2, 1],
+      },
+    });
+  }, [perimeter, mapLoaded]);
+
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
-      {selectedIncidentId && (
-        <div className="pointer-events-none absolute left-3 top-3 rounded-md bg-smoke-800/90 px-3 py-2 text-xs">
-          Active incident:{" "}
-          <span className="font-mono text-ember-200">{selectedIncidentId}</span>
-        </div>
-      )}
-      <Legend />
+      <Legend hasPerimeter={!!perimeter?.features?.length} />
     </div>
   );
 }
@@ -89,7 +131,7 @@ function sizeForAcres(acres: Incident["acres"]): number {
   return Math.max(8, Math.min(36, Math.sqrt(acres) * 1.2));
 }
 
-function Legend() {
+function Legend({ hasPerimeter }: { hasPerimeter: boolean }) {
   return (
     <div className="absolute bottom-3 left-3 rounded-md bg-smoke-800/90 p-3 text-[11px] text-smoke-200">
       <div className="mb-1 font-semibold text-smoke-200">Incidents</div>
@@ -97,7 +139,13 @@ function Legend() {
         <span className="h-2 w-2 rounded-full bg-ember-500" />
         Active fire (size ∝ √acres)
       </div>
-      <div className="mt-2 text-smoke-400">Click to start an agent run.</div>
+      {hasPerimeter && (
+        <div className="mt-1 flex items-center gap-2">
+          <span className="h-0.5 w-4 border-t-2 border-dashed border-ember-500" />
+          Fire perimeter (WFIGS)
+        </div>
+      )}
+      <div className="mt-2 text-smoke-400">Click marker or use sidebar.</div>
     </div>
   );
 }
