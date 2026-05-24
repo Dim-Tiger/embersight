@@ -252,17 +252,27 @@ export function IncidentMap() {
     }
     const nextStyle =
       basemap === "satellite" ? SATELLITE_STYLE : CARTO_DARK;
-    // setStyle wipes sources/layers and MapLibre's `load` event does
-    // not re-fire. We can't gate on `isStyleLoaded()` either — it stays
-    // false indefinitely for raster basemaps whose tiles keep loading
-    // on every pan/zoom. Use the first `styledata` event after setStyle
-    // as our "style spec parsed, safe to re-add sources" signal.
+    // Mechanics, all the way down:
+    //   - MapLibre's `load` event only fires once per Map instance; it
+    //     does NOT re-fire after setStyle. The first `styledata` is our
+    //     "spec parsed, safe to re-add sources" signal.
+    //   - We can't gate on `isStyleLoaded()` either — for raster
+    //     basemaps it stays false indefinitely as tiles keep streaming
+    //     in on pan/zoom.
+    //   - `diff: false` forces a full reset. The default `diff: true`
+    //     KEEPS user-added sources alive across the swap but still
+    //     drops their layers. The per-layer effects below then take
+    //     the `if (existing) { setData; return }` short-circuit and
+    //     never re-add their layer on top of the new basemap — which
+    //     is why satellite came up blank.
     const onStyleData = () => {
       map.off("styledata", onStyleData);
       setMapLoaded(true);
     };
     map.once("styledata", onStyleData);
-    map.setStyle(nextStyle as maplibregl.StyleSpecification | string);
+    map.setStyle(nextStyle as maplibregl.StyleSpecification | string, {
+      diff: false,
+    });
     return () => {
       map.off("styledata", onStyleData);
     };
