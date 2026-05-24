@@ -1523,30 +1523,30 @@ export function IncidentMap() {
             image: canvas.toDataURL(),
             bounds: renderBounds,
             imageUnscale: [minV, maxV],
-            // Few, long, thin particles read as cohesive wind streams.
-            // Total trail length = maxAge * per-tick stride, where stride
-            // is (speedFactor * 0.01) / 2^zoom. The lib's prop-type
-            // min/max are advisory deck.gl validators (not runtime caps),
-            // so we push maxAge well past 255 for longer trails while
-            // keeping speedFactor low for slow, languid motion.
-            // At low zoom we widen particles and thicken trails so the wind
-            // is still legible when the sample box shrinks on screen.
-            numParticles: windLowZoom ? 360 : 240,
-            maxAge: 700,
-            speedFactor: 280,
-            width: windLowZoom ? 3.2 : 2.4,
-            speedRange: [0, 22],
-            // Streamline palette: faint slate tail → bright white core →
-            // amber → orange → red as wind speed climbs. Kept narrow on
-            // the white-core band so most streams read as cohesive white
-            // lines, with warm colors reserved for genuinely strong wind.
+            // Windfinder/earth.nullschool aesthetic: lots of thin, fast
+            // particles drawing crisp streamlines. Per-tick stride is
+            // (speedFactor * 0.01) / 2^zoom and the prop min/max are
+            // deck.gl validators (not runtime caps), so we push values
+            // past their advisory ranges for the look we want.
+            // Density scales up at low zoom so the smaller box still feels
+            // alive; width grows just enough to stay legible.
+            numParticles: windLowZoom ? 1800 : 1200,
+            maxAge: 220,
+            speedFactor: 520,
+            width: windLowZoom ? 1.6 : 1.1,
+            // Tight speed range so typical 2–10 m/s winds land in the
+            // bright white band; only genuinely strong gusts trip warm.
+            speedRange: [0, 14],
+            // Mostly translucent → bright white core, with a faint warm
+            // wash reserved for the top end. Keeps the field reading as a
+            // cohesive flow instead of a rainbow.
             colorRamp: [
-              [0.0, [203, 213, 225, 200]], // slate-300 (faint tail)
-              [0.15, [248, 250, 252, 245]], // near-white core
-              [0.4, [255, 255, 255, 255]], // pure white contrail
-              [0.6, [253, 224, 71, 250]], // yellow-300
-              [0.8, [249, 115, 22, 250]], // orange-500
-              [1.0, [220, 38, 38, 255]], // red-600
+              [0.0, [226, 232, 240, 0]], // fully transparent tail
+              [0.1, [241, 245, 249, 140]], // soft slate fade-in
+              [0.35, [255, 255, 255, 235]], // bright white core
+              [0.6, [255, 255, 255, 255]], // peak white
+              [0.8, [253, 186, 116, 245]], // orange-300 (breezy)
+              [1.0, [239, 68, 68, 255]], // red-500 (gale)
             ],
           }),
         ],
