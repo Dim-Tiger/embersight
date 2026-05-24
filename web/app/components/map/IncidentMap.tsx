@@ -555,16 +555,23 @@ export function IncidentMap() {
             image: canvas.toDataURL(),
             bounds: wind.bounds,
             imageUnscale: [minV, maxV],
-            numParticles: 4096,
-            maxAge: 60,
-            speedFactor: 35,
-            width: 1.4,
+            // Sparse, long-lived, thick particles read as discrete
+            // jet-style contrails rather than dense particle fog.
+            numParticles: 550,
+            maxAge: 220,
+            speedFactor: 55,
+            width: 3.4,
             speedRange: [0, 25],
+            // Contrail palette: bright white core at low/mid speed
+            // (the classic jet-trail look), warming to amber → orange →
+            // red as wind speed climbs into red-flag territory.
             colorRamp: [
-              [0.0, [148, 163, 184, 200]], // slate-400
-              [0.35, [251, 191, 36, 220]], // amber-400
-              [0.7, [249, 115, 22, 235]], // orange-500
-              [1.0, [220, 38, 38, 245]], // red-600
+              [0.0, [203, 213, 225, 200]], // slate-300 (faint tail)
+              [0.15, [248, 250, 252, 245]], // near-white core
+              [0.4, [255, 255, 255, 255]], // pure white contrail
+              [0.6, [253, 224, 71, 250]], // yellow-300
+              [0.8, [249, 115, 22, 250]], // orange-500
+              [1.0, [220, 38, 38, 255]], // red-600
             ],
           }),
         ],
@@ -665,15 +672,45 @@ function Legend({
           onChange={(e) => setShowWind(e.target.checked)}
           className="h-3 w-3 accent-ember-500"
         />
-        <span className="font-medium">Wind particles</span>
+        <span className="font-medium">Wind streams</span>
       </label>
-      {showWind && center && (
-        <div className="ml-5 text-[10px] text-smoke-400">
-          {center.speed.toFixed(1)} m/s ·{" "}
-          {Math.round(center.direction)}°
-          {wind?.gust_max_ms
-            ? ` · gust ${wind.gust_max_ms.toFixed(0)} m/s`
-            : ""}
+      {showWind && (
+        <div className="ml-5 mt-1 space-y-0.5 text-[10px] text-smoke-400">
+          <div className="flex items-center gap-1.5">
+            <svg
+              width="44"
+              height="8"
+              viewBox="0 0 44 8"
+              className="shrink-0"
+              aria-hidden
+            >
+              <defs>
+                <linearGradient id="wind-stream-grad" x1="0" x2="1" y1="0" y2="0">
+                  <stop offset="0%" stopColor="#cbd5e1" stopOpacity="0" />
+                  <stop offset="35%" stopColor="#f8fafc" stopOpacity="0.95" />
+                  <stop offset="70%" stopColor="#fb923c" stopOpacity="1" />
+                  <stop offset="100%" stopColor="#dc2626" stopOpacity="1" />
+                </linearGradient>
+              </defs>
+              <path
+                d="M1 5 Q 12 1, 22 4 T 43 3"
+                stroke="url(#wind-stream-grad)"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                fill="none"
+              />
+            </svg>
+            <span>Flowing contrails — direction & speed</span>
+          </div>
+          {center && (
+            <div>
+              {center.speed.toFixed(1)} m/s ·{" "}
+              {Math.round(center.direction)}°
+              {wind?.gust_max_ms
+                ? ` · gust ${wind.gust_max_ms.toFixed(0)} m/s`
+                : ""}
+            </div>
+          )}
         </div>
       )}
 
