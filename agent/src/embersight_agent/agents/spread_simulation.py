@@ -92,13 +92,13 @@ async def _llm_narrate(context: str) -> str | None:
         if _PROMPT_PATH.exists():
             prompt_text = _PROMPT_PATH.read_text()
 
+        from ..tools.llm_stream import stream_text
         llm = ChatAnthropic(model=model_name, max_tokens=800, temperature=0.2)
         msgs = [
             SystemMessage(content=prompt_text or "You are a wildland fire analyst."),
             HumanMessage(content=context),
         ]
-        resp = await llm.ainvoke(msgs)
-        return resp.content if hasattr(resp, "content") else str(resp)
+        return await stream_text(llm, msgs)
     except Exception:
         return None
 

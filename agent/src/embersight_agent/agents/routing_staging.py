@@ -274,17 +274,13 @@ async def _llm_narrative(payload: dict[str, Any]) -> str | None:
         "Never use directive verbs like 'dispatch', 'order', 'send', 'publish'."
     )
     try:
+        from ..tools.llm_stream import stream_text
         llm = ChatAnthropic(model=MODEL_NAME, max_tokens=400, temperature=0.2)
-        result = await llm.ainvoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=user)]
+        content = await stream_text(
+            llm,
+            [SystemMessage(content=system_prompt), HumanMessage(content=user)],
         )
-        content = getattr(result, "content", None)
-        if isinstance(content, list):
-            content = " ".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in content
-            )
-        return str(content).strip() if content else None
+        return content.strip() if content else None
     except Exception:
         return None
 

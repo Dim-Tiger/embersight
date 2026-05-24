@@ -55,8 +55,15 @@ export default function Page() {
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const restartCount = useStore((s) => s.restartCount);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const { data: incidents } = useIncidents();
+  const {
+    data: incidents,
+    isLoading: incidentsLoading,
+    isError: incidentsError,
+    error: incidentsErrorObj,
+  } = useIncidents();
   const { startBriefing } = useAgentStream();
+  const incidentsEmpty =
+    !incidentsLoading && !incidentsError && incidents?.length === 0;
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
 
@@ -154,6 +161,29 @@ export default function Page() {
               </select>
               <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-smoke-400" />
             </div>
+            {incidentsLoading && (
+              <div className="mt-2 text-[10px] text-smoke-400">
+                Loading incidents…
+              </div>
+            )}
+            {incidentsError && (
+              <div className="mt-2 text-[10px] leading-relaxed text-red-300">
+                Couldn&apos;t load incidents.
+                <div className="text-[10px] text-red-400/80">
+                  {incidentsErrorObj instanceof Error
+                    ? incidentsErrorObj.message
+                    : "Check upstream CAL FIRE / WFIGS connectivity."}
+                </div>
+              </div>
+            )}
+            {incidentsEmpty && (
+              <div className="mt-2 text-[10px] leading-relaxed text-smoke-400">
+                No active CA incidents reported.
+                <div className="text-[10px] text-smoke-500">
+                  Upstream feeds returned zero results.
+                </div>
+              </div>
+            )}
             {selectedIncident && (
               <div className="mt-2 space-y-0.5 text-[10px] leading-relaxed">
                 {selectedIncident.contained_pct != null && (
@@ -206,7 +236,11 @@ export default function Page() {
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
         {!selectedIncidentId ? (
-          <NoIncidentState />
+          <NoIncidentState
+            loading={incidentsLoading}
+            error={incidentsError ? incidentsErrorObj : null}
+            empty={incidentsEmpty}
+          />
         ) : (
           <>
             {activeTab === "Operations" && <OperationsTab />}
@@ -334,20 +368,75 @@ function NavDot({ status }: { status: AgentStatus }) {
   );
 }
 
-function NoIncidentState() {
+function NoIncidentState({
+  loading,
+  error,
+  empty,
+}: {
+  loading: boolean;
+  error: unknown;
+  empty: boolean;
+}) {
   // Render the statewide map immediately so users can click a fire to
   // select it on first open — the sidebar dropdown is not the only way in.
+  // The overlay pill reflects the upstream-feed state so the user knows why
+  // the dropdown might be empty or stale.
+  let headline = (
+    <>
+      Click an{" "}
+      <span className="font-semibold text-ember-300">active fire</span> on the
+      map, or choose one from the left panel, to begin.
+    </>
+  );
+  let detail: string | null = null;
+  let tone: "default" | "warn" | "error" = "default";
+
+  if (loading) {
+    headline = <>Loading incidents…</>;
+    detail = "Fetching the latest active fires from CAL FIRE and WFIGS.";
+  } else if (error) {
+    headline = <>Couldn&apos;t load incidents</>;
+    detail =
+      error instanceof Error
+        ? error.message
+        : "The upstream incident feeds (CAL FIRE / WFIGS) are unreachable.";
+    tone = "error";
+  } else if (empty) {
+    headline = <>No active CA incidents right now</>;
+    detail =
+      "Both CAL FIRE and WFIGS returned zero current incidents in California. The dashboard will populate when a new fire is reported.";
+    tone = "warn";
+  }
+
+  const pillBorder =
+    tone === "error"
+      ? "border-red-500/50"
+      : tone === "warn"
+        ? "border-amber-500/40"
+        : "border-ember-500/40";
+  const iconColor =
+    tone === "error"
+      ? "text-red-400"
+      : tone === "warn"
+        ? "text-amber-300"
+        : "text-ember-400";
+
   return (
     <div className="relative h-full w-full">
       <IncidentMap />
       <div className="pointer-events-none absolute left-1/2 top-6 z-10 -translate-x-1/2">
-        <div className="flex items-center gap-2 rounded-full border border-ember-500/40 bg-smoke-800/90 px-4 py-2 text-xs text-smoke-200 shadow-lg backdrop-blur">
-          <Flame className="h-3.5 w-3.5 text-ember-400" />
-          <span>
-            Click an{" "}
-            <span className="font-semibold text-ember-300">active fire</span>{" "}
-            on the map, or choose one from the left panel, to begin.
-          </span>
+        <div
+          className={`flex max-w-md flex-col gap-1 rounded-2xl border ${pillBorder} bg-smoke-800/90 px-4 py-2 text-xs text-smoke-200 shadow-lg backdrop-blur`}
+        >
+          <div className="flex items-center gap-2">
+            <Flame className={`h-3.5 w-3.5 ${iconColor}`} />
+            <span>{headline}</span>
+          </div>
+          {detail && (
+            <p className="pl-5 text-[10px] leading-relaxed text-smoke-400">
+              {detail}
+            </p>
+          )}
         </div>
       </div>
     </div>

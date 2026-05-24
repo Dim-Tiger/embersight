@@ -1,7 +1,7 @@
 "use client";
 
-import { type AgentOutput, type AgentStatus } from "@/lib/store";
-import { CheckCircle2, CircleDashed, Loader2 } from "lucide-react";
+import { type AgentOutput, type AgentStatus, useStore } from "@/lib/store";
+import { AlertTriangle, CheckCircle2, CircleDashed, Loader2 } from "lucide-react";
 import { type ReactNode } from "react";
 
 export function AgentCard({
@@ -17,6 +17,11 @@ export function AgentCard({
   output: AgentOutput | undefined;
   children?: ReactNode;
 }) {
+  // When the agent stream itself has errored before this agent ran, the local
+  // `status` is still "pending" but the global error tells the real story.
+  // Surface that instead of the generic "Waiting for the agent to start…" copy.
+  const streamError = useStore((s) => s.errorMessage);
+  const hasStreamError = status === "pending" && !!streamError;
   return (
     <section className="rounded-md border border-smoke-700 bg-smoke-800/40">
       <header className="flex items-center justify-between border-b border-smoke-700 px-4 py-2">
@@ -27,7 +32,7 @@ export function AgentCard({
           )}
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge status={status} />
+          <StatusBadge status={status} streamError={hasStreamError} />
           {output?.confidence != null && status === "done" && (
             <span className="rounded bg-ember-900/40 px-2 py-0.5 text-[10px] font-semibold text-ember-200 ring-1 ring-ember-800/60">
               {Math.round(output.confidence * 100)}% conf
@@ -37,7 +42,21 @@ export function AgentCard({
       </header>
 
       <div className="space-y-3 px-4 py-3">
-        {status === "pending" && (
+        {status === "pending" && hasStreamError && (
+          <div className="rounded border border-red-800/60 bg-red-900/20 px-2.5 py-1.5 text-[11px] text-red-200">
+            <div className="flex items-center gap-1 font-medium">
+              <AlertTriangle className="h-3 w-3" />
+              Agent service unavailable
+            </div>
+            <div className="mt-0.5 break-words text-[10px] text-red-300/90">
+              {streamError}
+            </div>
+            <div className="mt-1 text-[10px] text-red-300/70">
+              Use &ldquo;Re-run stream&rdquo; in the Agent activity panel once the service is back.
+            </div>
+          </div>
+        )}
+        {status === "pending" && !hasStreamError && (
           <p className="text-[11px] italic text-smoke-500">
             Waiting for the agent to start. Pick an incident and the team runs
             automatically.
@@ -153,7 +172,13 @@ export function KeyFindings({ items }: { items: string[] }) {
   );
 }
 
-function StatusBadge({ status }: { status: AgentStatus }) {
+function StatusBadge({
+  status,
+  streamError,
+}: {
+  status: AgentStatus;
+  streamError?: boolean;
+}) {
   if (status === "running") {
     return (
       <span className="flex items-center gap-1 rounded bg-ember-900/40 px-2 py-0.5 text-[10px] font-medium text-ember-200">
@@ -167,6 +192,14 @@ function StatusBadge({ status }: { status: AgentStatus }) {
       <span className="flex items-center gap-1 rounded bg-emerald-900/40 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
         <CheckCircle2 className="h-3 w-3" />
         done
+      </span>
+    );
+  }
+  if (streamError) {
+    return (
+      <span className="flex items-center gap-1 rounded bg-red-900/40 px-2 py-0.5 text-[10px] font-medium text-red-200">
+        <AlertTriangle className="h-3 w-3" />
+        unavailable
       </span>
     );
   }

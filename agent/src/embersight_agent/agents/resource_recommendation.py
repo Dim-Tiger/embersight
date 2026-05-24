@@ -401,17 +401,12 @@ async def _llm_recommendation(
         "Return ONLY a JSON object that validates against the schema. No prose."
     )
     try:
+        from ..tools.llm_stream import stream_text
         llm = ChatAnthropic(model=LLM_MODEL, max_tokens=2048, timeout=30)
-        result = await llm.ainvoke(
-            [SystemMessage(content=system_md), HumanMessage(content=user_msg)]
+        content = await stream_text(
+            llm,
+            [SystemMessage(content=system_md), HumanMessage(content=user_msg)],
         )
-        content = result.content
-        if not isinstance(content, str):
-            content = "".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict)
-            )
         start = content.find("{")
         end = content.rfind("}")
         if start == -1 or end == -1 or end < start:

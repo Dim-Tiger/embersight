@@ -430,7 +430,7 @@ async def _llm_synthesize(
 
     try:
         from langchain_anthropic import ChatAnthropic
-        from langchain_core.messages import HumanMessage, SystemMessage
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
     except ImportError:
         log.warning("langchain_anthropic unavailable; using deterministic fallback")
         return None
@@ -446,14 +446,16 @@ async def _llm_synthesize(
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
 
+    from ..tools.llm_stream import stream_text
+
     for attempt in (1, 2):
         try:
-            resp = await llm.ainvoke(messages)
+            raw = await stream_text(llm, messages)
         except Exception as exc:  # noqa: BLE001
             log.warning("LLM call failed on attempt %d: %s", attempt, exc)
             return None
 
-        raw = resp.content if isinstance(resp.content, str) else str(resp.content)
+        resp = AIMessage(content=raw)
         hits = _forbidden_hits(raw)
         if not hits:
             try:

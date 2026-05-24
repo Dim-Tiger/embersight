@@ -199,8 +199,10 @@ async def _llm_narrative(fused: dict[str, Any]) -> str | None:
         f"{json.dumps(fused, default=str)[:8000]}"
     )
     try:
-        resp = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=human)])
-        return str(resp.content).strip()
+        from ..tools.llm_stream import stream_text
+        return await stream_text(
+            llm, [SystemMessage(content=system), HumanMessage(content=human)]
+        )
     except Exception:  # noqa: BLE001
         return None
 
