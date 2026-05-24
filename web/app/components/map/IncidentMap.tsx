@@ -70,6 +70,14 @@ type RoutingPayload = {
     bearing?: string;
     bearing_deg?: number;
     wind_relation?: "upwind" | "crosswind" | "downwind" | "unknown";
+    destination?: {
+      name?: string;
+      rally_type?: string;
+      source?: string;
+      capacity?: number | null;
+      loc?: [number, number];
+      score?: number;
+    };
   }>;
   candidates?: Array<{
     name?: string;
@@ -86,6 +94,16 @@ type RoutingPayload = {
     speed_mph?: number | null;
     source?: string | null;
   };
+  rally_points?: Array<{
+    name?: string;
+    loc?: [number, number];
+    rally_type?: string;
+    source?: string;
+    capacity?: number | null;
+    score?: number;
+    wind_relation?: "upwind" | "crosswind" | "downwind" | "unknown";
+  }>;
+  egress_strategy?: "rally_points" | "bearings_fallback";
 };
 
 // Evac zone status → color. Keys are normalized (uppercase, trimmed).
@@ -1225,8 +1243,15 @@ export function IncidentMap() {
       "routes-ingress",
       "routes-ingress-casing",
       "staging-point",
+      "rally-points",
+      "rally-points-label",
     ];
-    const SOURCE_IDS = ["routes-ingress", "routes-egress", "staging"];
+    const SOURCE_IDS = [
+      "routes-ingress",
+      "routes-egress",
+      "staging",
+      "rally-points",
+    ];
     try {
       for (const id of LAYER_IDS) {
         if (map.getLayer(id)) map.removeLayer(id);
@@ -1276,6 +1301,9 @@ export function IncidentMap() {
           length_km: r.length_km ?? null,
           minutes: r.est_drive_minutes ?? null,
           wind_relation: r.wind_relation ?? "unknown",
+          dest_name: r.destination?.name ?? null,
+          dest_type: r.destination?.rally_type ?? null,
+          dest_source: r.destination?.source ?? null,
         }),
       )
       .filter((f): f is GeoJSON.Feature => f !== null);
@@ -1407,7 +1435,7 @@ export function IncidentMap() {
       }
 
       // Hover popups for egress routes — show bearing + wind relation +
-      // drive time. Useful for IC to see "the W route is upwind, 18 min".
+      // drive time + destination rally point (if routed to one).
       if (egressFeatures.length) {
         const showEgressPopup = (e: maplibregl.MapMouseEvent) => {
           if (!popupRef.current) return;
@@ -1421,6 +1449,9 @@ export function IncidentMap() {
                 length_km?: number;
                 minutes?: number;
                 wind_relation?: string;
+                dest_name?: string;
+                dest_type?: string;
+                dest_source?: string;
               }
             | undefined;
           if (!props) return;
@@ -1437,6 +1468,88 @@ export function IncidentMap() {
         map.on("mouseenter", "routes-egress", showEgressPopup);
         map.on("mousemove", "routes-egress", showEgressPopup);
         map.on("mouseleave", "routes-egress", hideEgressPopup);
+      }
+
+      // Rally-point pins — defined evacuation destinations (OSM
+      // assembly_point/shelter/school/community_centre + HIFLD schools/EOCs
+      // + CAL FIRE per-incident evac centers). Color encodes wind_relation
+      // so the IC can see at a glance which destinations are upwind.
+      const rallyFeatures: GeoJSON.Feature[] = (payload.rally_points ?? [])
+        .map((rp): GeoJSON.Feature | null => {
+          if (!rp.loc || rp.loc.length !== 2) return null;
+          const [lat, lon] = rp.loc;
+          return {
+            type: "Feature",
+            geometry: { type: "Point", coordinates: [lon, lat] },
+            properties: {
+              name: rp.name ?? "rally point",
+              rally_type: rp.rally_type ?? "unknown",
+              source: rp.source ?? "?",
+              capacity: rp.capacity ?? null,
+              score: rp.score ?? null,
+              wind_relation: rp.wind_relation ?? "unknown",
+            },
+          };
+        })
+        .filter((f): f is GeoJSON.Feature => f !== null);
+
+      if (rallyFeatures.length) {
+        map.addSource("rally-points", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: rallyFeatures },
+        });
+        map.addLayer({
+          id: "rally-points",
+          type: "circle",
+          source: "rally-points",
+          paint: {
+            "circle-radius": 6,
+            "circle-color": [
+              "match",
+              ["get", "wind_relation"],
+              "upwind",
+              "#10b981",
+              "crosswind",
+              "#f59e0b",
+              "downwind",
+              "#dc2626",
+              "#94a3b8",
+            ],
+            "circle-stroke-color": "#0c0a09",
+            "circle-stroke-width": 1.5,
+            "circle-opacity": 0.95,
+          },
+        });
+
+        const showRallyPopup = (e: maplibregl.MapMouseEvent) => {
+          if (!popupRef.current) return;
+          const feature = (
+            e as unknown as { features?: GeoJSON.Feature[] }
+          ).features?.[0];
+          const props = feature?.properties as
+            | {
+                name?: string;
+                rally_type?: string;
+                source?: string;
+                capacity?: number | null;
+                score?: number;
+                wind_relation?: string;
+              }
+            | undefined;
+          if (!props) return;
+          popupRef.current
+            .setLngLat(e.lngLat)
+            .setHTML(buildRallyPopupHtml(props))
+            .addTo(map);
+          map.getCanvas().style.cursor = "pointer";
+        };
+        const hideRallyPopup = () => {
+          popupRef.current?.remove();
+          map.getCanvas().style.cursor = "";
+        };
+        map.on("mouseenter", "rally-points", showRallyPopup);
+        map.on("mousemove", "rally-points", showRallyPopup);
+        map.on("mouseleave", "rally-points", hideRallyPopup);
       }
 
       // Re-stack: cone < perimeter < incidents on top of routes so the
@@ -1902,16 +2015,12 @@ function buildEgressPopupHtml(props: {
   length_km?: number;
   minutes?: number;
   wind_relation?: string;
+  dest_name?: string;
+  dest_type?: string;
+  dest_source?: string;
 }): string {
   const rel = (props.wind_relation ?? "unknown").toLowerCase();
-  const relColor =
-    rel === "upwind"
-      ? "#10b981"
-      : rel === "crosswind"
-        ? "#f59e0b"
-        : rel === "downwind"
-          ? "#dc2626"
-          : "#94a3b8";
+  const relColor = windRelationHex(rel);
   const relText =
     rel === "upwind"
       ? "upwind · safe escape"
@@ -1929,12 +2038,60 @@ function buildEgressPopupHtml(props: {
   const bearingLine = `bearing ${escapeHtml(String(props.bearing ?? "?"))}${
     props.bearing_deg != null ? ` (${Number(props.bearing_deg).toFixed(0)}°)` : ""
   }`;
-  return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid ${relColor}66;min-width:170px">
-    <strong style="color:${relColor}">Egress · ${escapeHtml(String(props.bearing ?? "?"))}</strong><br/>
-    <span style="color:#cbd5e1">${escapeHtml(bearingLine)}</span><br/>
-    <span style="color:#cbd5e1">${escapeHtml(lenLine + " · " + minLine)}</span><br/>
-    <span style="color:${relColor};font-size:10px">${escapeHtml(relText)}</span>
+  const destBlock = props.dest_name
+    ? `<div style="color:#e2e8f0;font-size:11px;margin-top:3px">→ ${escapeHtml(String(props.dest_name))}</div>
+       <div style="color:#94a3b8;font-size:10px">${escapeHtml(String(props.dest_type ?? ""))}${props.dest_source ? ` · ${escapeHtml(String(props.dest_source))}` : ""}</div>`
+    : `<div style="color:#94a3b8;font-size:10px;margin-top:3px;font-style:italic">no defined rally point — bearing fallback</div>`;
+  return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid ${relColor}66;min-width:200px">
+    <strong style="color:${relColor}">Egress · ${escapeHtml(String(props.bearing ?? "?"))}</strong>
+    ${destBlock}
+    <div style="color:#cbd5e1;margin-top:3px">${escapeHtml(bearingLine)}</div>
+    <div style="color:#cbd5e1">${escapeHtml(lenLine + " · " + minLine)}</div>
+    <div style="color:${relColor};font-size:10px;margin-top:2px">${escapeHtml(relText)}</div>
   </div>`;
+}
+
+function buildRallyPopupHtml(props: {
+  name?: string;
+  rally_type?: string;
+  source?: string;
+  capacity?: number | null;
+  score?: number;
+  wind_relation?: string;
+}): string {
+  const rel = (props.wind_relation ?? "unknown").toLowerCase();
+  const relColor = windRelationHex(rel);
+  const typeLabel = (props.rally_type ?? "rally").replace(/_/g, " ");
+  const capLine =
+    props.capacity != null && Number(props.capacity) > 0
+      ? `capacity ~${Number(props.capacity).toLocaleString()}`
+      : "capacity unknown";
+  const scoreLine =
+    props.score != null ? `score ${Number(props.score).toFixed(2)}` : "";
+  const srcLine = props.source ? `source: ${escapeHtml(String(props.source))}` : "";
+  return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid ${relColor}66;min-width:180px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
+      <strong style="color:${relColor}">${escapeHtml(String(props.name ?? "Rally point"))}</strong>
+      <span style="color:#cbd5e1;font-variant-numeric:tabular-nums">${escapeHtml(scoreLine)}</span>
+    </div>
+    <div style="color:#94a3b8;font-size:10px;text-transform:uppercase;letter-spacing:0.04em">${escapeHtml(typeLabel)}</div>
+    <div style="color:#cbd5e1;margin-top:3px">${escapeHtml(capLine)}</div>
+    <div style="color:#94a3b8;font-size:10px">${srcLine}</div>
+    <div style="color:${relColor};font-size:10px;margin-top:3px">${escapeHtml(rel)}</div>
+  </div>`;
+}
+
+function windRelationHex(rel: string): string {
+  switch (rel) {
+    case "upwind":
+      return "#10b981";
+    case "crosswind":
+      return "#f59e0b";
+    case "downwind":
+      return "#dc2626";
+    default:
+      return "#94a3b8";
+  }
 }
 
 function Legend({
@@ -2206,6 +2363,10 @@ function Legend({
           <div className="flex items-center gap-1.5">
             <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
             <span>Proposed staging</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block h-2 w-2 rounded-full border border-slate-900 bg-emerald-400" />
+            <span>Rally point (color by wind)</span>
           </div>
         </div>
       )}

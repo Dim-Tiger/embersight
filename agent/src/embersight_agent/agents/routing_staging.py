@@ -39,6 +39,7 @@ from ..tools.overpass import (
     get_water_features,
     query_osm,
 )
+from ..tools.rally_points import discover_rally_points
 from ..tools.routing import (
     find_routes,
     get_road_network,
@@ -400,6 +401,76 @@ def _compute_egress_routes(
     return routes
 
 
+def _route_to_rally_points(
+    graph: Any,
+    incident_latlon: tuple[float, float],
+    rally_points: list[dict[str, Any]],
+    target_count: int = 6,
+) -> list[dict[str, Any]]:
+    """Compute drive routes from the incident to each ranked rally point.
+
+    Returns one entry per successfully-routed point, in input order
+    (which is already wind-aware + type-priority ranked). Each entry
+    carries the full rally-point metadata so the UI can label routes
+    by destination name + type, not just bearing."""
+    if graph is None or not rally_points:
+        return []
+    out: list[dict[str, Any]] = []
+    for rp in rally_points:
+        loc = rp.get("loc")
+        if not loc:
+            continue
+        try:
+            cands = find_routes(graph, incident_latlon, loc, k=1)
+        except Exception:
+            continue
+        if not cands:
+            continue
+        r = cands[0]
+        out.append(
+            {
+                **r,
+                "destination": {
+                    "name": rp.get("name"),
+                    "rally_type": rp.get("rally_type"),
+                    "source": rp.get("source"),
+                    "capacity": rp.get("capacity"),
+                    "loc": list(loc),
+                    "score": rp.get("score"),
+                    "score_components": rp.get("score_components"),
+                },
+                "wind_relation": rp.get("wind_relation", "unknown"),
+                # Backwards-compat: existing UI uses `bearing` + `endpoint`.
+                "bearing": _compass_label_for(r.get("bearing_deg") or 0.0),
+                "bearing_deg": r.get("bearing_deg"),
+                "endpoint": list(loc),
+            }
+        )
+        if len(out) >= target_count:
+            break
+    return out
+
+
+_COMPASS_8 = [
+    ("N", 0.0), ("NE", 45.0), ("E", 90.0), ("SE", 135.0),
+    ("S", 180.0), ("SW", 225.0), ("W", 270.0), ("NW", 315.0),
+]
+
+
+def _compass_label_for(bearing_deg: float) -> str:
+    """Map a 0..360 bearing to the closest 8-point compass label."""
+    if bearing_deg is None or not math.isfinite(bearing_deg):
+        return "?"
+    best_label = "N"
+    best_diff = math.inf
+    for label, b in _COMPASS_8:
+        d = _ang_diff_deg(bearing_deg, b)
+        if d < best_diff:
+            best_diff = d
+            best_label = label
+    return best_label
+
+
 def _wind_relation_tag(bearing_deg: float, wind_from_deg: float | None) -> str:
     if wind_from_deg is None or not math.isfinite(wind_from_deg):
         return "unknown"
@@ -441,17 +512,21 @@ async def _llm_narrative(payload: dict[str, Any]) -> str | None:
     upwind_routes = [
         r for r in payload.get("egress_routes", []) if r.get("wind_relation") == "upwind"
     ]
+    rally_points = payload.get("rally_points", [])
+    top_rally = rally_points[0] if rally_points else None
     user = (
-        "Recommend a primary incident staging area and its primary ingress route.\n"
+        "Recommend a primary incident staging area and its primary ingress route, "
+        "and identify the best evacuation destination from defined rally points.\n"
         f"Incident: {payload.get('incident_name')} at {payload.get('incident_latlon')}.\n"
         f"OSM features in 25 km AOI: paved={payload.get('counts', {}).get('paved')}, "
         f"water={payload.get('counts', {}).get('water')}, "
         f"fire_stations={payload.get('counts', {}).get('fire_stations')}.\n"
         f"Wind: {wind.get('from_deg')}° at {wind.get('speed_mph')} mph (FROM).\n"
-        f"Top candidate (with component scores): {top}.\n"
+        f"Top staging candidate: {top}.\n"
+        f"Top rally point: {top_rally}.\n"
         f"Best upwind egress route(s): {upwind_routes[:2]}.\n"
         "Output 2-3 sentences, ≤90 words, RECOMMEND/PROPOSE/SUGGEST verbs only. "
-        "Mention wind alignment and the safety standoff. "
+        "Mention wind alignment, the safety standoff, and the rally-point destination + type. "
         "Never use directive verbs like 'dispatch', 'order', 'send', 'publish'."
     )
     try:
@@ -613,10 +688,40 @@ async def run(state: AgentState) -> dict:
     top = enriched[0] if enriched else None
     primary_routes = top["routes"] if top else []
 
-    # Outward egress routes (incident → nearest major-road node) — ranked
-    # so upwind/crosswind egress (away from fire-head) comes first.
+    # Rally points: defined evacuation destinations (OSM assembly_points +
+    # shelters + schools + community centres; HIFLD schools + EOCs; best-effort
+    # CAL FIRE per-incident evac centers). Replaces the old bearing-based
+    # "nearest major-road node" egress with routes to actual destinations.
+    rally_block = await discover_rally_points(
+        bbox=bbox,
+        incident_latlon=incident_latlon,
+        incident_name=incident.name,
+        wind_from_deg=wind_from_deg,
+        aoi_radius_km=30.0,
+        top_n=8,
+    )
+    rally_points = rally_block["points"]
+    rally_counts = rally_block["counts"]
+    rally_failures = rally_block["source_failures"]
+
     egress_routes: list[dict[str, Any]] = []
-    if road_graph is not None:
+    egress_strategy = "rally_points"
+    if road_graph is not None and rally_points:
+        try:
+            egress_routes = await asyncio.to_thread(
+                _route_to_rally_points,
+                road_graph,
+                incident_latlon,
+                rally_points,
+                6,
+            )
+        except Exception:
+            egress_routes = []
+    # Fallback: if no rally points were reachable (rural AOI, OSM sparse,
+    # HIFLD down, CAL FIRE silent), fall back to the bearing-based logic
+    # so the IC still gets a wind-aware "escape direction" hint.
+    if road_graph is not None and not egress_routes:
+        egress_strategy = "bearings_fallback"
         try:
             egress_routes = await asyncio.to_thread(
                 _compute_egress_routes, road_graph, incident_latlon, wind_from_deg
@@ -653,6 +758,8 @@ async def run(state: AgentState) -> dict:
     have_wind = wind_from_deg is not None
     have_terrain = aoi_elev_m is not None or aoi_slope_pct is not None
     sparse_roads = have_graph and road_density < 1.5
+    have_rally = len(rally_points) >= 1
+    routed_rally = sum(1 for r in egress_routes if r.get("destination"))
 
     drivers: list[str] = []
     confidence = 1.0
@@ -689,6 +796,18 @@ async def run(state: AgentState) -> dict:
     if not have_terrain:
         confidence -= 0.04
         drivers.append("terrain_fuel unavailable — elevation/slope used neutral defaults")
+    if not have_rally:
+        confidence -= 0.10
+        drivers.append("no rally points discovered — fell back to bearing-based egress")
+    elif routed_rally > 0:
+        drivers.append(
+            f"routed to {routed_rally} defined rally point(s) "
+            f"(osm={rally_counts.get('osm', 0)}, hifld={rally_counts.get('hifld', 0)}, "
+            f"calfire={rally_counts.get('calfire', 0)})"
+        )
+    if rally_failures:
+        confidence -= 0.03
+        drivers.append(f"rally-source failures: {','.join(rally_failures)}")
     if osm_failures:
         confidence -= 0.05
         drivers.append(f"Overpass failures: {','.join(osm_failures)}")
@@ -728,6 +847,10 @@ async def run(state: AgentState) -> dict:
             "aoi_slope_pct": aoi_slope_pct,
             "source": "terrain_fuel" if have_terrain else None,
         },
+        "rally_points": rally_points,
+        "rally_counts": rally_counts,
+        "rally_source_failures": rally_failures,
+        "egress_strategy": egress_strategy,
     }
 
     llm_text = await _llm_narrative(payload)
@@ -772,9 +895,24 @@ async def run(state: AgentState) -> dict:
     upwind_egress = [r for r in egress_routes if r.get("wind_relation") == "upwind"]
     if upwind_egress:
         be = upwind_egress[0]
+        dest = be.get("destination") or {}
+        if dest.get("name"):
+            key_findings.append(
+                f"Primary egress: → {dest.get('name')} "
+                f"({dest.get('rally_type', 'rally')}, upwind), "
+                f"{be['length_km']} km / {be['est_drive_minutes']} min"
+            )
+        else:
+            key_findings.append(
+                f"Primary egress: bearing {be['bearing']} (upwind), "
+                f"{be['length_km']} km / {be['est_drive_minutes']} min"
+            )
+    if rally_points:
+        top_rp = rally_points[0]
         key_findings.append(
-            f"Primary egress: bearing {be['bearing']} (upwind), "
-            f"{be['length_km']} km / {be['est_drive_minutes']} min"
+            f"Top rally point: {top_rp.get('name')} "
+            f"({top_rp.get('rally_type')}, src={top_rp.get('source')}, "
+            f"score {top_rp.get('score', 0):.2f})"
         )
     payload["key_findings"] = key_findings
 
@@ -794,6 +932,14 @@ async def run(state: AgentState) -> dict:
                 Dataset(
                     name="OSMnx road graph",
                     version="network_type=drive,radius_km=25",
+                ),
+                Dataset(
+                    name="HIFLD Public/Private Schools + Local EOCs",
+                    version="ArcGIS REST FeatureServer",
+                ),
+                Dataset(
+                    name="CAL FIRE incidents JSON",
+                    version="incidents.fire.ca.gov",
                 ),
             ],
             models=[Model(name=MODEL_NAME, version="2025-10")],
