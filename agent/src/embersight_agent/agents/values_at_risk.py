@@ -197,6 +197,38 @@ def _rollup(tallies: dict[str, Any]) -> dict[str, Any]:
 
     by_occ = (usa.get("by_occupancy") or {}) if isinstance(usa, dict) else {}
 
+    # Named facilities — included in the payload so downstream agents and
+    # the Master IC can reference specific places by name instead of
+    # quoting only aggregate counts. Sort by capacity (beds/enrollment) so
+    # the most-consequential first; cap each list at 5 to keep the prompt
+    # context small.
+    named_hospitals = sorted(
+        (
+            {
+                "name": str(h.get("name") or "Unknown"),
+                "beds": int(h.get("beds", 0) or 0),
+                "lat": float(h.get("lat", 0.0) or 0.0),
+                "lon": float(h.get("lon", 0.0) or 0.0),
+            }
+            for h in hospitals_clean
+            if h.get("name") and h.get("name") != "Unknown"
+        ),
+        key=lambda h: -h["beds"],
+    )[:5]
+    named_schools = sorted(
+        (
+            {
+                "name": str(s.get("name") or "Unknown"),
+                "enrollment": int(s.get("enrollment", 0) or 0),
+                "lat": float(s.get("lat", 0.0) or 0.0),
+                "lon": float(s.get("lon", 0.0) or 0.0),
+            }
+            for s in schools_clean
+            if s.get("name") and s.get("name") != "Unknown"
+        ),
+        key=lambda s: -s["enrollment"],
+    )[:5]
+
     return {
         "structures_total": ms.get("count", 0) if isinstance(ms, dict) else 0,
         "total_footprint_sqm": (
@@ -209,10 +241,12 @@ def _rollup(tallies: dict[str, Any]) -> dict[str, Any]:
         "industrial_count": by_occ.get("Industrial", 0),
         "hospitals_count": len(hospitals_clean),
         "hospitals_total_beds": sum(int(h.get("beds", 0)) for h in hospitals_clean),
+        "named_hospitals": named_hospitals,
         "schools_count": len(schools_clean),
         "schools_total_enrollment": sum(
             int(s.get("enrollment", 0)) for s in schools_clean
         ),
+        "named_schools": named_schools,
         "transmission_segments": len(lines_clean),
         "transmission_max_kv": max(
             (float(ln.get("voltage_kv", 0) or 0) for ln in lines_clean),
@@ -262,14 +296,35 @@ def _fallback_narrative(
     roll: dict[str, Any], cone_source: str, incident: Incident | None
 ) -> str:
     inc = incident.name if incident else "the incident"
+    # Surface named facilities so the IC sees specific places, not just counts.
+    named_h = roll.get("named_hospitals") or []
+    named_s = roll.get("named_schools") or []
+    hosp_phrase = (
+        f"{roll['hospitals_count']} hospitals ({roll['hospitals_total_beds']:,} beds"
+        + (
+            "; highest-capacity: "
+            + ", ".join(f"{h['name']} ({h['beds']} beds)" for h in named_h[:3])
+            if named_h
+            else ""
+        )
+        + ")"
+    )
+    school_phrase = (
+        f"{roll['schools_count']} schools "
+        f"({roll['schools_total_enrollment']:,} enrollment"
+        + (
+            "; largest: "
+            + ", ".join(f"{s['name']}" for s in named_s[:3])
+            if named_s
+            else ""
+        )
+        + ")"
+    )
     return (
         f"Values-at-Risk inventory for {inc} (cone source: {cone_source}). "
         f"PROPOSE prioritizing protection of "
         f"{roll['residential_count']:,} residential structures, "
-        f"{roll['hospitals_count']} hospitals "
-        f"({roll['hospitals_total_beds']:,} beds), and "
-        f"{roll['schools_count']} schools "
-        f"({roll['schools_total_enrollment']:,} enrollment). "
+        f"{hosp_phrase}, and {school_phrase}. "
         f"{roll['transmission_segments']} transmission segments "
         f"(up to {roll['transmission_max_kv']:.0f} kV) "
         f"and {roll['critical_facilities_total']} critical facilities "
@@ -296,7 +351,10 @@ async def _llm_narrative(
         f"Cone source: {cone_source}\n"
         f"Tally JSON: {roll}\n\n"
         "Write a 3-5 sentence IMT-style summary of the values at risk. "
-        "Use PROPOSE / RECOMMEND verbs only. No fabricated numbers."
+        "Use PROPOSE / RECOMMEND verbs only. No fabricated numbers. "
+        "When `named_hospitals` or `named_schools` are present, reference "
+        "the highest-capacity 1-2 facilities BY NAME so the IC knows which "
+        "specific places need protection — don't just cite aggregate counts."
     )
     try:
         from ..tools.llm_stream import stream_text  # noqa: PLC0415

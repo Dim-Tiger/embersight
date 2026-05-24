@@ -820,6 +820,25 @@ async def run(state: AgentState) -> dict:
         confidence = max(confidence, floor)
 
     # --- Payload + narrative ------------------------------------------------
+    # Named fire stations — sorted by distance from the incident so the
+    # IC sees the nearest mutual-aid resources first. Capped at 5 to keep
+    # the LLM prompt context small.
+    named_stations: list[dict[str, Any]] = []
+    for s in fire_stations:
+        loc = _feature_latlon(s)
+        if not loc:
+            continue
+        named_stations.append(
+            {
+                "name": _feature_name(s, "fire station"),
+                "lat": loc[0],
+                "lon": loc[1],
+                "dist_km": round(_haversine_km(incident_latlon, loc), 2),
+            }
+        )
+    named_stations.sort(key=lambda s: s["dist_km"])
+    named_stations = named_stations[:5]
+
     payload = {
         "incident_name": incident.name,
         "incident_latlon": incident_latlon,
@@ -831,6 +850,7 @@ async def run(state: AgentState) -> dict:
             "highways": len(highways),
             "candidates": len(enriched),
         },
+        "fire_stations": named_stations,
         "candidates": enriched,
         "primary_routes": primary_routes,
         "egress_routes": egress_routes,

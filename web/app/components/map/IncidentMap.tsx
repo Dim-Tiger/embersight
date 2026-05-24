@@ -1739,17 +1739,28 @@ export function IncidentMap() {
             // Tight speed range so typical 2–10 m/s winds land in the
             // bright white band; only genuinely strong gusts trip warm.
             speedRange: [0, 14],
-            // Mostly translucent → bright white core, with a faint warm
-            // wash reserved for the top end. Keeps the field reading as a
-            // cohesive flow instead of a rainbow.
-            colorRamp: [
-              [0.0, [226, 232, 240, 0]], // fully transparent tail
-              [0.1, [241, 245, 249, 140]], // soft slate fade-in
-              [0.35, [255, 255, 255, 235]], // bright white core
-              [0.6, [255, 255, 255, 255]], // peak white
-              [0.8, [253, 186, 116, 245]], // orange-300 (breezy)
-              [1.0, [239, 68, 68, 255]], // red-500 (gale)
-            ],
+            // The color ramp switches with the basemap. Dark basemap reads
+            // best with mostly-white particles + warm gust tints. Satellite
+            // imagery is light/varied (browns, greens, snow), so whites
+            // disappear into it — we use cyan → yellow → red, which pops
+            // against both light terrain and shaded canyons.
+            colorRamp:
+              basemap === "satellite"
+                ? [
+                    [0.0, [15, 23, 42, 0]], // transparent tail
+                    [0.12, [30, 64, 175, 200]], // deep blue fade-in
+                    [0.35, [56, 189, 248, 255]], // sky-400 core
+                    [0.6, [250, 204, 21, 255]], // yellow-400 (breezy)
+                    [1.0, [239, 68, 68, 255]], // red-500 (gale)
+                  ]
+                : [
+                    [0.0, [226, 232, 240, 0]], // fully transparent tail
+                    [0.1, [241, 245, 249, 140]], // soft slate fade-in
+                    [0.35, [255, 255, 255, 235]], // bright white core
+                    [0.6, [255, 255, 255, 255]], // peak white
+                    [0.8, [253, 186, 116, 245]], // orange-300 (breezy)
+                    [1.0, [239, 68, 68, 255]], // red-500 (gale)
+                  ],
           }),
         ],
       });
@@ -1758,7 +1769,7 @@ export function IncidentMap() {
     } catch (err) {
       console.warn("wind layer error:", err);
     }
-  }, [wind, showWind, mapLoaded, windLowZoom]);
+  }, [wind, showWind, mapLoaded, windLowZoom, basemap]);
 
   // ---- Register custom infra icons ----
   // Pre-render each layer's emoji onto a colored disc and load it as a
