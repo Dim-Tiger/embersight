@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EmberSight — Humans decide. EmberSight informs.</title>
+  <meta name="description" content="Agentic incident intelligence for wildfire Incident Management Teams. Humans decide. EmberSight informs." />
+
+  <link rel="icon" href="/landing/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/landing/assets/favicons/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/landing/assets/favicons/favicon-16.png" />
+  <link rel="apple-touch-icon" href="/landing/assets/favicons/apple-touch-icon.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/landing/assets/favicons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/landing/assets/favicons/icon-512.png" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Instrument+Serif&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- intro overlay: red particle converge to logo -->
+  <div id="intro" class="intro" aria-hidden="true">
+    <canvas id="introCanvas" class="intro__canvas"></canvas>
+    <button id="skipIntro" class="intro__skip" type="button" aria-label="Skip intro">Skip</button>
+  </div>
+
+  <main id="site" class="site" aria-hidden="true">
+    <header class="nav">
+      <a href="/landing/" class="nav__brand">
+        <img src="assets/logo.png" alt="EmberSight" />
+        <span>EmberSight</span>
+      </a>
+      <nav class="nav__links">
+        <a href="#problem">Problem</a>
+        <a href="#agents">Agents</a>
+        <a href="#mission">Mission</a>
+      </nav>
+      <div class="nav__right">
+        <a href="#mission" class="btn btn--ghost">Request access</a>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="hero__inner">
+        <img class="hero__logo" src="assets/logo.png" alt="EmberSight" />
+        <p class="eyebrow">Agentic incident intelligence for wildfire IMTs</p>
+        <h1 class="hero__title">
+          Humans decide. <em>EmberSight informs.</em>
+        </h1>
+        <p class="hero__sub">
+          A hierarchical team of AI agents reads the fire, the weather, the terrain, and the people in its path — so Incident Commanders can decide faster, with the full picture in front of them.
+        </p>
+        <div class="hero__cta">
+          <a href="#mission" class="btn btn--primary">Request access</a>
+          <a href="#problem" class="btn btn--link">See how it works →</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="problem" class="section">
+      <div class="section__inner">
+        <div class="section__head">
+          <div>
+            <p class="section__kicker">The problem</p>
+            <h2 class="section__title">IMTs aren't data-starved. They're time-starved.</h2>
+          </div>
+          <p class="section__body">
+            Wildfire conditions change in minutes. Weather, fuel, terrain, structures, evacuation zones, crew positions — the data exists, fragmented across agencies and feeds. EmberSight runs a coordinated agent team that fuses it continuously and surfaces the few decisions that matter right now.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="agents" class="section section--alt">
+      <div class="section__inner">
+        <div class="section__head">
+          <div>
+            <p class="section__kicker">The agent team</p>
+            <h2 class="section__title">Seven specialists. One commander.</h2>
+          </div>
+          <p class="section__body">
+            Each agent owns a single dimension of the incident. A Master Incident Commander agent fuses their findings into one explainable brief — every recommendation flagged for human approval.
+          </p>
+        </div>
+        <ul class="agents">
+          <li><span class="agents__num">01</span><span class="agents__name">Weather &amp; Wind</span><p class="agents__desc">Gusts, humidity, Red Flag thresholds, forecast shifts.</p></li>
+          <li><span class="agents__num">02</span><span class="agents__name">Terrain &amp; Fuel</span><p class="agents__desc">Slope, aspect, fuel continuity, barriers, access.</p></li>
+          <li><span class="agents__num">03</span><span class="agents__name">Spread Simulation</span><p class="agents__desc">Probabilistic 30 / 60 / 120-minute spread cones with trigger points.</p></li>
+          <li><span class="agents__num">04</span><span class="agents__name">Values at Risk</span><p class="agents__desc">Structures, critical infrastructure, vulnerable facilities in the cone.</p></li>
+          <li><span class="agents__num">05</span><span class="agents__name">Routing &amp; Staging</span><p class="agents__desc">Ingress, egress, water, and the roads to avoid.</p></li>
+          <li><span class="agents__num">06</span><span class="agents__name">Resource Rec.</span><p class="agents__desc">Suggested response packages — never dispatches on its own.</p></li>
+          <li><span class="agents__num">07</span><span class="agents__name">Evacuation Intel</span><p class="agents__desc">Watch zones, bottlenecks, vulnerable populations, warning language.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="mission" class="mission">
+      <div class="mission__inner">
+        <p class="section__kicker">The principle</p>
+        <h2>Built for the wildland-urban interface, where decisions save lives.</h2>
+        <p>EmberSight augments the IMT — it does not replace it. Every action is a recommendation, every recommendation is explainable, every override is logged.</p>
+        <a href="#" class="btn btn--primary">Request access</a>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span class="footer__brand"><img src="assets/logo.png" alt="" /> EmberSight</span>
+      <span>Because seconds matter · Alphag3n HAI Hackathon</span>
+    </footer>
+  </main>
+
+  <script>
+    // shared site reveal — also used by intro scripts when the animation ends
+    window.__embersight = {
+      revealSite() {
+        const site = document.getElementById('site');
+        site.setAttribute('aria-hidden', 'false');
+        site.classList.add('is-visible');
+      },
+      hideIntro() {
+        const intro = document.getElementById('intro');
+        intro.classList.add('is-hidden');
+        setTimeout(() => intro.remove(), 800);
+      },
+    };
+  </script>
+  <script src="intro-fire.js"></script>
+</body>
+</html>
