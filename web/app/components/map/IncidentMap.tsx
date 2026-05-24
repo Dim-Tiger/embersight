@@ -225,6 +225,9 @@ export function IncidentMap() {
   // once per Map instance at initial creation. After setStyle, only
   // `styledata` / `style.load` fire — so listening for `load` here
   // leaves mapLoaded stuck at false and every overlay vanishes.
+  // Skip the very first render: the map is already being constructed
+  // with the right style by the init effect above.
+  const basemapInitialized = useRef(false);
   useEffect(() => {
     if (!basemapInitialized.current) {
       basemapInitialized.current = true;
