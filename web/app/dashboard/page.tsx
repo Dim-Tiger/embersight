@@ -20,19 +20,19 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DevPanel } from "./components/DevPanel";
-import { ApprovalQueue } from "./components/panels/ApprovalQueue";
-import { BriefingTab } from "./components/panels/BriefingTab";
-import { ChatPanel } from "./components/panels/ChatPanel";
-import { EvacuationTab } from "./components/panels/EvacuationTab";
-import { IAPDraft } from "./components/panels/IAPDraft";
-import { IncidentMap } from "./components/map/IncidentMap";
-import { LiveFeed } from "./components/panels/LiveFeed";
-import { PipelineLadder } from "./components/panels/PipelineLadder";
-import { ResourcesTab } from "./components/panels/ResourcesTab";
-import { ThreatsTab } from "./components/panels/ThreatsTab";
-import { useAgentStream } from "./components/panels/useAgentStream";
-import { WeatherTab } from "./components/panels/WeatherTab";
+import { DevPanel } from "../components/DevPanel";
+import { ApprovalQueue } from "../components/panels/ApprovalQueue";
+import { BriefingTab } from "../components/panels/BriefingTab";
+import { ChatPanel } from "../components/panels/ChatPanel";
+import { EvacuationTab } from "../components/panels/EvacuationTab";
+import { IAPDraft } from "../components/panels/IAPDraft";
+import { IncidentMap } from "../components/map/IncidentMap";
+import { LiveFeed } from "../components/panels/LiveFeed";
+import { PipelineLadder } from "../components/panels/PipelineLadder";
+import { ResourcesTab } from "../components/panels/ResourcesTab";
+import { ThreatsTab } from "../components/panels/ThreatsTab";
+import { useAgentStream } from "../components/panels/useAgentStream";
+import { WeatherTab } from "../components/panels/WeatherTab";
 
 // Which subagents own the data on each tab. Used by the sidebar to render a
 // per-tab status dot so the IC can see at-a-glance which tabs have work
