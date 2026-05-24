@@ -375,63 +375,42 @@ export function IncidentMap() {
           "satellite-overlay",
           SATELLITE_STYLE.sources["esri-world-imagery"],
         );
-        // Install the raster on top of every carto vector layer that's
-        // already in the style — when satellite is visible we want it to
-        // fully cover the dark base (otherwise carto labels/water/roads
-        // bleed through, and any not-yet-loaded satellite tiles leave
-        // dark gaps that look like rendering corruption). Then we push
-        // every user data layer above the raster so the overlays sit on
-        // top of the satellite imagery as well.
         map.addLayer({
           id: "satellite-overlay",
           type: "raster",
           source: "satellite-overlay",
         });
-        const liftList = [
-          "evac-fill",
-          "evac-outline",
-          "suggested-evac-fill",
-          "suggested-evac-line",
-          "accepted-evac-fill",
-          "accepted-evac-line",
-          "cone-outline-glow",
-          "cone-fill",
-          "cone-outline",
-          "perimeter-fill",
-          "perimeter-outline",
-          "staging-point",
-          "incidents-glow",
-          "incidents-circle",
-          "firms-heat",
-          "firms-points",
-          "routes-egress-casing",
-          "routes-egress",
-          "routes-ingress-casing",
-          "routes-ingress",
-        ];
-        // Also lift every infra overlay so points/lines from this PR sit
-        // above the satellite raster.
-        for (const l of INFRA_LAYERS) {
-          liftList.push(
-            `infra-${l.id}-halo`,
-            `infra-${l.id}-pt`,
-            `infra-${l.id}-line-casing`,
-            `infra-${l.id}-line`,
-          );
-        }
-        for (const id of liftList) {
-          if (map.getLayer(id)) map.moveLayer(id);
-        }
       } catch (err) {
         console.warn("satellite overlay install error:", err);
       }
     }
-    if (map.getLayer("satellite-overlay")) {
-      map.setLayoutProperty(
-        "satellite-overlay",
-        "visibility",
-        basemap === "satellite" ? "visible" : "none",
-      );
+
+    if (!map.getLayer("satellite-overlay")) return;
+
+    map.setLayoutProperty(
+      "satellite-overlay",
+      "visibility",
+      basemap === "satellite" ? "visible" : "none",
+    );
+
+    // Promote every non-basemap layer above the satellite raster on every
+    // basemap flip. The previous version hardcoded an allowlist and only
+    // ran on first install — any data layer added later (or missing from
+    // the list) disappeared under the satellite raster. Walking the live
+    // style is idempotent and catches all of them.
+    if (basemap === "satellite") {
+      const layers = map.getStyle().layers ?? [];
+      for (const layer of layers) {
+        const id = layer.id;
+        if (id === "satellite-overlay") continue;
+        // Skip Carto vector basemap layers — they sit under the raster.
+        if (id.startsWith("carto-") || id.startsWith("background")) continue;
+        try {
+          map.moveLayer(id);
+        } catch {
+          /* layer may have been removed mid-flip */
+        }
+      }
     }
   }, [basemap, mapLoaded]);
 
@@ -1650,20 +1629,22 @@ export function IncidentMap() {
     if (!showWind || !wind?.vectors?.length) return;
 
     try {
-      // Open-Meteo's wind_direction_10m is meteorological "FROM" — the
-      // direction the wind originates from. maplibre-gl-wind's
-      // generateWindTexture interprets `direction` as the heading the wind
-      // travels TOWARD (u = speed·sin(dir), v = speed·cos(dir)). Pre-flip by
-      // 180° here so the particle drift matches physical wind direction and
-      // agrees with the spread-cone heading.
+      // Open-Meteo's `wind_direction_10m` is the meteorological FROM bearing
+      // (compass degrees the wind originates from). maplibre-gl-wind's
+      // generateWindTexture takes the TO heading — u = speed·sin(dir),
+      // v = speed·cos(dir) means `direction: 0` yields v=+speed (northward
+      // flow), which is the TO convention. Flip FROM → TO by adding 180°
+      // before handing the vectors off. Previously the flipped array was
+      // computed but discarded — the raw FROM was passed instead, so
+      // particles drifted straight upwind.
       const vectorsTo = wind.vectors.map((v) => ({
         ...v,
         direction: (v.direction + 180) % 360,
       }));
-      // // When zoomed out the 66km sample box collapses to a few pixels, so we
-      // // pad the rendered bounds outward. The IDW texture extrapolates the same
-      // // 7x7 sample to the wider extent — fine for visualization since wind at
-      // // this synoptic scale is smooth.
+      // When zoomed out the 66km sample box collapses to a few pixels, so we
+      // pad the rendered bounds outward. The IDW texture extrapolates the same
+      // 7x7 sample to the wider extent — fine for visualization since wind at
+      // this synoptic scale is smooth.
       const [w0, s0, e0, n0] = wind.bounds;
       const padX = (e0 - w0) * (windLowZoom ? 1.0 : 0.0);
       const padY = (n0 - s0) * (windLowZoom ? 1.0 : 0.0);
@@ -1673,16 +1654,9 @@ export function IncidentMap() {
         e0 + padX,
         n0 + padY,
       ];
-  
-      // Open-Meteo's wind_direction_10m is meteorological "FROM". Despite
-      // the `u = speed·sin(dir)`, `v = speed·cos(dir)` formula in
-      // maplibre-gl-wind looking like a "TO heading" convention, empirically
-      // passing the raw FROM value makes the particles drift the right way
-      // (and a pre-flip by 180° sends them upwind). Likely some combination
-      // of texture-Y orientation and lat/lon axis signs in the shader nets
-      // out to "feed it the meteorological FROM direction unchanged."
+
       const { canvas, uMin, uMax, vMin, vMax } = generateWindTexture(
-        wind.vectors,
+        vectorsTo,
         {
           width: 128,
           height: 128,
@@ -2368,7 +2342,10 @@ function Legend({
     ? wind.vectors[Math.floor(wind.vectors.length / 2)]
     : null;
   return (
-    <div className="absolute bottom-3 left-3 z-20 max-w-[260px] rounded-md bg-smoke-800/90 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
+    // z-50 + isolate keeps the legend above the deck.gl wind overlay canvas,
+    // which paints inside the maplibre container and would otherwise overlap
+    // any sibling at z-20.
+    <div className="absolute bottom-3 left-3 z-50 isolate max-w-[260px] rounded-md bg-smoke-800/90 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
       <button
         type="button"
         onClick={() => setCollapsed(!collapsed)}
