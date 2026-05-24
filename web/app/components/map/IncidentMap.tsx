@@ -66,6 +66,16 @@ export function IncidentMap() {
   const [abovePerimeterZoom, setAbovePerimeterZoom] = useState(
     () => viewport.zoom >= PERIMETER_HIDE_CIRCLE_ZOOM,
   );
+  // Tracks whether the perimeter "session" is active for the currently
+  // selected fire.  Set to true when a fire is selected; cleared to false the
+  // instant the user zooms out below the threshold.  Crucially it does NOT
+  // flip back to true when the user zooms in again — only an explicit
+  // re-selection does that.  This gives us the three-phase behaviour:
+  //   select → zoom in  → perimeter on  / circle off
+  //            zoom out → perimeter off / circle on   (dismissed)
+  //            zoom in  → perimeter still off          (stays dismissed)
+  //   re-select          → perimeter on  / circle off  (fresh session)
+  const [perimeterEnabled, setPerimeterEnabled] = useState(false);
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
   const irwinId = selectedIncidentId?.startsWith("wfigs:")
@@ -140,6 +150,17 @@ export function IncidentMap() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIncidentId]);
+
+  // Enable the perimeter session whenever a fire is (re-)selected.
+  useEffect(() => {
+    setPerimeterEnabled(!!selectedIncidentId);
+  }, [selectedIncidentId]);
+
+  // Dismiss the perimeter the moment the user zooms back out below the
+  // threshold.  We do NOT re-enable it on zoom-in — only selection does that.
+  useEffect(() => {
+    if (!abovePerimeterZoom) setPerimeterEnabled(false);
+  }, [abovePerimeterZoom]);
 
   // Render incidents as native WebGL circle layers
   useEffect(() => {
@@ -279,30 +300,39 @@ export function IncidentMap() {
     }
   }, [perimeter, mapLoaded]);
 
-  // Hide the orange circle for the selected fire when a perimeter is loaded
-  // and the map is zoomed in past PERIMETER_HIDE_CIRCLE_ZOOM.  The perimeter
-  // polygon provides much better spatial context at that scale.  When zoomed
-  // back out the circle reappears automatically.
+  // ---- Synchronise circle visibility & perimeter visibility ----
+  // The two layers are always toggled together so the transition is atomic:
+  // circle hidden  ↔  perimeter visible   (when perimeterEnabled && zoomed in)
+  // circle visible ↔  perimeter hidden    (any other state)
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
 
     const hasPerimeter = !!perimeter?.features?.length;
-    const shouldHide = hasPerimeter && !!selectedIncidentId && abovePerimeterZoom;
+    // Both conditions must hold: the session is active AND zoom is above the
+    // threshold AND perimeter data has actually arrived.
+    const perimeterOn = perimeterEnabled && abovePerimeterZoom && hasPerimeter;
 
-    // A filter of null removes any existing filter and shows all features.
-    // When hiding, exclude only the selected fire so the others stay visible.
-    const filter: maplibregl.FilterSpecification | null = shouldHide
+    // --- circle layers: exclude the selected fire when perimeter is on ---
+    const circleFilter: maplibregl.FilterSpecification | null = perimeterOn
       ? (["!=", ["get", "id"], selectedIncidentId] as maplibregl.FilterSpecification)
       : null;
-
     try {
-      if (map.getLayer("incidents-glow")) map.setFilter("incidents-glow", filter);
-      if (map.getLayer("incidents-circle")) map.setFilter("incidents-circle", filter);
+      if (map.getLayer("incidents-glow")) map.setFilter("incidents-glow", circleFilter);
+      if (map.getLayer("incidents-circle")) map.setFilter("incidents-circle", circleFilter);
     } catch (err) {
-      console.warn("circle visibility filter error:", err);
+      console.warn("circle filter error:", err);
     }
-  }, [perimeter, selectedIncidentId, abovePerimeterZoom, mapLoaded]);
+
+    // --- perimeter layers: show only while perimeterOn ---
+    const perimVis = perimeterOn ? "visible" : "none";
+    try {
+      if (map.getLayer("perimeter-fill")) map.setLayoutProperty("perimeter-fill", "visibility", perimVis);
+      if (map.getLayer("perimeter-outline")) map.setLayoutProperty("perimeter-outline", "visibility", perimVis);
+    } catch (err) {
+      console.warn("perimeter visibility error:", err);
+    }
+  }, [perimeterEnabled, abovePerimeterZoom, perimeter, selectedIncidentId, mapLoaded]);
 
   // ---- Evac zone polygons (Cal OES / Zonehaven aggregation) ----
   // Filter the statewide feed to active zones in the incident's vicinity so
@@ -634,7 +664,7 @@ export function IncidentMap() {
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
       <Legend
-        hasPerimeter={!!perimeter?.features?.length}
+        hasPerimeter={perimeterEnabled && abovePerimeterZoom && !!perimeter?.features?.length}
         showWind={showWind}
         setShowWind={setShowWind}
         showEvac={showEvac}
