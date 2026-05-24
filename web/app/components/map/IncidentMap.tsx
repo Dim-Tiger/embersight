@@ -102,6 +102,7 @@ type ConeImpact = {
 
 type SpreadPayload = {
   cones?: Record<string, GeoJSON.Polygon | GeoJSON.MultiPolygon | null>;
+  swept_cone_24h?: GeoJSON.Polygon | GeoJSON.MultiPolygon | null;
   cone_impact?: ConeImpact | null;
   head_ros_chains_per_hr?: number | null;
   flame_length_ft?: number | null;
@@ -361,12 +362,24 @@ export function IncidentMap() {
     }
   }, [perimeter, mapLoaded]);
 
-  // ---- Spread prediction cone (high-vis red, tornado-warning style) ----
-  // Drawn from spread_simulation.payload.cones["24h"], labeled with
-  // cone_impact (population + critical infra inside the cone).
+  // ---- Spread prediction cone (high-vis purple, tornado-warning style) ----
+  // The spread agent now publishes a server-side Minkowski-swept polygon at
+  // `swept_cone_24h` that already extends the WFIGS perimeter forward
+  // through the 24h cone. Prefer it so the painted region exactly matches
+  // the polygon the impact queries (population + critical infra) ran
+  // against. Fall back to the raw `cones["24h"]` ellipse only when the
+  // server didn't publish a swept polygon.
   const cone24h = useMemo(() => {
     const payload = (spread?.payload ?? {}) as SpreadPayload;
-    return payload.cones?.["24h"] ?? null;
+    return payload.swept_cone_24h ?? payload.cones?.["24h"] ?? null;
+  }, [spread]);
+
+  // Did the server already do the perimeter sweep? When yes we render the
+  // polygon directly; when no, we still attempt a client-side sweep below
+  // so older payloads keep working.
+  const coneIsServerSwept = useMemo(() => {
+    const payload = (spread?.payload ?? {}) as SpreadPayload;
+    return payload.swept_cone_24h != null;
   }, [spread]);
 
   const coneImpact = useMemo<ConeImpact | null>(() => {
@@ -396,20 +409,17 @@ export function IncidentMap() {
 
     if (!showCone || !cone24h) return;
 
-    // Build the swept-spread region as the Minkowski-sum hull of
-    // (perimeter ⊕ cone): for every vertex on the current fire perimeter,
-    // translate a copy of the cone so its rear vertex sits on that perimeter
-    // point, then hull the union. This carries the perimeter's shape forward
-    // through the cone — the rear matches the fire's footprint, the front
-    // extends in the spread direction, and the width grows with the cone's
-    // uncertainty. Falls back to just the cone if no perimeter is loaded or
-    // the incident point is unknown.
-    const hullCone = buildPerimeterCone(
-      cone24h,
-      perimeter ?? null,
-      selectedIncident?.lon ?? null,
-      selectedIncident?.lat ?? null,
-    );
+    // If the server already published a swept polygon, use it verbatim — it's
+    // the exact geometry the impact queries ran against. Otherwise fall back
+    // to the client-side Minkowski-sum hull so older payloads still render.
+    const hullCone = coneIsServerSwept
+      ? cone24h
+      : buildPerimeterCone(
+          cone24h,
+          perimeter ?? null,
+          selectedIncident?.lon ?? null,
+          selectedIncident?.lat ?? null,
+        );
 
     const features: GeoJSON.Feature[] = [
       { type: "Feature", geometry: hullCone, properties: { kind: "cone" } },
@@ -493,7 +503,7 @@ export function IncidentMap() {
     } catch (err) {
       console.warn("cone layer error:", err);
     }
-  }, [cone24h, coneImpact, perimeter, showCone, mapLoaded]);
+  }, [cone24h, coneImpact, coneIsServerSwept, perimeter, selectedIncident, showCone, mapLoaded]);
 
   // ---- Evac zone polygons (Cal OES / Zonehaven aggregation) ----
   // Filter the statewide feed to active zones in the incident's vicinity so

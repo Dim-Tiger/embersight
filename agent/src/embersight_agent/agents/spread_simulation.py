@@ -353,6 +353,82 @@ def _cone_geojson_to_wkt(cone_geojson: dict | None) -> str | None:
         return None
 
 
+def _incident_irwin_id(incident) -> str | None:  # noqa: ANN001 — pydantic Incident
+    """Pull a WFIGS IrwinID off the incident if one is exposed.
+
+    Frontend prefixes WFIGS ids with ``wfigs:``; the agent's Incident may
+    surface the same id directly or stash the raw id under ``raw``.
+    """
+    if incident is None:
+        return None
+    inc_id = getattr(incident, "id", "") or ""
+    if isinstance(inc_id, str) and inc_id.startswith("wfigs:"):
+        return inc_id[6:]
+    raw = getattr(incident, "raw", None) or {}
+    for k in ("irwin_id", "IrwinID", "poly_IRWINID", "IRWINID"):
+        v = raw.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
+def _build_swept_cone(cone_geojson: dict | None, perimeter_geom, incident) -> dict | None:  # noqa: ANN001
+    """Minkowski-sweep the cone over the fire perimeter via shapely union.
+
+    For each sampled perimeter vertex, translate a copy of the cone so its
+    rear vertex (at the incident point in the agent's local frame) lands on
+    that vertex, then ``unary_union`` everything into a single multipolygon.
+    The result is the current fire footprint physically extended in the
+    spread direction — the same shape rendered on the map — and the polygon
+    we run impact queries against. Falls back to the bare cone when anything
+    upstream is missing.
+    """
+    if not cone_geojson or perimeter_geom is None or incident is None:
+        return cone_geojson
+    try:
+        from shapely.affinity import translate  # noqa: PLC0415
+        from shapely.geometry import mapping, shape  # noqa: PLC0415
+        from shapely.ops import unary_union  # noqa: PLC0415
+
+        cone_poly = shape(cone_geojson)
+        if cone_poly.is_empty:
+            return cone_geojson
+
+        inc_lon = float(getattr(incident, "lon", 0.0))
+        inc_lat = float(getattr(incident, "lat", 0.0))
+
+        def _ring_points(geom):  # noqa: ANN001
+            if geom.geom_type == "Polygon":
+                yield from geom.exterior.coords
+                for r in geom.interiors:
+                    yield from r.coords
+            elif geom.geom_type == "MultiPolygon":
+                for p in geom.geoms:
+                    yield from _ring_points(p)
+
+        perim_pts = [(x, y) for x, y in _ring_points(perimeter_geom)]
+        if not perim_pts:
+            return cone_geojson
+
+        # Cap vertex count so union work stays bounded for dense WFIGS polys.
+        MAX_PERIM = 96
+        stride = max(1, len(perim_pts) // MAX_PERIM)
+        sampled = perim_pts[::stride]
+
+        swept_polys = [perimeter_geom]
+        for px, py in sampled:
+            dx = px - inc_lon
+            dy = py - inc_lat
+            swept_polys.append(translate(cone_poly, xoff=dx, yoff=dy))
+
+        merged = unary_union(swept_polys)
+        if merged.is_empty:
+            return cone_geojson
+        return mapping(merged)
+    except Exception:  # noqa: BLE001
+        return cone_geojson
+
+
 def _wkt_bbox(polygon_wkt: str) -> tuple[float, float, float, float] | None:
     try:
         from shapely import wkt  # noqa: PLC0415
@@ -525,16 +601,40 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     high_risk_zones = _high_risk_zones(mc_result)
 
     # ------------------------------------------------------------------ #
-    # 5b. Cone impact — population + critical infra inside the 24h cone
+    # 5b. Swept cone — fetch the WFIGS perimeter and Minkowski-sweep the
+    #     24h cone over it. Both the visual and the impact queries use this
+    #     polygon so the cone label exactly matches the painted region.
     # ------------------------------------------------------------------ #
     cone_impact: dict | None = None
     cone_24h_geojson = cones_geojson.get("24h")
-    cone_24h_wkt = _cone_geojson_to_wkt(cone_24h_geojson)
-    if cone_24h_wkt:
-        bbox = _wkt_bbox(cone_24h_wkt)
+    swept_cone_24h: dict | None = cone_24h_geojson
+
+    if cone_24h_geojson is not None:
+        try:
+            from ..tools.wfigs_perimeter import (
+                fetch_perimeter,
+                perimeter_to_shapely,
+            )
+
+            irwin = _incident_irwin_id(state.incident)
+            loop = asyncio.get_running_loop()
+            perimeter_gj = await loop.run_in_executor(
+                None,
+                lambda: fetch_perimeter(irwin_id=irwin, lat=lat0, lon=lon0),
+            )
+            perimeter_geom = perimeter_to_shapely(perimeter_gj)
+            swept_cone_24h = _build_swept_cone(
+                cone_24h_geojson, perimeter_geom, state.incident
+            )
+        except Exception:  # noqa: BLE001 — sweep is best-effort
+            swept_cone_24h = cone_24h_geojson
+
+    impact_wkt = _cone_geojson_to_wkt(swept_cone_24h)
+    if impact_wkt:
+        bbox = _wkt_bbox(impact_wkt)
         if bbox is not None:
             try:
-                cone_impact = await _gather_cone_impact(cone_24h_wkt, bbox)
+                cone_impact = await _gather_cone_impact(impact_wkt, bbox)
             except Exception as exc:  # noqa: BLE001
                 cone_impact = {"error": f"impact_gather_failed:{exc}"}
 
@@ -738,6 +838,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901
             "trigger_breaches": trigger_breaches,
             "high_risk_zones": high_risk_zones,
             "cone_impact": cone_impact,
+            "swept_cone_24h": swept_cone_24h,
             "n_mc_samples": int(meta.get("n", 200)),
             "fuel_model": base_inputs["fuel_model"],
             "wind_speed_mph": base_inputs["wind_speed_mph"],
@@ -780,6 +881,7 @@ def _low_confidence_output(incident_name: str, reason: str) -> AgentOutput:
             "trigger_breaches": [],
             "high_risk_zones": [],
             "cone_impact": None,
+            "swept_cone_24h": None,
         },
         confidence=0.20,
         confidence_driver="insufficient upstream inputs",
