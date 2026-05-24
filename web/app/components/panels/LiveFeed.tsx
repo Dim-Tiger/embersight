@@ -17,9 +17,9 @@ export function LiveFeed() {
         out.push({ ts: e.ts, label: `▶ ${AGENT_LABELS[name]} started` });
       } else if (kind === "on_chain_end" && AGENT_LABELS[name]) {
         out.push({ ts: e.ts, label: `✓ ${AGENT_LABELS[name]} finished` });
-      } else if (kind === "on_chat_model_stream") {
-        out.push({ ts: e.ts, label: `· LLM token (${name || "model"})` });
       }
+      // LLM token frames are intentionally skipped — they're high-volume
+      // noise that drown out the meaningful start/finish lines.
     }
     return out.reverse();
   }, [events]);

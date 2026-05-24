@@ -102,6 +102,7 @@ type ConeImpact = {
 
 type SpreadPayload = {
   cones?: Record<string, GeoJSON.Polygon | GeoJSON.MultiPolygon | null>;
+  swept_cone_24h?: GeoJSON.Polygon | GeoJSON.MultiPolygon | null;
   cone_impact?: ConeImpact | null;
   head_ros_chains_per_hr?: number | null;
   flame_length_ft?: number | null;
@@ -385,12 +386,24 @@ export function IncidentMap() {
     }
   }, [perimeter, mapLoaded]);
 
-  // ---- Spread prediction cone (high-vis red, tornado-warning style) ----
-  // Drawn from spread_simulation.payload.cones["24h"], labeled with
-  // cone_impact (population + critical infra inside the cone).
+  // ---- Spread prediction cone (high-vis purple, tornado-warning style) ----
+  // The spread agent now publishes a server-side Minkowski-swept polygon at
+  // `swept_cone_24h` that already extends the WFIGS perimeter forward
+  // through the 24h cone. Prefer it so the painted region exactly matches
+  // the polygon the impact queries (population + critical infra) ran
+  // against. Fall back to the raw `cones["24h"]` ellipse only when the
+  // server didn't publish a swept polygon.
   const cone24h = useMemo(() => {
     const payload = (spread?.payload ?? {}) as SpreadPayload;
-    return payload.cones?.["24h"] ?? null;
+    return payload.swept_cone_24h ?? payload.cones?.["24h"] ?? null;
+  }, [spread]);
+
+  // Did the server already do the perimeter sweep? When yes we render the
+  // polygon directly; when no, we still attempt a client-side sweep below
+  // so older payloads keep working.
+  const coneIsServerSwept = useMemo(() => {
+    const payload = (spread?.payload ?? {}) as SpreadPayload;
+    return payload.swept_cone_24h != null;
   }, [spread]);
 
   const coneImpact = useMemo<ConeImpact | null>(() => {
@@ -420,20 +433,17 @@ export function IncidentMap() {
 
     if (!showCone || !cone24h) return;
 
-    // Build the swept-spread region as the Minkowski-sum hull of
-    // (perimeter ⊕ cone): for every vertex on the current fire perimeter,
-    // translate a copy of the cone so its rear vertex sits on that perimeter
-    // point, then hull the union. This carries the perimeter's shape forward
-    // through the cone — the rear matches the fire's footprint, the front
-    // extends in the spread direction, and the width grows with the cone's
-    // uncertainty. Falls back to just the cone if no perimeter is loaded or
-    // the incident point is unknown.
-    const hullCone = buildPerimeterCone(
-      cone24h,
-      perimeter ?? null,
-      selectedIncident?.lon ?? null,
-      selectedIncident?.lat ?? null,
-    );
+    // If the server already published a swept polygon, use it verbatim — it's
+    // the exact geometry the impact queries ran against. Otherwise fall back
+    // to the client-side Minkowski-sum hull so older payloads still render.
+    const hullCone = coneIsServerSwept
+      ? cone24h
+      : buildPerimeterCone(
+          cone24h,
+          perimeter ?? null,
+          selectedIncident?.lon ?? null,
+          selectedIncident?.lat ?? null,
+        );
 
     const features: GeoJSON.Feature[] = [
       { type: "Feature", geometry: hullCone, properties: { kind: "cone" } },
@@ -517,7 +527,7 @@ export function IncidentMap() {
     } catch (err) {
       console.warn("cone layer error:", err);
     }
-  }, [cone24h, coneImpact, perimeter, showCone, mapLoaded]);
+  }, [cone24h, coneImpact, coneIsServerSwept, perimeter, selectedIncident, showCone, mapLoaded]);
 
   // ---- Evac zone polygons (Cal OES / Zonehaven aggregation) ----
   // Filter the statewide feed to active zones in the incident's vicinity so
@@ -1030,25 +1040,24 @@ export function IncidentMap() {
             image: canvas.toDataURL(),
             bounds: wind.bounds,
             imageUnscale: [minV, maxV],
-            // Few, long, thin particles read as cohesive wind streams —
-            // long trails (high maxAge) with narrow line width (~1.5)
-            // beats many fat particles for a streamline feel.
-            numParticles: 280,
-            maxAge: 360,
-            speedFactor: 70,
-            width: 1.6,
-            speedRange: [0, 22],
-            // Streamline palette: faint slate tail → bright white core →
-            // amber → orange → red as wind speed climbs. Kept narrow on
-            // the white-core band so most streams read as cohesive white
-            // lines, with warm colors reserved for genuinely strong wind.
+            // Dense-enough particle field with narrow lines + long
+            // lifetime so each trail stretches ALONG the wind direction
+            // (the path the particle walks). Wider `width` would have
+            // stretched perpendicular to motion, which read as "fat
+            // dots" rather than direction-indicating streaks.
+            numParticles: 800,
+            maxAge: 240,
+            speedFactor: 55,
+            width: 1.5,
+            speedRange: [0, 25],
+            // Contrail palette: faint tail → bright white core →
+            // yellow → orange → red as wind speed climbs.
             colorRamp: [
-              [0.0, [148, 163, 184, 160]], // slate-400 (ghost tail)
-              [0.12, [226, 232, 240, 220]], // slate-200
-              [0.3, [255, 255, 255, 250]], // pure white core
-              [0.6, [253, 224, 71, 250]], // yellow-300
-              [0.8, [249, 115, 22, 252]], // orange-500
-              [1.0, [220, 38, 38, 255]], // red-600
+              [0.0, [226, 232, 240, 180]], // slate-200 (faint tail)
+              [0.2, [248, 250, 252, 230]], // near-white core
+              [0.5, [253, 224, 71, 235]], // yellow-300
+              [0.75, [249, 115, 22, 240]], // orange-500
+              [1.0, [220, 38, 38, 250]], // red-600
             ],
           }),
         ],
