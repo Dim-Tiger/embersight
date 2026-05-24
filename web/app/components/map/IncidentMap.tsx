@@ -24,6 +24,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const CARTO_DARK =
   "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
+// When a perimeter is loaded and the map is zoomed in past this level, hide
+// the redundant orange circle for that fire and let the perimeter speak for
+// itself.  Below this threshold the circle reappears automatically.
+const PERIMETER_HIDE_CIRCLE_ZOOM = 9;
+
+// Below this zoom the 66km wind grid covers only a tiny patch of the screen,
+// so we widen particles and bump density so streams stay readable.
+const WIND_LOW_ZOOM_THRESHOLD = 8;
+
 // Esri World Imagery — free satellite raster tiles. Inlined as a MapLibre
 // style so we can hot-swap basemaps without keeping a second style.json.
 const SATELLITE_STYLE: maplibregl.StyleSpecification = {
@@ -57,18 +66,32 @@ type RoutingPayload = {
     path?: Array<[number, number]>;
     length_km?: number;
     est_drive_minutes?: number;
+    avg_speed_kph?: number;
+    bearing_deg?: number;
   }>;
   egress_routes?: Array<{
     path?: Array<[number, number]>;
     length_km?: number;
     est_drive_minutes?: number;
     bearing?: string;
+    bearing_deg?: number;
+    wind_relation?: "upwind" | "crosswind" | "downwind" | "unknown";
   }>;
   candidates?: Array<{
     name?: string;
     loc?: [number, number];
     score?: number;
+    dist_incident_km?: number;
+    nearest_water_km?: number;
+    score_components?: Record<string, number>;
+    score_weights?: Record<string, number>;
+    score_raw?: Record<string, number | null>;
   }>;
+  wind?: {
+    from_deg?: number | null;
+    speed_mph?: number | null;
+    source?: string | null;
+  };
 };
 
 // Evac zone status → color. Keys are normalized (uppercase, trimmed).
@@ -76,10 +99,10 @@ type RoutingPayload = {
 const EVAC_STATUS_COLORS: Record<string, string> = {
   "EVACUATION ORDER": "#dc2626", // red-600
   ORDER: "#dc2626",
-  "EVACUATION WARNING": "#f59e0b", // amber-500
-  WARNING: "#f59e0b",
-  "SHELTER IN PLACE": "#facc15", // yellow-400
-  SHELTER: "#facc15",
+  "EVACUATION WARNING": "#facc15", // yellow-400
+  WARNING: "#facc15",
+  "SHELTER IN PLACE": "#a855f7", // purple-500
+  SHELTER: "#a855f7",
   ADVISORY: "#3b82f6", // blue-500
   "EVACUATION ADVISORY": "#3b82f6",
 };
@@ -121,6 +144,10 @@ export function IncidentMap() {
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const coneLabelRef = useRef<maplibregl.Marker | null>(null);
   const deckOverlayRef = useRef<MapboxOverlay | null>(null);
+  // Tracks whether the most recent zoom delta came from the user (true) or
+  // from a programmatic camera animation like flyTo (false). Read by the
+  // "dismiss perimeter on zoom-out" effect so a flyTo dip doesn't count.
+  const lastZoomFromUserRef = useRef(false);
   const [mapLoaded, setMapLoaded] = useState(false);
   const [showWind, setShowWind] = useState(true);
   const [showEvac, setShowEvac] = useState(true);
@@ -128,12 +155,34 @@ export function IncidentMap() {
   const [showRoutes, setShowRoutes] = useState(true);
   const [basemap, setBasemap] = useState<Basemap>("dark");
   const [showCone, setShowCone] = useState(true);
+  const [legendCollapsed, setLegendCollapsed] = useState(false);
+  const [windLowZoom, setWindLowZoom] = useState(
+    () => useStore.getState().mapViewport.zoom < WIND_LOW_ZOOM_THRESHOLD,
+  );
 
+  // Store selectors — placed before the derived state that depends on them.
   const { data: incidents } = useIncidents();
   const spread = useStore((s) => s.agentOutputs.spread_simulation);
   const viewport = useStore((s) => s.mapViewport);
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
+
+  // True while the map zoom is above PERIMETER_HIDE_CIRCLE_ZOOM.  We only
+  // flip this boolean (not store the raw zoom) so we avoid a re-render on
+  // every incremental scroll step.
+  const [abovePerimeterZoom, setAbovePerimeterZoom] = useState(
+    () => viewport.zoom >= PERIMETER_HIDE_CIRCLE_ZOOM,
+  );
+  // Tracks whether the perimeter "session" is active for the currently
+  // selected fire.  Set to true when a fire is selected; cleared to false the
+  // instant the user zooms out below the threshold.  Crucially it does NOT
+  // flip back to true when the user zooms in again — only an explicit
+  // re-selection does that.  This gives us the three-phase behaviour:
+  //   select → zoom in  → perimeter on  / circle off
+  //            zoom out → perimeter off / circle on   (dismissed)
+  //            zoom in  → perimeter still off          (stays dismissed)
+  //   re-select          → perimeter on  / circle off  (fresh session)
+  const [perimeterEnabled, setPerimeterEnabled] = useState(false);
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
   const irwinId = selectedIncidentId?.startsWith("wfigs:")
@@ -153,6 +202,33 @@ export function IncidentMap() {
   const routingOutput = useStore(
     (s) => s.agentOutputs.routing_staging,
   ) as { payload?: RoutingPayload } | undefined;
+  const pendingInterrupts = useStore((s) => s.pendingInterrupts);
+  const acceptedEvacZones = useStore((s) => s.acceptedEvacZones);
+
+  // Pull the polygons + status out of pending evac_zone_change interrupts so
+  // we can paint a pulsing suggestion overlay on the map. Each suggestion has
+  // a stable zone_id so the layer can find/update it between renders.
+  const suggestedEvacZones = useMemo(() => {
+    return pendingInterrupts
+      .filter((p) => p.interrupt.type === "evac_zone_change")
+      .map((p) => {
+        const payload = (p.interrupt.payload ?? {}) as Record<string, unknown>;
+        const status = String(payload.proposed_status ?? "").toUpperCase();
+        if (status !== "WARNING" && status !== "ORDER") return null;
+        const geom = payload.polygon_geojson as
+          | GeoJSON.Polygon
+          | GeoJSON.MultiPolygon
+          | undefined;
+        if (!geom) return null;
+        return {
+          zone_id: String(payload.zone_id ?? p.interrupt.id ?? Math.random()),
+          name: String(payload.name ?? "Suggested zone"),
+          status: status as "WARNING" | "ORDER",
+          geom,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+  }, [pendingInterrupts]);
 
   // Critical-infrastructure overlays. Each entry's data is fetched only
   // when its toggle in infraVisibility is on; toggles persist across
@@ -179,6 +255,29 @@ export function IncidentMap() {
       "top-right",
     );
     map.on("load", () => setMapLoaded(true));
+    // Flip the boolean state only when crossing the perimeter-visibility
+    // threshold so we don't trigger re-renders on every zoom tick.
+    // Also remember whether the most recent zoom transition was driven by
+    // the user (wheel, pinch, double-click) or by a programmatic camera
+    // animation (flyTo, easeTo). MapLibre's parabolic flyTo curve briefly
+    // dips zoom below the start position before climbing — without this
+    // discrimination, switching between two fires at zoom 11 momentarily
+    // crosses the perimeter threshold and trips the "user zoomed out"
+    // dismiss-perimeter effect, hiding the perimeter on the new fire.
+    map.on("zoom", (e) => {
+      const z = map.getZoom();
+      lastZoomFromUserRef.current = !!(
+        e as unknown as { originalEvent?: unknown }
+      ).originalEvent;
+      setAbovePerimeterZoom((prev) => {
+        const next = z >= PERIMETER_HIDE_CIRCLE_ZOOM;
+        return prev === next ? prev : next;
+      });
+      setWindLowZoom((prev) => {
+        const next = z < WIND_LOW_ZOOM_THRESHOLD;
+        return prev === next ? prev : next;
+      });
+    });
     mapRef.current = map;
 
     popupRef.current = new maplibregl.Popup({
@@ -202,56 +301,85 @@ export function IncidentMap() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Basemap swap: setStyle wipes all sources/layers, so flip mapLoaded
-  // off until the new style finishes. MapLibre's `load` event only fires
-  // once for the initial style — for subsequent setStyle calls we need
-  // `style.load`. Skip the very first render because the map is already
-  // being constructed with the right style and `load` will fire from the
-  // init effect.
-  const basemapInitialized = useRef(false);
+  // Basemap swap: rather than calling setStyle (which wipes every user
+  // source/layer), we install the satellite raster as an overlay layer
+  // lazily — the first time the user actually clicks Satellite. The dark
+  // vector style stays underneath untouched, so none of the data layers
+  // (perimeter, incidents, evac, cone, routes, infra, wind) ever have to
+  // re-attach when the user flips the basemap.
+  //
+  // Lazy install matters: adding the raster source at map init (even
+  // hidden) makes MapLibre prefetch satellite tiles while the carto
+  // basemap is still loading, which competes for the browser's per-host
+  // connection slots and noticeably delays the initial dark render.
   useEffect(() => {
-    if (!basemapInitialized.current) {
-      basemapInitialized.current = true;
-      return;
-    }
     const map = mapRef.current;
-    if (!map) return;
-    setMapLoaded(false);
-    // deck.gl overlay is bound to the previous style; drop it so the
-    // wind-particle effect re-attaches against the fresh style.
-    if (deckOverlayRef.current) {
+    if (!map || !mapLoaded) return;
+    if (basemap === "satellite" && !map.getLayer("satellite-overlay")) {
       try {
-        map.removeControl(deckOverlayRef.current);
-      } catch {
-        /* ignore */
+        map.addSource(
+          "satellite-overlay",
+          SATELLITE_STYLE.sources["esri-world-imagery"],
+        );
+        // Install the raster on top of every carto vector layer that's
+        // already in the style — when satellite is visible we want it to
+        // fully cover the dark base (otherwise carto labels/water/roads
+        // bleed through, and any not-yet-loaded satellite tiles leave
+        // dark gaps that look like rendering corruption). Then we push
+        // every user data layer above the raster so the overlays sit on
+        // top of the satellite imagery as well.
+        map.addLayer({
+          id: "satellite-overlay",
+          type: "raster",
+          source: "satellite-overlay",
+        });
+        const liftList = [
+          "evac-fill",
+          "evac-outline",
+          "suggested-evac-fill",
+          "suggested-evac-line",
+          "accepted-evac-fill",
+          "accepted-evac-line",
+          "cone-outline-glow",
+          "cone-fill",
+          "cone-outline",
+          "perimeter-fill",
+          "perimeter-outline",
+          "staging-point",
+          "incidents-glow",
+          "incidents-circle",
+          "firms-heat",
+          "firms-points",
+          "routes-egress-casing",
+          "routes-egress",
+          "routes-ingress-casing",
+          "routes-ingress",
+        ];
+        // Also lift every infra overlay so points/lines from this PR sit
+        // above the satellite raster.
+        for (const l of INFRA_LAYERS) {
+          liftList.push(
+            `infra-${l.id}-halo`,
+            `infra-${l.id}-pt`,
+            `infra-${l.id}-line-casing`,
+            `infra-${l.id}-line`,
+          );
+        }
+        for (const id of liftList) {
+          if (map.getLayer(id)) map.moveLayer(id);
+        }
+      } catch (err) {
+        console.warn("satellite overlay install error:", err);
       }
-      deckOverlayRef.current = null;
     }
-    // The cone label is a DOM marker — it survives setStyle but the
-    // re-run of the cone effect will re-create it, so detach now to
-    // avoid duplicates.
-    if (coneLabelRef.current) {
-      coneLabelRef.current.remove();
-      coneLabelRef.current = null;
+    if (map.getLayer("satellite-overlay")) {
+      map.setLayoutProperty(
+        "satellite-overlay",
+        "visibility",
+        basemap === "satellite" ? "visible" : "none",
+      );
     }
-    const nextStyle =
-      basemap === "satellite" ? SATELLITE_STYLE : CARTO_DARK;
-    map.setStyle(nextStyle as maplibregl.StyleSpecification | string);
-    // MapLibre v4 does not refire `load` after setStyle; the only reliable
-    // signal that the new style is fully parsed and the GL layers are
-    // ready is `styledata` + `isStyleLoaded()`. styledata can fire
-    // multiple times during a single load, so keep polling until it
-    // returns true, then detach.
-    const onStyleData = () => {
-      if (!map.isStyleLoaded()) return;
-      map.off("styledata", onStyleData);
-      setMapLoaded(true);
-    };
-    map.on("styledata", onStyleData);
-    return () => {
-      map.off("styledata", onStyleData);
-    };
-  }, [basemap]);
+  }, [basemap, mapLoaded]);
 
   // Fly to selected incident
   useEffect(() => {
@@ -264,6 +392,22 @@ export function IncidentMap() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIncidentId]);
+
+  // Enable the perimeter session whenever a fire is (re-)selected.
+  useEffect(() => {
+    setPerimeterEnabled(!!selectedIncidentId);
+  }, [selectedIncidentId]);
+
+  // Dismiss the perimeter when the user zooms back out below the threshold.
+  // Crucially we only dismiss on USER-initiated zoom (wheel, pinch) — not
+  // on the parabolic dip MapLibre's flyTo performs mid-animation, which
+  // otherwise hides the perimeter on the new fire when switching between
+  // two already-zoomed-in incidents.
+  useEffect(() => {
+    if (!abovePerimeterZoom && lastZoomFromUserRef.current) {
+      setPerimeterEnabled(false);
+    }
+  }, [abovePerimeterZoom]);
 
   // Render incidents as native WebGL circle layers
   useEffect(() => {
@@ -356,7 +500,16 @@ export function IncidentMap() {
     map.on("click", "incidents-circle", (e) => {
       if (!e.features?.length) return;
       const id = e.features[0].properties.id as string;
+      const coords = (e.features[0].geometry as GeoJSON.Point).coordinates as [
+        number,
+        number,
+      ];
+      // Always fly in on click — this handles re-clicking an already-selected
+      // fire while zoomed out (setSelectedIncident would be a no-op for the
+      // same ID so the fly-to useEffect wouldn't re-run without this).
       setSelectedIncident(id);
+      setPerimeterEnabled(true); // restore perimeter session on every click
+      map.flyTo({ center: coords, zoom: 11, duration: 1400 });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incidents, mapLoaded]);
@@ -430,6 +583,41 @@ export function IncidentMap() {
     return impact;
   }, [spread]);
 
+  // ---- Synchronise circle visibility & perimeter visibility ----
+  // The two layers are always toggled together so the transition is atomic:
+  // circle hidden  ↔  perimeter visible   (when perimeterEnabled && zoomed in)
+  // circle visible ↔  perimeter hidden    (any other state)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const hasPerimeter = !!perimeter?.features?.length;
+    // Both conditions must hold: the session is active AND zoom is above the
+    // threshold AND perimeter data has actually arrived.
+    const perimeterOn = perimeterEnabled && abovePerimeterZoom && hasPerimeter;
+
+    // --- circle layers: exclude the selected fire when perimeter is on ---
+    const circleFilter: maplibregl.FilterSpecification | null = perimeterOn
+      ? (["!=", ["get", "id"], selectedIncidentId] as maplibregl.FilterSpecification)
+      : null;
+    try {
+      if (map.getLayer("incidents-glow")) map.setFilter("incidents-glow", circleFilter);
+      if (map.getLayer("incidents-circle")) map.setFilter("incidents-circle", circleFilter);
+    } catch (err) {
+      console.warn("circle filter error:", err);
+    }
+
+    // --- perimeter layers: show only while perimeterOn ---
+    const perimVis = perimeterOn ? "visible" : "none";
+    try {
+      if (map.getLayer("perimeter-fill")) map.setLayoutProperty("perimeter-fill", "visibility", perimVis);
+      if (map.getLayer("perimeter-outline")) map.setLayoutProperty("perimeter-outline", "visibility", perimVis);
+    } catch (err) {
+      console.warn("perimeter visibility error:", err);
+    }
+  }, [perimeterEnabled, abovePerimeterZoom, perimeter, selectedIncidentId, mapLoaded]);
+
+  // ---- Render spread prediction cone ----
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
@@ -486,13 +674,43 @@ export function IncidentMap() {
 
     try {
       map.addSource("cone", { type: "geojson", data: fc });
+      // Register diagonal orange/white stripe pattern (once per style).
+      if (!map.hasImage("cone-stripes")) {
+        const size = 16;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, size, size);
+          ctx.strokeStyle = "#f97316";
+          ctx.lineWidth = 5;
+          ctx.lineCap = "square";
+          ctx.beginPath();
+          for (let i = -size; i < size * 2; i += 8) {
+            ctx.moveTo(i, 0);
+            ctx.lineTo(i + size, size);
+          }
+          ctx.stroke();
+          try {
+            map.addImage(
+              "cone-stripes",
+              ctx.getImageData(0, 0, size, size),
+              { pixelRatio: 2 },
+            );
+          } catch {
+            /* image may have been added between check and add */
+          }
+        }
+      }
       // Soft outer halo for contrast on dark basemap.
       map.addLayer({
         id: "cone-outline-glow",
         type: "line",
         source: "cone",
         paint: {
-          "line-color": "#c026d3",
+          "line-color": "#f97316",
           "line-width": 7,
           "line-blur": 6,
           "line-opacity": 0.45,
@@ -503,8 +721,8 @@ export function IncidentMap() {
         type: "fill",
         source: "cone",
         paint: {
-          "fill-color": "#a855f7",
-          "fill-opacity": 0.3,
+          "fill-pattern": "cone-stripes",
+          "fill-opacity": 0.6,
           "fill-antialias": true,
         },
       });
@@ -516,7 +734,7 @@ export function IncidentMap() {
         // ring un-outlined so the two shapes read as one continuous body.
         filter: ["==", ["get", "kind"], "cone"],
         paint: {
-          "line-color": "#d946ef",
+          "line-color": "#f97316",
           "line-width": 2.5,
           "line-opacity": 0.95,
         },
@@ -661,6 +879,219 @@ export function IncidentMap() {
       console.warn("evac layer error:", err);
     }
   }, [evacFiltered, showEvac, mapLoaded]);
+
+  // ---- Suggested evac zones (AI proposals, pulsing) ----
+  // Yellow pulse = WARNING suggestion. Red pulse = ORDER suggestion.
+  // Lives on the map only while the corresponding interrupt is pending in
+  // the approval queue. On approve, the polygon moves to acceptedEvacZones
+  // (rendered as a solid layer below).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const SOURCE_ID = "suggested-evac";
+    const FILL_ID = "suggested-evac-fill";
+    const LINE_ID = "suggested-evac-line";
+
+    try {
+      if (map.getLayer(FILL_ID)) map.removeLayer(FILL_ID);
+      if (map.getLayer(LINE_ID)) map.removeLayer(LINE_ID);
+      if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
+    } catch {
+      /* mid-rerender */
+    }
+
+    if (!suggestedEvacZones.length) return;
+
+    const features: GeoJSON.Feature[] = suggestedEvacZones.map((z) => ({
+      type: "Feature",
+      geometry: z.geom,
+      properties: {
+        zone_id: z.zone_id,
+        name: z.name,
+        status: z.status,
+      },
+    }));
+    const fc: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features,
+    };
+
+    try {
+      map.addSource(SOURCE_ID, { type: "geojson", data: fc });
+      const colorExpr = [
+        "match",
+        ["get", "status"],
+        "ORDER",
+        "#dc2626",
+        "WARNING",
+        "#facc15",
+        "#facc15",
+      ] as unknown as maplibregl.ExpressionSpecification;
+
+      map.addLayer({
+        id: FILL_ID,
+        type: "fill",
+        source: SOURCE_ID,
+        paint: {
+          "fill-color": colorExpr,
+          "fill-opacity": 0.25,
+        },
+      });
+      map.addLayer({
+        id: LINE_ID,
+        type: "line",
+        source: SOURCE_ID,
+        paint: {
+          "line-color": colorExpr,
+          "line-width": 2,
+          "line-opacity": 0.9,
+          "line-dasharray": [2, 1.5],
+        },
+      });
+
+      // Pulse: ramp fill-opacity + line-width on a 1.4s cycle. Pure paint
+      // updates — no source mutation — so this is cheap.
+      let raf = 0;
+      const start = performance.now();
+      const tick = (now: number) => {
+        const t = ((now - start) / 1400) % 1;
+        // Smooth ease in/out via a cosine wave: 0 → 1 → 0 across the cycle.
+        const wave = (1 - Math.cos(t * Math.PI * 2)) / 2;
+        const fillOpacity = 0.18 + 0.30 * wave;
+        const lineWidth = 1.8 + 2.6 * wave;
+        try {
+          if (map.getLayer(FILL_ID)) {
+            map.setPaintProperty(FILL_ID, "fill-opacity", fillOpacity);
+          }
+          if (map.getLayer(LINE_ID)) {
+            map.setPaintProperty(LINE_ID, "line-width", lineWidth);
+          }
+        } catch {
+          /* layer torn down */
+        }
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+
+      // Hover popup so users can see which suggestion they're inspecting.
+      const showPopup = (
+        e: maplibregl.MapMouseEvent & {
+          features?: maplibregl.MapGeoJSONFeature[];
+        },
+      ) => {
+        if (!popupRef.current || !e.features?.length) return;
+        const p = e.features[0].properties as Record<string, unknown>;
+        const status = String(p.status ?? "");
+        const color = status === "ORDER" ? "#dc2626" : "#facc15";
+        popupRef.current
+          .setLngLat(e.lngLat)
+          .setHTML(
+            `<div style="font-size:12px;line-height:1.5;color:#0f172a;background:${color};padding:6px 8px;border-radius:6px;font-weight:600">
+              SUGGESTED ${status}<br/>
+              <span style="font-weight:400">${escapeHtml(String(p.name ?? ""))}</span><br/>
+              <span style="font-size:10px;font-weight:500">awaiting IC approval</span>
+            </div>`,
+          )
+          .addTo(map);
+        map.getCanvas().style.cursor = "pointer";
+      };
+      const hidePopup = () => {
+        popupRef.current?.remove();
+        map.getCanvas().style.cursor = "";
+      };
+      map.on("mousemove", FILL_ID, showPopup);
+      map.on("mouseleave", FILL_ID, hidePopup);
+
+      // Keep perimeter + incidents above suggestion overlay.
+      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
+      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
+
+      return () => {
+        cancelAnimationFrame(raf);
+        try {
+          map.off("mousemove", FILL_ID, showPopup);
+          map.off("mouseleave", FILL_ID, hidePopup);
+        } catch {
+          /* ignore */
+        }
+      };
+    } catch (err) {
+      console.warn("suggested-evac layer error:", err);
+    }
+  }, [suggestedEvacZones, mapLoaded]);
+
+  // ---- Accepted evac zones (post-approval, solid) ----
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const SOURCE_ID = "accepted-evac";
+    const FILL_ID = "accepted-evac-fill";
+    const LINE_ID = "accepted-evac-line";
+
+    try {
+      if (map.getLayer(FILL_ID)) map.removeLayer(FILL_ID);
+      if (map.getLayer(LINE_ID)) map.removeLayer(LINE_ID);
+      if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
+    } catch {
+      /* mid-rerender */
+    }
+
+    if (!acceptedEvacZones.length) return;
+
+    const features: GeoJSON.Feature[] = acceptedEvacZones.map((z) => ({
+      type: "Feature",
+      geometry: z.polygon,
+      properties: { zone_id: z.zone_id, name: z.name, status: z.status },
+    }));
+    const fc: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features,
+    };
+
+    try {
+      map.addSource(SOURCE_ID, { type: "geojson", data: fc });
+      const colorExpr = [
+        "match",
+        ["get", "status"],
+        "ORDER",
+        "#dc2626",
+        "WARNING",
+        "#facc15",
+        "#facc15",
+      ] as unknown as maplibregl.ExpressionSpecification;
+
+      map.addLayer({
+        id: FILL_ID,
+        type: "fill",
+        source: SOURCE_ID,
+        paint: {
+          "fill-color": colorExpr,
+          "fill-opacity": 0.38,
+        },
+      });
+      map.addLayer({
+        id: LINE_ID,
+        type: "line",
+        source: SOURCE_ID,
+        paint: {
+          "line-color": colorExpr,
+          "line-width": 2.5,
+          "line-opacity": 1,
+        },
+      });
+
+      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
+      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
+    } catch (err) {
+      console.warn("accepted-evac layer error:", err);
+    }
+  }, [acceptedEvacZones, mapLoaded]);
 
   // ---- VIIRS hotspots (NASA FIRMS) ----
   useEffect(() => {
@@ -869,8 +1300,10 @@ export function IncidentMap() {
         toLineString(r.path, {
           kind: "egress",
           bearing: r.bearing ?? "?",
+          bearing_deg: r.bearing_deg ?? null,
           length_km: r.length_km ?? null,
           minutes: r.est_drive_minutes ?? null,
+          wind_relation: r.wind_relation ?? "unknown",
         }),
       )
       .filter((f): f is GeoJSON.Feature => f !== null);
@@ -898,7 +1331,20 @@ export function IncidentMap() {
           source: "routes-egress",
           layout: { "line-cap": "round", "line-join": "round" },
           paint: {
-            "line-color": "#dc2626",
+            // Color by wind relation: upwind (safe escape) = green,
+            // crosswind (flank) = amber, downwind (into fire-head) = red,
+            // unknown (no wind data) = neutral grey.
+            "line-color": [
+              "match",
+              ["get", "wind_relation"],
+              "upwind",
+              "#10b981",
+              "crosswind",
+              "#f59e0b",
+              "downwind",
+              "#dc2626",
+              "#94a3b8",
+            ],
             "line-width": 3.2,
             "line-opacity": 0.95,
           },
@@ -971,20 +1417,14 @@ export function IncidentMap() {
           },
         });
 
-        const showStagingPopup = (e: maplibregl.MapMouseEvent) => {
+        const stagingPopupHtml = buildStagingPopupHtml(top, payload.wind);
+        const showStagingPopup = () => {
           if (!popupRef.current) return;
           popupRef.current
             .setLngLat([lon, lat])
-            .setHTML(
-              `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid #22c55e66">
-                <strong style="color:#22c55e">Proposed staging</strong><br/>
-                ${escapeHtml(String(top.name ?? "Staging"))}<br/>
-                <span style="color:#94a3b8">score ${top.score ?? "?"}</span>
-              </div>`,
-            )
+            .setHTML(stagingPopupHtml)
             .addTo(map);
           map.getCanvas().style.cursor = "pointer";
-          void e;
         };
         const hideStagingPopup = () => {
           popupRef.current?.remove();
@@ -992,6 +1432,39 @@ export function IncidentMap() {
         };
         map.on("mouseenter", "staging-point", showStagingPopup);
         map.on("mouseleave", "staging-point", hideStagingPopup);
+      }
+
+      // Hover popups for egress routes — show bearing + wind relation +
+      // drive time. Useful for IC to see "the W route is upwind, 18 min".
+      if (egressFeatures.length) {
+        const showEgressPopup = (e: maplibregl.MapMouseEvent) => {
+          if (!popupRef.current) return;
+          const feature = (
+            e as unknown as { features?: GeoJSON.Feature[] }
+          ).features?.[0];
+          const props = feature?.properties as
+            | {
+                bearing?: string;
+                bearing_deg?: number;
+                length_km?: number;
+                minutes?: number;
+                wind_relation?: string;
+              }
+            | undefined;
+          if (!props) return;
+          popupRef.current
+            .setLngLat(e.lngLat)
+            .setHTML(buildEgressPopupHtml(props))
+            .addTo(map);
+          map.getCanvas().style.cursor = "pointer";
+        };
+        const hideEgressPopup = () => {
+          popupRef.current?.remove();
+          map.getCanvas().style.cursor = "";
+        };
+        map.on("mouseenter", "routes-egress", showEgressPopup);
+        map.on("mousemove", "routes-egress", showEgressPopup);
+        map.on("mouseleave", "routes-egress", hideEgressPopup);
       }
 
       // Re-stack: cone < perimeter < incidents on top of routes so the
@@ -1038,12 +1511,33 @@ export function IncidentMap() {
         ...v,
         direction: (v.direction + 180) % 360,
       }));
+      // // When zoomed out the 66km sample box collapses to a few pixels, so we
+      // // pad the rendered bounds outward. The IDW texture extrapolates the same
+      // // 7x7 sample to the wider extent — fine for visualization since wind at
+      // // this synoptic scale is smooth.
+      const [w0, s0, e0, n0] = wind.bounds;
+      const padX = (e0 - w0) * (windLowZoom ? 1.0 : 0.0);
+      const padY = (n0 - s0) * (windLowZoom ? 1.0 : 0.0);
+      const renderBounds: [number, number, number, number] = [
+        w0 - padX,
+        s0 - padY,
+        e0 + padX,
+        n0 + padY,
+      ];
+  
+      // Open-Meteo's wind_direction_10m is meteorological "FROM". Despite
+      // the `u = speed·sin(dir)`, `v = speed·cos(dir)` formula in
+      // maplibre-gl-wind looking like a "TO heading" convention, empirically
+      // passing the raw FROM value makes the particles drift the right way
+      // (and a pre-flip by 180° sends them upwind). Likely some combination
+      // of texture-Y orientation and lat/lon axis signs in the shader nets
+      // out to "feed it the meteorological FROM direction unchanged."
       const { canvas, uMin, uMax, vMin, vMax } = generateWindTexture(
-        vectorsTo,
+        wind.vectors,
         {
           width: 128,
           height: 128,
-          bounds: wind.bounds,
+          bounds: renderBounds,
         },
       );
       const minV = Math.min(uMin, vMin);
@@ -1055,26 +1549,32 @@ export function IncidentMap() {
           new WindParticleLayer({
             id: "embersight-wind",
             image: canvas.toDataURL(),
-            bounds: wind.bounds,
+            bounds: renderBounds,
             imageUnscale: [minV, maxV],
-            // Dense-enough particle field with narrow lines + long
-            // lifetime so each trail stretches ALONG the wind direction
-            // (the path the particle walks). Wider `width` would have
-            // stretched perpendicular to motion, which read as "fat
-            // dots" rather than direction-indicating streaks.
-            numParticles: 800,
-            maxAge: 240,
-            speedFactor: 55,
-            width: 1.5,
-            speedRange: [0, 25],
-            // Contrail palette: faint tail → bright white core →
-            // yellow → orange → red as wind speed climbs.
+            // Windfinder/earth.nullschool aesthetic: lots of thin, fast
+            // particles drawing crisp streamlines. Per-tick stride is
+            // (speedFactor * 0.01) / 2^zoom and the prop min/max are
+            // deck.gl validators (not runtime caps), so we push values
+            // past their advisory ranges for the look we want.
+            // Density scales up at low zoom so the smaller box still feels
+            // alive; width grows just enough to stay legible.
+            numParticles: windLowZoom ? 1800 : 1200,
+            maxAge: 220,
+            speedFactor: 520,
+            width: windLowZoom ? 1.6 : 1.1,
+            // Tight speed range so typical 2–10 m/s winds land in the
+            // bright white band; only genuinely strong gusts trip warm.
+            speedRange: [0, 14],
+            // Mostly translucent → bright white core, with a faint warm
+            // wash reserved for the top end. Keeps the field reading as a
+            // cohesive flow instead of a rainbow.
             colorRamp: [
-              [0.0, [226, 232, 240, 180]], // slate-200 (faint tail)
-              [0.2, [248, 250, 252, 230]], // near-white core
-              [0.5, [253, 224, 71, 235]], // yellow-300
-              [0.75, [249, 115, 22, 240]], // orange-500
-              [1.0, [220, 38, 38, 250]], // red-600
+              [0.0, [226, 232, 240, 0]], // fully transparent tail
+              [0.1, [241, 245, 249, 140]], // soft slate fade-in
+              [0.35, [255, 255, 255, 235]], // bright white core
+              [0.6, [255, 255, 255, 255]], // peak white
+              [0.8, [253, 186, 116, 245]], // orange-300 (breezy)
+              [1.0, [239, 68, 68, 255]], // red-500 (gale)
             ],
           }),
         ],
@@ -1084,7 +1584,7 @@ export function IncidentMap() {
     } catch (err) {
       console.warn("wind layer error:", err);
     }
-  }, [wind, showWind, mapLoaded]);
+  }, [wind, showWind, mapLoaded, windLowZoom]);
 
   // ---- Critical infrastructure overlays ----
   // One driver effect handles all INFRA_LAYERS. We tear down & re-add per
@@ -1237,7 +1737,7 @@ export function IncidentMap() {
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
       <Legend
-        hasPerimeter={!!perimeter?.features?.length}
+        hasPerimeter={perimeterEnabled && abovePerimeterZoom && !!perimeter?.features?.length}
         showWind={showWind}
         setShowWind={setShowWind}
         showEvac={showEvac}
@@ -1262,6 +1762,8 @@ export function IncidentMap() {
           infraResults.map((r) => [r.layer.id, r.data?.features?.length ?? 0]),
         )}
         infraEnabled={selectedIncident != null}
+        collapsed={legendCollapsed}
+        setCollapsed={setLegendCollapsed}
       />
     </div>
   );
@@ -1503,6 +2005,119 @@ function escapeHtml(s: string): string {
   });
 }
 
+// Component-score row in the staging popup. Renders a small 0..1 bar so the
+// IC can see at a glance which axis is dragging the composite up or down.
+function componentRow(label: string, value: number | undefined): string {
+  const v = typeof value === "number" ? Math.max(0, Math.min(1, value)) : 0;
+  const pct = (v * 100).toFixed(0);
+  const color =
+    v >= 0.7 ? "#10b981" : v >= 0.4 ? "#f59e0b" : "#dc2626";
+  return `
+    <div style="display:flex;align-items:center;gap:6px;margin:2px 0">
+      <span style="width:54px;color:#94a3b8;font-size:10px">${escapeHtml(label)}</span>
+      <span style="flex:1;height:5px;background:#0f172a;border-radius:2px;overflow:hidden">
+        <span style="display:block;height:100%;width:${pct}%;background:${color}"></span>
+      </span>
+      <span style="width:30px;text-align:right;font-variant-numeric:tabular-nums;font-size:10px;color:#cbd5e1">${v.toFixed(2)}</span>
+    </div>`;
+}
+
+function buildStagingPopupHtml(
+  top: {
+    name?: string;
+    score?: number;
+    dist_incident_km?: number;
+    nearest_water_km?: number;
+    score_components?: Record<string, number>;
+    score_raw?: Record<string, number | null>;
+  },
+  wind?: { from_deg?: number | null; speed_mph?: number | null } | null,
+): string {
+  const components = top.score_components ?? {};
+  const raw = top.score_raw ?? {};
+  const compRows = [
+    componentRow("incident", components.incident),
+    componentRow("water", components.water),
+    componentRow("station", components.station),
+    componentRow("paved", components.paved),
+    componentRow("elevation", components.elevation),
+    componentRow("slope", components.slope),
+    componentRow("wind", components.wind),
+  ].join("");
+  const distLine =
+    top.dist_incident_km != null
+      ? `${top.dist_incident_km.toFixed(1)} km from fire`
+      : "";
+  const waterLine =
+    top.nearest_water_km != null
+      ? ` · water ${top.nearest_water_km.toFixed(2)} km`
+      : "";
+  const slopeLine =
+    raw.slope_pct != null ? ` · slope ${Number(raw.slope_pct).toFixed(1)}%` : "";
+  const elevLine =
+    raw.elevation_m != null
+      ? ` · ${Number(raw.elevation_m).toFixed(0)} m`
+      : "";
+  const windLine =
+    wind && wind.from_deg != null
+      ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">wind from ${Number(wind.from_deg).toFixed(0)}°${wind.speed_mph != null ? ` @ ${Number(wind.speed_mph).toFixed(0)} mph` : ""}</div>`
+      : "";
+  return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:8px 10px;border-radius:6px;border:1px solid #22c55e66;min-width:220px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
+      <strong style="color:#22c55e">Proposed staging</strong>
+      <span style="font-variant-numeric:tabular-nums;color:#cbd5e1">${
+        top.score != null ? Number(top.score).toFixed(2) : "?"
+      }</span>
+    </div>
+    <div style="color:#e2e8f0;margin-top:2px">${escapeHtml(String(top.name ?? "Staging"))}</div>
+    <div style="color:#94a3b8;font-size:10px">${escapeHtml(distLine + waterLine + slopeLine + elevLine)}</div>
+    ${windLine}
+    <div style="border-top:1px solid #334155;margin:6px 0 2px 0"></div>
+    ${compRows}
+  </div>`;
+}
+
+function buildEgressPopupHtml(props: {
+  bearing?: string;
+  bearing_deg?: number;
+  length_km?: number;
+  minutes?: number;
+  wind_relation?: string;
+}): string {
+  const rel = (props.wind_relation ?? "unknown").toLowerCase();
+  const relColor =
+    rel === "upwind"
+      ? "#10b981"
+      : rel === "crosswind"
+        ? "#f59e0b"
+        : rel === "downwind"
+          ? "#dc2626"
+          : "#94a3b8";
+  const relText =
+    rel === "upwind"
+      ? "upwind · safe escape"
+      : rel === "crosswind"
+        ? "crosswind · flank"
+        : rel === "downwind"
+          ? "downwind · AVOID (into fire-head)"
+          : "wind relation unknown";
+  const lenLine =
+    props.length_km != null
+      ? `${Number(props.length_km).toFixed(1)} km`
+      : "—";
+  const minLine =
+    props.minutes != null ? `${Number(props.minutes).toFixed(0)} min` : "—";
+  const bearingLine = `bearing ${escapeHtml(String(props.bearing ?? "?"))}${
+    props.bearing_deg != null ? ` (${Number(props.bearing_deg).toFixed(0)}°)` : ""
+  }`;
+  return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid ${relColor}66;min-width:170px">
+    <strong style="color:${relColor}">Egress · ${escapeHtml(String(props.bearing ?? "?"))}</strong><br/>
+    <span style="color:#cbd5e1">${escapeHtml(bearingLine)}</span><br/>
+    <span style="color:#cbd5e1">${escapeHtml(lenLine + " · " + minLine)}</span><br/>
+    <span style="color:${relColor};font-size:10px">${escapeHtml(relText)}</span>
+  </div>`;
+}
+
 function Legend({
   hasPerimeter,
   showWind,
@@ -1527,6 +2142,8 @@ function Legend({
   toggleInfra,
   infraCounts,
   infraEnabled,
+  collapsed,
+  setCollapsed,
 }: {
   hasPerimeter: boolean;
   showWind: boolean;
@@ -1551,12 +2168,35 @@ function Legend({
   toggleInfra: (id: string) => void;
   infraCounts: Record<string, number>;
   infraEnabled: boolean;
+  collapsed: boolean;
+  setCollapsed: (b: boolean) => void;
 }) {
   const center = wind?.vectors.length
     ? wind.vectors[Math.floor(wind.vectors.length / 2)]
     : null;
   return (
-    <div className="absolute bottom-3 left-3 max-w-[260px] rounded-md bg-smoke-800/90 p-3 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
+    <div className="absolute bottom-3 left-3 z-20 max-w-[260px] rounded-md bg-smoke-800/90 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
+      <button
+        type="button"
+        onClick={() => setCollapsed(!collapsed)}
+        className="flex w-full items-center justify-between gap-2 rounded-t-md px-3 py-2 text-left text-smoke-200 hover:bg-smoke-700/60"
+        aria-expanded={!collapsed}
+      >
+        <span className="font-semibold">Legend</span>
+        <span
+          className="text-smoke-400"
+          aria-hidden
+          style={{
+            transform: collapsed ? "rotate(0deg)" : "rotate(180deg)",
+            transition: "transform 120ms",
+            display: "inline-block",
+          }}
+        >
+          ▾
+        </span>
+      </button>
+      {collapsed ? null : (
+      <div className="px-3 pb-3">
       <div className="mb-1 font-semibold text-smoke-200">Basemap</div>
       <div className="mb-2 inline-flex overflow-hidden rounded border border-smoke-700">
         <button
@@ -1681,8 +2321,8 @@ function Legend({
       {showEvac && (
         <div className="ml-5 mt-1 space-y-0.5 text-[10px]">
           <ZoneSwatch color="#dc2626" label="Order" />
-          <ZoneSwatch color="#f59e0b" label="Warning" />
-          <ZoneSwatch color="#facc15" label="Shelter in place" />
+          <ZoneSwatch color="#facc15" label="Warning" />
+          <ZoneSwatch color="#a855f7" label="Shelter in place" />
           <ZoneSwatch color="#3b82f6" label="Advisory" />
         </div>
       )}
@@ -1727,11 +2367,23 @@ function Legend({
           <div className="flex items-center gap-1.5">
             <span
               className="inline-block h-0.5 w-5"
-              style={{
-                borderTop: "2px solid #dc2626",
-              }}
+              style={{ borderTop: "2px solid #10b981" }}
             />
-            <span>Egress (incident → highway)</span>
+            <span>Egress · upwind (safe)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-5"
+              style={{ borderTop: "2px solid #f59e0b" }}
+            />
+            <span>Egress · crosswind</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-5"
+              style={{ borderTop: "2px solid #dc2626" }}
+            />
+            <span>Egress · downwind (avoid)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span
@@ -1777,6 +2429,8 @@ function Legend({
       <div className="mt-2 text-[10px] text-smoke-500">
         Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS · OSM/OSMnx · HIFLD · NCES · FEMA
       </div>
+      </div>
+      )}
     </div>
   );
 }

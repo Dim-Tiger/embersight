@@ -12,6 +12,7 @@ import {
   LayoutGrid,
   Moon,
   Package,
+  Radio,
   Route,
   Sun,
   Wind,
@@ -19,6 +20,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalQueue } from "./components/panels/ApprovalQueue";
+import { BriefingTab } from "./components/panels/BriefingTab";
 import { ChatPanel } from "./components/panels/ChatPanel";
 import { EvacuationTab } from "./components/panels/EvacuationTab";
 import { IAPDraft } from "./components/panels/IAPDraft";
@@ -35,6 +37,7 @@ import { WeatherTab } from "./components/panels/WeatherTab";
 // happening without having to navigate into each one.
 const TAB_AGENTS: Record<string, readonly string[]> = {
   Operations: [...AGENT_ORDER],
+  Briefing: [...AGENT_ORDER],
   Weather: ["weather_wind"],
   Resources: ["resource_recommendation", "routing_staging"],
   Threats: ["values_at_risk", "terrain_fuel", "spread_simulation"],
@@ -44,6 +47,7 @@ const TAB_AGENTS: Record<string, readonly string[]> = {
 
 const NAV_ITEMS = [
   { tab: "Operations", Icon: LayoutGrid, label: "Operations" },
+  { tab: "Briefing", Icon: Radio, label: "Briefing" },
   { tab: "Weather", Icon: Wind, label: "Weather" },
   { tab: "Resources", Icon: Package, label: "Resources" },
   { tab: "Threats", Icon: AlertTriangle, label: "Threats" },
@@ -112,15 +116,11 @@ export default function Page() {
             src="/brand/logo.png"
             alt="EmberSight"
             className="h-7 w-7 flex-shrink-0 object-contain"
-            // The source logo has a BLACK eye outline (designed for light
-            // backgrounds). In dark mode, invert + hue-rotate flips the
-            // outline to white while bringing the orange/red flame colors
-            // back to their originals.
-            style={
-              theme === "dark"
-                ? { filter: "invert(1) hue-rotate(180deg)" }
-                : undefined
-            }
+            // The sidebar is always dark (bg-smoke-800 = #111722) regardless
+            // of in-app theme, so the logo must always use the inverted variant
+            // — invert flips the black outline to white, hue-rotate(180deg)
+            // brings the orange/red flame back to its original hue.
+            style={{ filter: "invert(1) hue-rotate(180deg)" }}
           />
           {!sidebarCollapsed && (
             <span className="flex-1 truncate font-semibold tracking-wide text-smoke-200">
@@ -285,6 +285,7 @@ export default function Page() {
         ) : (
           <>
             {activeTab === "Operations" && <OperationsTab />}
+            {activeTab === "Briefing" && <BriefingTab />}
             {activeTab === "Weather" && <WeatherTab />}
             {activeTab === "Resources" && <ResourcesTab />}
             {activeTab === "Threats" && <ThreatsTab />}
