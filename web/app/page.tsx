@@ -111,22 +111,34 @@ export default function Page() {
             sidebarCollapsed ? "flex-col gap-2 px-2 py-3" : "gap-2 px-3 py-3.5"
           }`}
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/brand/logo.png"
-            alt="EmberSight"
-            className="h-7 w-7 flex-shrink-0 object-contain"
-            // The sidebar is always dark (bg-smoke-800 = #111722) regardless
-            // of in-app theme, so the logo must always use the inverted variant
-            // — invert flips the black outline to white, hue-rotate(180deg)
-            // brings the orange/red flame back to its original hue.
-            style={{ filter: "invert(1) hue-rotate(180deg)" }}
-          />
-          {!sidebarCollapsed && (
-            <span className="flex-1 truncate font-semibold tracking-wide text-smoke-200">
-              EmberSight
-            </span>
-          )}
+          {/* Brand → marketing landing. Opens in a new tab so the IC
+              keeps the live incident session intact. */}
+          <a
+            href="/landing/"
+            target="_blank"
+            rel="noopener"
+            title="About EmberSight"
+            className={`flex min-w-0 items-center rounded transition-opacity hover:opacity-80 ${
+              sidebarCollapsed ? "justify-center" : "flex-1 gap-2"
+            }`}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/brand/logo.png"
+              alt="EmberSight"
+              className="h-7 w-7 flex-shrink-0 object-contain"
+              // The sidebar is always dark (bg-smoke-800 = #111722) regardless
+              // of in-app theme, so the logo must always use the inverted variant
+              // — invert flips the black outline to white, hue-rotate(180deg)
+              // brings the orange/red flame back to its original hue.
+              style={{ filter: "invert(1) hue-rotate(180deg)" }}
+            />
+            {!sidebarCollapsed && (
+              <span className="flex-1 truncate font-semibold tracking-wide text-smoke-200">
+                EmberSight
+              </span>
+            )}
+          </a>
           <button
             onClick={() => setSidebarCollapsed((v) => !v)}
             className="flex h-6 w-6 items-center justify-center rounded text-smoke-400 transition-colors hover:bg-smoke-700 hover:text-smoke-200"
