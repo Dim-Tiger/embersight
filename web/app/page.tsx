@@ -294,7 +294,30 @@ export default function Page() {
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
-        {!selectedIncidentId ? (
+        {/*
+          IncidentMap is rendered inside <OperationsView> in a STABLE DOM
+          location so it survives the no-incident → incident transition
+          without unmounting. A prior structure conditionally rendered
+          two separate <IncidentMap /> instances (one in NoIncidentState,
+          one in OperationsTab), each with its own maplibregl.Map and
+          ResizeObserver. The transition created a new map inside a
+          different-width container; layout reflow fired ResizeObserver
+          multiple times during the CSS shrink, and MapLibre's task
+          scheduler reentered:
+            "Attempting to run(), but is already running."
+          → map froze at "an arbitrary place" and became uninteractive.
+          Now the map is mounted exactly once for the Operations tab,
+          and the right column is the ONLY thing that swaps between
+          no-incident and incident-selected.
+        */}
+        {activeTab === "Operations" ? (
+          <OperationsView
+            hasIncident={!!selectedIncidentId}
+            loading={incidentsLoading}
+            error={incidentsError ? incidentsErrorObj : null}
+            empty={incidentsEmpty}
+          />
+        ) : !selectedIncidentId ? (
           <NoIncidentState
             loading={incidentsLoading}
             error={incidentsError ? incidentsErrorObj : null}
@@ -302,7 +325,6 @@ export default function Page() {
           />
         ) : (
           <>
-            {activeTab === "Operations" && <OperationsTab />}
             {activeTab === "Briefing" && <BriefingTab />}
             {activeTab === "Weather" && <WeatherTab />}
             {activeTab === "Resources" && <ResourcesTab />}
@@ -522,16 +544,41 @@ function NoIncidentState({
   );
 }
 
-function OperationsTab() {
-  // Four independent panels in the right column. Each has its own bounded
-  // scroll region — none can push another. The chat is the only flex-grow
-  // panel; the other three have fixed shares of the column height so the
-  // pipeline ladder and live stream can't shove the chat around when they
-  // grow.
+/**
+ * Operations view: the grid layout is identical whether or not a fire
+ * is selected. The map sits in the 1fr column in a stable DOM location
+ * so it's never unmounted on incident click. Only the contents of the
+ * right column swap — either the no-incident pill / loading / error
+ * state, or the four operations panels.
+ *
+ * This shape exists because the prior split (NoIncidentState rendered
+ * a full-width map, OperationsTab rendered a smaller grid map) caused
+ * a brand-new MapLibre instance to be created inside a different-width
+ * container on every incident click. The reflow during that transition
+ * fired MapLibre's internal ResizeObserver multiple times, the task
+ * scheduler reentered, and the map froze.
+ */
+function OperationsView({
+  hasIncident,
+  loading,
+  error,
+  empty,
+}: {
+  hasIncident: boolean;
+  loading: boolean;
+  error: Error | null;
+  empty: boolean;
+}) {
   return (
     <div className="grid h-full min-h-0 grid-cols-[1fr_360px] grid-rows-[minmax(0,1fr)] gap-px bg-smoke-700">
-      <div className="min-h-0 bg-smoke-900">
+      <div className="relative min-h-0 bg-smoke-900">
         <IncidentMap />
+        {/* Overlay the no-incident pill on top of the map without
+           unmounting/remounting it. The pill is non-interactive so map
+           clicks still work for the user to drop a synthetic ignition. */}
+        {!hasIncident && (
+          <NoIncidentOverlay loading={loading} error={error} empty={empty} />
+        )}
       </div>
       <aside
         className="grid min-h-0 gap-px bg-smoke-700"
@@ -554,5 +601,96 @@ function OperationsTab() {
         </div>
       </aside>
     </div>
+  );
+}
+
+/**
+ * The pill that sits over the map before an incident is selected.
+ * Extracted from NoIncidentState so the SAME visual can be overlaid on
+ * the persistent map without going through the unmount path.
+ */
+function NoIncidentOverlay({
+  loading,
+  error,
+  empty,
+}: {
+  loading: boolean;
+  error: Error | null;
+  empty: boolean;
+}) {
+  let headline = (
+    <>
+      Click an{" "}
+      <span className="font-semibold text-ember-300">active fire</span> on the
+      map, or choose one from the left panel, to begin.
+    </>
+  );
+  let detail: string | null = null;
+  let tone: "default" | "warn" | "error" = "default";
+
+  if (loading) {
+    headline = <>Loading incidents…</>;
+    detail = "Fetching the latest active fires from CAL FIRE and WFIGS.";
+  } else if (error) {
+    headline = <>Couldn&apos;t load incidents</>;
+    detail =
+      error instanceof Error
+        ? error.message
+        : "The upstream incident feeds (CAL FIRE / WFIGS) are unreachable.";
+    tone = "error";
+  } else if (empty) {
+    headline = <>No active CA incidents right now</>;
+    detail =
+      "Both CAL FIRE and WFIGS returned zero current incidents in California. The dashboard will populate when a new fire is reported.";
+    tone = "warn";
+  }
+
+  const pillBorder =
+    tone === "error"
+      ? "border-red-500/50"
+      : tone === "warn"
+        ? "border-amber-500/40"
+        : "border-ember-500/40";
+  const iconColor =
+    tone === "error"
+      ? "text-red-400"
+      : tone === "warn"
+        ? "text-amber-300"
+        : "text-ember-400";
+
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-6 z-10 -translate-x-1/2">
+      <div
+        className={`flex max-w-md flex-col gap-1 rounded-2xl border ${pillBorder} bg-smoke-800/90 px-4 py-2 text-xs text-smoke-200 shadow-lg backdrop-blur`}
+      >
+        <div className="flex items-center gap-2">
+          <Flame className={`h-3.5 w-3.5 ${iconColor}`} />
+          <span>{headline}</span>
+        </div>
+        {detail && (
+          <p className="pl-5 text-[10px] leading-relaxed text-smoke-400">
+            {detail}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Kept for non-Operations tabs (Briefing/Weather/Resources/etc) when no
+// incident is selected. Renders its OWN map; this branch is intentional
+// because if the user is on, say, Briefing tab without an incident, we
+// still want them to see the map and be able to click a fire. The
+// stable-DOM map only applies to the Operations tab.
+function OperationsTab() {
+  // Legacy alias retained for clarity. Kept for any imports lingering
+  // in dev branches. The real layout lives in <OperationsView>.
+  return (
+    <OperationsView
+      hasIncident={true}
+      loading={false}
+      error={null}
+      empty={false}
+    />
   );
 }

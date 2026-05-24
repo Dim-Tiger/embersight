@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
+import { readTestMode } from "@/lib/testModeServer";
 
-export const revalidate = 300;
+// Test-mode incidents are personalised per cookie, so we can't share a static
+// 5-minute cache across users. Mark dynamic. The upstream fetches below still
+// individually cache for 5 minutes via next.revalidate, so the real-data path
+// is unchanged.
+export const dynamic = "force-dynamic";
 
 // WFIGS (NIFC interagency) is the national source of truth for active US wildfires.
 // It already includes CAL FIRE-managed incidents; we still hit CALFIRE separately
@@ -21,7 +26,7 @@ type Out = {
   acres: number | null;
   contained_pct: number | null;
   started_at: string | null;
-  source: "calfire" | "wfigs";
+  source: "calfire" | "wfigs" | "synthetic";
 };
 
 async function safeJson<T>(url: string, init?: RequestInit): Promise<T | null> {
@@ -49,12 +54,31 @@ function isNearby(lat1: number, lon1: number, lat2: number, lon2: number): boole
 }
 
 export async function GET() {
+  const testMode = await readTestMode();
+
   const [calfire, wfigs] = await Promise.all([
     safeJson<any[]>(CALFIRE),
     safeJson<any>(WFIGS_POINTS),
   ]);
 
   const merged: Out[] = [];
+
+  // Prepend synthetic incidents so they appear at the top of the dropdown
+  // and on the map. Real fires still load underneath for context.
+  if (testMode?.enabled && testMode.syntheticIncidents.length) {
+    for (const s of testMode.syntheticIncidents) {
+      merged.push({
+        id: s.id,
+        name: s.name,
+        lat: s.lat,
+        lon: s.lon,
+        acres: s.acres,
+        contained_pct: s.contained_pct,
+        started_at: s.started_at,
+        source: "synthetic",
+      });
+    }
+  }
 
   if (Array.isArray(calfire)) {
     for (const it of calfire) {

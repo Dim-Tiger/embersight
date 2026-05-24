@@ -70,6 +70,31 @@ class Incident(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class WindOverride(BaseModel):
+    """Synthetic wind injected by the test utility."""
+
+    direction_deg: float
+    speed_ms: float
+    gusts_ms: float | None = None
+
+
+class TestOverrides(BaseModel):
+    """Test-mode overrides forwarded by the Next.js proxy when the user has
+    the dev panel enabled. Honored by subagents (currently weather_wind) so
+    the AI's reasoning is grounded in the dev panel's synthetic conditions,
+    not the real upstream feeds for the synthetic fire's coordinates."""
+
+    enabled: bool = False
+    wind: WindOverride | None = None
+    alert_preset: Literal[
+        "none",
+        "red_flag_warning",
+        "fire_weather_watch",
+        "high_wind_warning",
+        "excessive_heat_warning",
+    ] = "none"
+
+
 class InterruptRecord(BaseModel):
     """One row of the append-only audit log."""
 
@@ -110,6 +135,13 @@ class AgentState(BaseModel):
     operational_period: int = 1
     mode: RunMode = "briefing"
     user_query: str = ""  # legacy; chat turns use `messages` instead
+
+    # Dev panel overrides — when present and enabled, weather_wind (and any
+    # future tool that decides to honor it) short-circuits real upstream
+    # fetches and uses these values instead, so the AI's reasoning matches
+    # the synthetic fire the user spawned. Forwarded by the Next.js proxy
+    # from the embersight_test cookie.
+    test_overrides: TestOverrides | None = None
 
     # Conversational history (chat mode). LangGraph add_messages appends
     # incoming HumanMessage / AIMessage / ToolMessage rather than replacing.

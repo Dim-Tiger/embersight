@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .graph import compiled_graph
-from .state import AgentState, Incident
+from .state import AgentState, Incident, TestOverrides
 
 load_dotenv()
 log = logging.getLogger("embersight")
@@ -57,6 +57,10 @@ class StreamRequest(BaseModel):
     operational_period: int = 1
     user_query: str = ""  # legacy, kept for back-compat with the old client
     thread_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Dev-panel synthetic-data overrides. Injected by the Next.js proxy when
+    # the user has test mode enabled, so the agent's tools (weather_wind, ...)
+    # operate on the synthetic conditions rather than the real upstream feeds.
+    test_overrides: TestOverrides | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -240,6 +244,7 @@ async def agent_stream(req: StreamRequest) -> EventSourceResponse:
             operational_period=req.operational_period,
             mode="briefing",
             user_query=req.user_query,
+            test_overrides=req.test_overrides,
         )
         return EventSourceResponse(_stream_briefing(initial, req.thread_id))
 
@@ -252,6 +257,7 @@ async def agent_stream(req: StreamRequest) -> EventSourceResponse:
         "incident": req.incident,
         "operational_period": req.operational_period,
         "mode": "chat",
+        "test_overrides": req.test_overrides,
     }
     return EventSourceResponse(_stream_chat(patch, req.thread_id))
 

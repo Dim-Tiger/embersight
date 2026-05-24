@@ -3,11 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { consumeAgentSse } from "@/lib/sse";
 import { useStore } from "@/lib/store";
-import {
-  buildSyntheticAlerts,
-  buildSyntheticWindGrid,
-  useTestMode,
-} from "@/lib/testMode";
+import { useTestMode } from "@/lib/testMode";
 
 export type Incident = {
   id: string;
@@ -22,37 +18,24 @@ export type Incident = {
 };
 
 export function useIncidents() {
+  // The server already merges synthetic incidents into /api/incidents based
+  // on the embersight_test cookie. We just key the query on the dev-panel
+  // state so the cache invalidates the moment the user spawns / removes a
+  // synthetic — otherwise we'd wait up to the refetch interval to see it.
   const testEnabled = useTestMode((s) => s.enabled);
-  const synthetic = useTestMode((s) => s.syntheticIncidents);
+  const synthSig = useTestMode((s) =>
+    s.syntheticIncidents.map((i) => i.id).join(","),
+  );
 
-  const query = useQuery({
-    queryKey: ["incidents"],
+  return useQuery({
+    queryKey: ["incidents", testEnabled, synthSig],
     queryFn: async (): Promise<Incident[]> => {
       const r = await fetch("/api/incidents");
       if (!r.ok) throw new Error(`incidents ${r.status}`);
       return r.json();
     },
     refetchInterval: 5 * 60_000,
-    // In test mode we still let the underlying fetch run — the user may want
-    // to compare synthetic against real. We just prepend synthetic on top.
   });
-
-  if (!testEnabled || synthetic.length === 0) return query;
-
-  const overlay: Incident[] = synthetic.map((s) => ({
-    id: s.id,
-    name: s.name,
-    lat: s.lat,
-    lon: s.lon,
-    acres: s.acres,
-    contained_pct: s.contained_pct,
-    started_at: s.started_at,
-    source: "synthetic" as const,
-  }));
-  const merged = [...overlay, ...(query.data ?? [])];
-  // Return a shallow-cloned query object so consumers see the merged data
-  // without losing isLoading/isError state.
-  return { ...query, data: merged } as typeof query;
 }
 
 export function useEvacZones() {
@@ -68,29 +51,19 @@ export function useEvacZones() {
 }
 
 export function useWeather(lat: number | null, lon: number | null) {
-  const testEnabled = useTestMode((s) => s.enabled);
+  // Server reads the cookie and returns synthetic alerts in test mode.
+  // We just rekey on the alert preset so the user sees their pick instantly.
   const alertPreset = useTestMode((s) => s.alertPreset);
-
-  const query = useQuery({
-    queryKey: ["weather", lat, lon],
-    enabled: lat != null && lon != null && !testEnabled,
+  const testEnabled = useTestMode((s) => s.enabled);
+  return useQuery({
+    queryKey: ["weather", lat, lon, testEnabled, alertPreset],
+    enabled: lat != null && lon != null,
     queryFn: async () => {
       const r = await fetch(`/api/weather/${lat}/${lon}`);
       if (!r.ok) throw new Error(`weather ${r.status}`);
       return r.json();
     },
   });
-
-  if (testEnabled) {
-    return {
-      ...query,
-      data: buildSyntheticAlerts(alertPreset),
-      isLoading: false,
-      isError: false,
-      error: null,
-    } as typeof query;
-  }
-  return query;
 }
 
 export type WindVector = {
@@ -109,12 +82,17 @@ export type WindGrid = {
 };
 
 export function useWind(lat: number | null, lon: number | null) {
+  // Server reads the cookie and synthesises the grid in test mode. We rekey
+  // on the wind override so the streamlines update the moment the user drags
+  // a slider — the cookie write is synchronous but React-Query needs a key
+  // change to refetch.
   const testEnabled = useTestMode((s) => s.enabled);
-  const wind = useTestMode((s) => s.wind);
-
-  const query = useQuery({
-    queryKey: ["wind", lat, lon],
-    enabled: lat != null && lon != null && !testEnabled,
+  const windSig = useTestMode(
+    (s) => `${s.wind.direction_deg}|${s.wind.speed_ms}|${s.wind.gusts_ms ?? "_"}`,
+  );
+  return useQuery({
+    queryKey: ["wind", lat, lon, testEnabled, windSig],
+    enabled: lat != null && lon != null,
     queryFn: async (): Promise<WindGrid> => {
       const r = await fetch(`/api/wind/${lat}/${lon}`);
       if (!r.ok) throw new Error(`wind ${r.status}`);
@@ -122,17 +100,6 @@ export function useWind(lat: number | null, lon: number | null) {
     },
     refetchInterval: 5 * 60_000,
   });
-
-  if (testEnabled && lat != null && lon != null) {
-    return {
-      ...query,
-      data: buildSyntheticWindGrid(lat, lon, wind) as WindGrid,
-      isLoading: false,
-      isError: false,
-      error: null,
-    } as typeof query;
-  }
-  return query;
 }
 
 export function useFirms(days = 1) {

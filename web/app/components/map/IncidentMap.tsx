@@ -262,11 +262,25 @@ export function IncidentMap() {
   ) as { payload?: RoutingPayload } | undefined;
   const pendingInterrupts = useStore((s) => s.pendingInterrupts);
   const acceptedEvacZones = useStore((s) => s.acceptedEvacZones);
+  // While the briefing SSE stream is open, interrupts arrive in a rapid
+  // burst (5-20 in a few seconds once evac_intel finishes its parallel
+  // LLM gather). If we let the suggestion layer rebuild on every arrival,
+  // we get 5-20 heavy MapLibre source updates piling up while a flyTo
+  // animation is mid-flight and a ResizeObserver is firing for the
+  // right-panel layout shift. The renderer reenters its own task
+  // scheduler:
+  //   "Attempting to run(), but is already running."
+  // and the map locks at whatever mid-flyTo position it was at.
+  // Gate the suggestion polygons behind `streaming === false` so they
+  // appear in one batch after the briefing finishes; cards in the
+  // approval queue still surface in real time via ApprovalQueue.
+  const streaming = useStore((s) => s.streaming);
 
   // Pull the polygons + status out of pending evac_zone_change interrupts so
-  // we can paint a pulsing suggestion overlay on the map. Each suggestion has
-  // a stable zone_id so the layer can find/update it between renders.
+  // we can paint a suggestion overlay on the map. Each suggestion has a
+  // stable zone_id so the layer can find/update it between renders.
   const suggestedEvacZones = useMemo(() => {
+    if (streaming) return [];
     return pendingInterrupts
       .filter((p) => p.interrupt.type === "evac_zone_change")
       .map((p) => {
@@ -286,7 +300,7 @@ export function IncidentMap() {
         };
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
-  }, [pendingInterrupts]);
+  }, [pendingInterrupts, streaming]);
 
   // Critical-infrastructure overlays. Each entry's data is fetched only
   // when its toggle in infraVisibility is on; toggles persist across
@@ -307,12 +321,75 @@ export function IncidentMap() {
       style: CARTO_DARK,
       center: [viewport.longitude, viewport.latitude],
       zoom: viewport.zoom,
+      maxPitch: 85,
+      pitchWithRotate: true,
+      // CRITICAL: disable MapLibre's built-in ResizeObserver. When the
+      // user clicks an incident the page transitions from
+      // NoIncidentState (full-width map) to OperationsTab (map + 360px
+      // right panel). The map container shrinks dramatically over a CSS
+      // transition; MapLibre's internal ResizeObserver fires many times
+      // during the transition, each call triggers map._render(), and the
+      // calls reenter each other inside the task scheduler:
+      //   Uncaught Error: Attempting to run(), but is already running.
+      // We replace it below with a single rAF-debounced ResizeObserver
+      // so the map only resizes once per animation frame, never inside
+      // a reentrant call.
+      trackResize: false,
     });
+
+    // Our own debounced resize observer. Coalesces multiple
+    // ResizeObserver fires within one animation frame into a single
+    // map.resize() call. The check inside the rAF guards against
+    // calling resize after the map has been torn down.
+    let resizePending = false;
+    const observer = new ResizeObserver(() => {
+      if (resizePending) return;
+      resizePending = true;
+      requestAnimationFrame(() => {
+        resizePending = false;
+        if (!mapRef.current) return;
+        try {
+          map.resize();
+        } catch {
+          /* map disposed mid-frame */
+        }
+      });
+    });
+    observer.observe(containerRef.current);
     map.addControl(
-      new maplibregl.NavigationControl({ showCompass: false }),
+      // Compass doubles as the tilt/rotate handle — right-drag also works.
+      new maplibregl.NavigationControl({ visualizePitch: true }),
       "top-right",
     );
-    map.on("load", () => setMapLoaded(true));
+    map.addControl(
+      new maplibregl.TerrainControl({
+        source: "terrain-dem",
+        exaggeration: 1.4,
+      }),
+      "top-right",
+    );
+    map.on("load", () => {
+      // 3D terrain via AWS Terrarium DEM tiles (free, no key). Native fill /
+      // line / circle / symbol layers automatically drape on terrain, so every
+      // perimeter, evac zone, route, rally point and infra marker climbs the
+      // topography. Deck.gl overlays render in screen space and stay flat —
+      // intentional for now.
+      if (!map.getSource("terrain-dem")) {
+        map.addSource("terrain-dem", {
+          type: "raster-dem",
+          tiles: [
+            "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+          ],
+          encoding: "terrarium",
+          tileSize: 256,
+          maxzoom: 15,
+          attribution:
+            "DEM tiles © Mapzen / AWS Terrain Tiles (Terrarium encoding)",
+        });
+      }
+      map.setTerrain({ source: "terrain-dem", exaggeration: 1.4 });
+      setMapLoaded(true);
+    });
     // Flip the boolean state only when crossing the perimeter-visibility
     // threshold so we don't trigger re-renders on every zoom tick.
     // Also remember whether the most recent zoom transition was driven by
@@ -346,6 +423,7 @@ export function IncidentMap() {
     });
 
     return () => {
+      observer.disconnect();
       popupRef.current?.remove();
       popupRef.current = null;
       if (deckOverlayRef.current) {
@@ -965,11 +1043,28 @@ export function IncidentMap() {
     }
   }, [evacFiltered, showEvac, mapLoaded]);
 
-  // ---- Suggested evac zones (AI proposals, pulsing) ----
-  // Yellow pulse = WARNING suggestion. Red pulse = ORDER suggestion.
+  // ---- Suggested evac zones (AI proposals, static dashed overlay) ----
+  // Yellow dashed outline = WARNING suggestion. Red dashed outline = ORDER.
   // Lives on the map only while the corresponding interrupt is pending in
   // the approval queue. On approve, the polygon moves to acceptedEvacZones
   // (rendered as a solid layer below).
+  //
+  // CRITICAL: this effect must NOT run a per-frame paint loop. An earlier
+  // version pulsed fill-opacity and line-width 60x/sec via requestAnimationFrame.
+  // With the statewide catalog landing, evac_intel routinely produces 5-20
+  // pending suggestions instead of 0-2. Re-tessellating 20 polygons at
+  // every paint update overloaded MapLibre's worker queue and re-entered
+  // its task scheduler:
+  //   "Uncaught Error: Attempting to run(), but is already running."
+  // The whole map crashed on the first incident click. The fix is to
+  // make the layer purely static — the source/layers are still cheap
+  // to add/remove on suggestion-set changes, and the dashed outline +
+  // semi-transparent fill differentiate suggestions from accepted zones
+  // without any animation.
+  //
+  // We also keep the source/layers across non-empty → non-empty transitions
+  // and just `setData` on the source so we don't churn the layer graph
+  // every time a new interrupt arrives in a burst.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
@@ -978,15 +1073,7 @@ export function IncidentMap() {
     const FILL_ID = "suggested-evac-fill";
     const LINE_ID = "suggested-evac-line";
 
-    try {
-      if (map.getLayer(FILL_ID)) map.removeLayer(FILL_ID);
-      if (map.getLayer(LINE_ID)) map.removeLayer(LINE_ID);
-      if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
-    } catch {
-      /* mid-rerender */
-    }
-
-    if (!suggestedEvacZones.length) return;
+    const handlers: Array<{ off: () => void }> = [];
 
     const features: GeoJSON.Feature[] = suggestedEvacZones.map((z) => ({
       type: "Feature",
@@ -1002,110 +1089,127 @@ export function IncidentMap() {
       features,
     };
 
+    const cleanup = () => {
+      for (const h of handlers) {
+        try {
+          h.off();
+        } catch {
+          /* listener already torn down */
+        }
+      }
+      // Only tear down layers if we're transitioning to "no suggestions".
+      // For non-empty → non-empty changes we keep the layers and let the
+      // next effect run call setData. (React invokes cleanup BEFORE the
+      // next effect body, so the next body must defensively add+source
+      // anyway; the setData path below takes the cheap fork.)
+      if (!suggestedEvacZones.length) {
+        try {
+          if (map.getLayer(FILL_ID)) map.removeLayer(FILL_ID);
+          if (map.getLayer(LINE_ID)) map.removeLayer(LINE_ID);
+          if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
+        } catch {
+          /* mid-rerender */
+        }
+      }
+    };
+
+    if (!suggestedEvacZones.length) {
+      // Clear any leftover layer from a previous run.
+      try {
+        if (map.getLayer(FILL_ID)) map.removeLayer(FILL_ID);
+        if (map.getLayer(LINE_ID)) map.removeLayer(LINE_ID);
+        if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
+      } catch {
+        /* mid-rerender */
+      }
+      return cleanup;
+    }
+
     try {
-      map.addSource(SOURCE_ID, { type: "geojson", data: fc });
-      const colorExpr = [
-        "match",
-        ["get", "status"],
-        "ORDER",
-        "#dc2626",
-        "WARNING",
-        "#facc15",
-        "#facc15",
-      ] as unknown as maplibregl.ExpressionSpecification;
+      const existing = map.getSource(SOURCE_ID) as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      if (existing) {
+        // Cheap path: source exists, just push new data. No layer churn,
+        // no re-tessellation of unrelated features, no re-entry risk.
+        existing.setData(fc);
+      } else {
+        map.addSource(SOURCE_ID, { type: "geojson", data: fc });
+        const colorExpr = [
+          "match",
+          ["get", "status"],
+          "ORDER",
+          "#dc2626",
+          "WARNING",
+          "#facc15",
+          "#facc15",
+        ] as unknown as maplibregl.ExpressionSpecification;
 
-      map.addLayer({
-        id: FILL_ID,
-        type: "fill",
-        source: SOURCE_ID,
-        paint: {
-          "fill-color": colorExpr,
-          "fill-opacity": 0.25,
-        },
-      });
-      map.addLayer({
-        id: LINE_ID,
-        type: "line",
-        source: SOURCE_ID,
-        paint: {
-          "line-color": colorExpr,
-          "line-width": 2,
-          "line-opacity": 0.9,
-          "line-dasharray": [2, 1.5],
-        },
-      });
+        map.addLayer({
+          id: FILL_ID,
+          type: "fill",
+          source: SOURCE_ID,
+          paint: {
+            "fill-color": colorExpr,
+            // Static opacity — no per-frame animation. Visually distinct
+            // from accepted zones (which are 0.45) and from the cone (purple).
+            "fill-opacity": 0.32,
+          },
+        });
+        map.addLayer({
+          id: LINE_ID,
+          type: "line",
+          source: SOURCE_ID,
+          paint: {
+            "line-color": colorExpr,
+            "line-width": 2.5,
+            "line-opacity": 0.95,
+            "line-dasharray": [2, 1.5],
+          },
+        });
 
-      // Pulse: ramp fill-opacity + line-width on a 1.4s cycle. Pure paint
-      // updates — no source mutation — so this is cheap.
-      let raf = 0;
-      const start = performance.now();
-      const tick = (now: number) => {
-        const t = ((now - start) / 1400) % 1;
-        // Smooth ease in/out via a cosine wave: 0 → 1 → 0 across the cycle.
-        const wave = (1 - Math.cos(t * Math.PI * 2)) / 2;
-        const fillOpacity = 0.18 + 0.30 * wave;
-        const lineWidth = 1.8 + 2.6 * wave;
-        try {
-          if (map.getLayer(FILL_ID)) {
-            map.setPaintProperty(FILL_ID, "fill-opacity", fillOpacity);
-          }
-          if (map.getLayer(LINE_ID)) {
-            map.setPaintProperty(LINE_ID, "line-width", lineWidth);
-          }
-        } catch {
-          /* layer torn down */
-        }
-        raf = requestAnimationFrame(tick);
-      };
-      raf = requestAnimationFrame(tick);
+        // Hover popup so users can see which suggestion they're inspecting.
+        const showPopup = (
+          e: maplibregl.MapMouseEvent & {
+            features?: maplibregl.MapGeoJSONFeature[];
+          },
+        ) => {
+          if (!popupRef.current || !e.features?.length) return;
+          const p = e.features[0].properties as Record<string, unknown>;
+          const status = String(p.status ?? "");
+          const color = status === "ORDER" ? "#dc2626" : "#facc15";
+          popupRef.current
+            .setLngLat(e.lngLat)
+            .setHTML(
+              `<div style="font-size:12px;line-height:1.5;color:#0f172a;background:${color};padding:6px 8px;border-radius:6px;font-weight:600">
+                SUGGESTED ${status}<br/>
+                <span style="font-weight:400">${escapeHtml(String(p.name ?? ""))}</span><br/>
+                <span style="font-size:10px;font-weight:500">awaiting IC approval</span>
+              </div>`,
+            )
+            .addTo(map);
+          map.getCanvas().style.cursor = "pointer";
+        };
+        const hidePopup = () => {
+          popupRef.current?.remove();
+          map.getCanvas().style.cursor = "";
+        };
+        map.on("mousemove", FILL_ID, showPopup);
+        map.on("mouseleave", FILL_ID, hidePopup);
+        handlers.push({ off: () => map.off("mousemove", FILL_ID, showPopup) });
+        handlers.push({ off: () => map.off("mouseleave", FILL_ID, hidePopup) });
 
-      // Hover popup so users can see which suggestion they're inspecting.
-      const showPopup = (
-        e: maplibregl.MapMouseEvent & {
-          features?: maplibregl.MapGeoJSONFeature[];
-        },
-      ) => {
-        if (!popupRef.current || !e.features?.length) return;
-        const p = e.features[0].properties as Record<string, unknown>;
-        const status = String(p.status ?? "");
-        const color = status === "ORDER" ? "#dc2626" : "#facc15";
-        popupRef.current
-          .setLngLat(e.lngLat)
-          .setHTML(
-            `<div style="font-size:12px;line-height:1.5;color:#0f172a;background:${color};padding:6px 8px;border-radius:6px;font-weight:600">
-              SUGGESTED ${status}<br/>
-              <span style="font-weight:400">${escapeHtml(String(p.name ?? ""))}</span><br/>
-              <span style="font-size:10px;font-weight:500">awaiting IC approval</span>
-            </div>`,
-          )
-          .addTo(map);
-        map.getCanvas().style.cursor = "pointer";
-      };
-      const hidePopup = () => {
-        popupRef.current?.remove();
-        map.getCanvas().style.cursor = "";
-      };
-      map.on("mousemove", FILL_ID, showPopup);
-      map.on("mouseleave", FILL_ID, hidePopup);
-
-      // Keep perimeter + incidents above suggestion overlay.
-      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
-      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
-      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
-      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
-
-      return () => {
-        cancelAnimationFrame(raf);
-        try {
-          map.off("mousemove", FILL_ID, showPopup);
-          map.off("mouseleave", FILL_ID, hidePopup);
-        } catch {
-          /* ignore */
-        }
-      };
+        // Keep perimeter + incidents above suggestion overlay.
+        if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+        if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
+        if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+        if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
+      }
     } catch (err) {
       console.warn("suggested-evac layer error:", err);
     }
+
+    return cleanup;
   }, [suggestedEvacZones, mapLoaded]);
 
   // ---- Accepted evac zones (post-approval, solid) ----
@@ -1725,8 +1829,8 @@ export function IncidentMap() {
             // Density scales up at low zoom so the smaller box still feels
             // alive; width grows just enough to stay legible.
             numParticles: windLowZoom ? 1800 : 1200,
-            maxAge: 1100,
-            speedFactor: 52,
+            maxAge: 255,
+            speedFactor: 200,
             width: windLowZoom ? 1.6 : 1.1,
             // Tight speed range so typical 2–10 m/s winds land in the
             // bright white band; only genuinely strong gusts trip warm.

@@ -289,42 +289,24 @@ def _deterministic_proposal(
     return ("NORMAL", "No meaningful overlap with predicted spread cone.")
 
 
-def _llm_proposal(
-    zone: dict,
-    overlaps: dict,
-    population: int,
-    egress: dict,
-) -> tuple[str, str] | None:
-    """Ask Claude Haiku 4.5 for a proposed status + rationale.
-
-    Returns `(proposed_status, rationale)` or `None` if the LLM call
-    fails / the model output cannot be parsed. The caller falls back to
-    the deterministic proposal.
-    """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
-
-    try:
-        from langchain_anthropic import ChatAnthropic  # noqa: PLC0415
-    except ImportError:
-        return None
-
+def _load_evac_system_prompt() -> str:
     try:
         from pathlib import Path  # noqa: PLC0415
 
-        prompt_path = (
+        return (
             Path(__file__).resolve().parent.parent
             / "prompts"
             / "evacuation_intelligence.md"
-        )
-        system_prompt = prompt_path.read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8")
     except OSError:
-        system_prompt = (
+        return (
             "You PROPOSE Cal OES evacuation zone status changes. Verbs are "
             "PROPOSE / RECOMMEND only. Never issue / publish / order."
         )
 
-    user_msg = (
+
+def _build_zone_prompt(zone: dict, overlaps: dict, population: int, egress: dict) -> str:
+    return (
         "Zone details:\n"
         f"- id: {zone['zone_id']}\n"
         f"- name: {zone['name']}\n"
@@ -342,9 +324,57 @@ def _llm_proposal(
         "RATIONALE: <one sentence>"
     )
 
+
+def _parse_llm_text(text: str) -> tuple[str, str] | None:
+    proposed = None
+    rationale = None
+    for line in str(text).splitlines():
+        s = line.strip()
+        if s.upper().startswith("PROPOSED_STATUS:"):
+            value = s.split(":", 1)[1].strip().upper()
+            if value in {"NORMAL", "WARNING", "ORDER"}:
+                proposed = value
+        elif s.upper().startswith("RATIONALE:"):
+            rationale = s.split(":", 1)[1].strip()
+    if proposed is None:
+        return None
+    return proposed, rationale or "(no rationale returned by model)"
+
+
+async def _llm_proposal_async(
+    zone: dict,
+    overlaps: dict,
+    population: int,
+    egress: dict,
+) -> tuple[str, str] | None:
+    """Ask Claude Haiku 4.5 for a proposed status + rationale (async).
+
+    Returns ``(proposed_status, rationale)`` or ``None`` if the LLM call
+    fails / the model output cannot be parsed. The caller falls back to
+    the deterministic proposal.
+
+    This MUST stay async + use ``ainvoke``. Each LLM call takes ~2-3s
+    against Anthropic; running them sync inside an ``async def`` blocks
+    the uvicorn event loop for the duration, which freezes every other
+    in-flight request (SSE streams, healthz, etc) for the cumulative
+    LLM time. With our cap of 20 calls per briefing that's a 60s
+    server-wide freeze. Asyncified + gathered by the caller, the same
+    20 calls finish in ~3s wall-time without blocking.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+
+    try:
+        from langchain_anthropic import ChatAnthropic  # noqa: PLC0415
+    except ImportError:
+        return None
+
+    system_prompt = _load_evac_system_prompt()
+    user_msg = _build_zone_prompt(zone, overlaps, population, egress)
+
     try:
         chat = ChatAnthropic(model=LLM_MODEL, max_tokens=200, temperature=0.0)
-        resp = chat.invoke(
+        resp = await chat.ainvoke(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
@@ -360,19 +390,31 @@ def _llm_proposal(
         log.warning("LLM proposal failed for zone %s: %s", zone["zone_id"], exc)
         return None
 
-    proposed = None
-    rationale = None
-    for line in str(text).splitlines():
-        s = line.strip()
-        if s.upper().startswith("PROPOSED_STATUS:"):
-            value = s.split(":", 1)[1].strip().upper()
-            if value in {"NORMAL", "WARNING", "ORDER"}:
-                proposed = value
-        elif s.upper().startswith("RATIONALE:"):
-            rationale = s.split(":", 1)[1].strip()
-    if proposed is None:
+    return _parse_llm_text(text)
+
+
+def _llm_proposal(
+    zone: dict,
+    overlaps: dict,
+    population: int,
+    egress: dict,
+) -> tuple[str, str] | None:
+    """DEPRECATED sync wrapper kept only for backwards-compat tests.
+
+    In the async ``run()`` path we use ``_llm_proposal_async`` and
+    ``asyncio.gather`` so 20 LLM calls finish in ~3s rather than 60s
+    of blocked event loop. Calling this sync version from inside the
+    async graph node is a perf regression — do not.
+    """
+    import asyncio  # noqa: PLC0415
+
+    try:
+        return asyncio.run(
+            _llm_proposal_async(zone, overlaps, population, egress)
+        )
+    except RuntimeError:
+        # Already inside a running loop — fall back to deterministic.
         return None
-    return proposed, rationale or "(no rationale returned by model)"
 
 
 def _confidence(
@@ -411,6 +453,213 @@ def _confidence(
 
 
 # --------------------------------------------------------------------------- #
+# IC-directed test-mode synthesizer
+# --------------------------------------------------------------------------- #
+
+
+async def _run_synthetic_test_mode(
+    state: AgentState, instruction_raw: str
+) -> dict:
+    """Fire a WARNING and an ORDER synthetic evac_zone_change interrupt
+    pair, near the current incident, with rationale_source="synthetic_test".
+
+    Invoked when the IC consults evac_intel with an instruction that
+    looks like a system test ("make a test zone", "demo the queue",
+    "smoke-test evacuations"). Bypasses the catalog/cone pipeline so
+    the IC can exercise the human-in-the-loop path on any incident,
+    even ones with no real Zonehaven coverage or no spread cone yet.
+
+    Returns the same shape as the normal run(): outputs + audit_log
+    patch. The two interrupts fire sequentially (LangGraph pauses the
+    graph between them), so the human sees them appear one at a time
+    in the approval queue.
+    """
+    incident = state.incident
+    if incident is None:
+        # Nothing to anchor synthetic polygons to.
+        out = AgentOutput(
+            agent=AGENT_NAME,
+            narrative=(
+                "Cannot generate synthetic test proposals — no incident "
+                "selected. RECOMMEND selecting a fire first."
+            ),
+            payload={
+                "zone_changes": [],
+                "synthetic_test": True,
+                "instruction": instruction_raw,
+            },
+            confidence=0.0,
+            confidence_driver="no incident in state",
+        )
+        return {"outputs": {AGENT_NAME: out}}
+
+    audit_records: list[Any] = []
+    zone_changes: list[dict] = []
+    counts = {"proposed": 0, "approved": 0, "edited": 0, "rejected": 0}
+
+    def _square_polygon_wkt(cx: float, cy: float, half: float) -> str:
+        ring = ", ".join(
+            f"{x} {y}"
+            for x, y in [
+                (cx - half, cy - half),
+                (cx + half, cy - half),
+                (cx + half, cy + half),
+                (cx - half, cy + half),
+                (cx - half, cy - half),
+            ]
+        )
+        return f"POLYGON (({ring}))"
+
+    # Two synthetic zones: ORDER northeast, WARNING northwest of the fire.
+    plan = [
+        {
+            "status": "ORDER",
+            "label": "Test Order Zone (synthetic)",
+            "offset": (0.015, 0.012),
+            "half": 0.012,  # ~1.3 km square
+            "pop": 1850,
+            "structures": 740,
+            "egress_clear": False,
+            "egress_blocked_edges": 2,
+            "why": [
+                "Synthetic test ORDER — IC requested a demo proposal.",
+                "Placed ~1.5 km NE of incident centroid; egress modeled at-risk.",
+                "Exercises the full approval queue + map overlay path.",
+            ],
+        },
+        {
+            "status": "WARNING",
+            "label": "Test Warning Zone (synthetic)",
+            "offset": (-0.018, 0.014),
+            "half": 0.013,
+            "pop": 920,
+            "structures": 365,
+            "egress_clear": True,
+            "egress_blocked_edges": 0,
+            "why": [
+                "Synthetic test WARNING — IC requested a demo proposal.",
+                "Placed ~1.8 km NW of incident centroid; egress modeled clear.",
+                "Exercises the WARNING approval card and map overlay.",
+            ],
+        },
+    ]
+
+    ts = int(datetime.now(timezone.utc).timestamp())
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(minutes=DEFAULT_DECISION_TTL_MIN)
+    ).isoformat()
+
+    for i, z in enumerate(plan):
+        dx, dy = z["offset"]
+        cx, cy = incident.lon + dx, incident.lat + dy
+        wkt = _square_polygon_wkt(cx, cy, z["half"])
+        polygon_geojson = _wkt_to_geojson(wkt)
+        zone_id = f"TEST-{z['status']}-{ts}-{i}"
+        envelope = {
+            "type": "evac_zone_change",
+            "zone_id": zone_id,
+            "name": f"{z['label']} (near {incident.name})",
+            "jurisdiction": "Synthetic (test)",
+            "current_status": "NORMAL",
+            "proposed_status": z["status"],
+            "rationale": z["why"][0],
+            "rationale_source": "synthetic_test",
+            "why": z["why"],
+            "impact": {
+                "human_displacement_estimate": z["pop"],
+                "residential_structures_estimate": z["structures"],
+                "egress_clear": z["egress_clear"],
+                "egress_blocked_edges": z["egress_blocked_edges"],
+            },
+            "polygon_geojson": polygon_geojson,
+            "population_estimate": z["pop"],
+            "expires_at": expires_at,
+        }
+        counts["proposed"] += 1
+        decision = request_human_decision("evac_zone_change", envelope)
+        audit_records.append(audit_entry("evac_zone_change", envelope, decision))
+
+        decision_kind = (decision or {}).get("decision", "rejected")
+        edits = (decision or {}).get("edits") or {}
+        edited_status = edits.get("proposed_status") if isinstance(edits, dict) else None
+        if decision_kind == "approved":
+            final_status = z["status"]
+            counts["approved"] += 1
+        elif decision_kind == "edited":
+            final_status = (
+                edited_status
+                if edited_status in {"NORMAL", "WARNING", "ORDER"}
+                else z["status"]
+            )
+            counts["edited"] += 1
+        else:
+            final_status = "NORMAL"
+            counts["rejected"] += 1
+
+        zone_changes.append(
+            {
+                "zone_id": zone_id,
+                "name": envelope["name"],
+                "current_status": "NORMAL",
+                "proposed_status": z["status"],
+                "final_status": final_status,
+                "decision": decision,
+                "rationale": z["why"][0],
+                "rationale_source": "synthetic_test",
+                "population_estimate": z["pop"],
+                "egress_status": {
+                    "clear": z["egress_clear"],
+                    "egress_blocked_edges": z["egress_blocked_edges"],
+                    "reason": "synthetic",
+                },
+                "overlaps": {"6h": 0.0, "12h": 0.0, "24h": 0.0},
+            }
+        )
+
+    narrative = (
+        f"Synthetic test proposals fired: "
+        f"{counts['proposed']} PROPOSED, "
+        f"{counts['approved']} approved, "
+        f"{counts['edited']} edited, "
+        f"{counts['rejected']} rejected. "
+        f"Bypassed catalog and cone — these are demo polygons anchored "
+        f"to the incident centroid, marked rationale_source=synthetic_test."
+    )
+
+    output = AgentOutput(
+        agent=AGENT_NAME,
+        narrative=narrative,
+        payload={
+            "zone_changes": zone_changes,
+            "zones_order": [],
+            "zones_advisory": [],
+            "zones_watch": [],
+            "zones_fetched": 0,
+            "counts": counts,
+            "synthetic_test": True,
+            "instruction": instruction_raw,
+        },
+        confidence=1.0,
+        confidence_driver="synthetic test mode (IC-directed)",
+        citation_bundle=CitationBundle(
+            datasets=[
+                Dataset(
+                    name="Synthetic test polygon",
+                    version="anchored to incident centroid",
+                ),
+            ],
+            models=[],
+            reasoning_trace_id=str(uuid.uuid4()),
+        ),
+    )
+
+    patch: dict[str, Any] = {"outputs": {AGENT_NAME: output}}
+    if audit_records:
+        patch["audit_log"] = audit_records
+    return patch
+
+
+# --------------------------------------------------------------------------- #
 # Main entry point
 # --------------------------------------------------------------------------- #
 
@@ -418,6 +667,34 @@ def _confidence(
 async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is naturally branchy
     incident = state.incident
     fetch_errors = 0
+
+    # ---- IC-directed instruction (chat-mode dispatch) ------------------ #
+    #
+    # The Master IC can pass a plain-language instruction to us via
+    # `state.scratch.consult_instructions["evacuation_intelligence"]`.
+    # We read it and branch:
+    #   - "test"/"demo"/"synthetic"  → fire a WARNING and an ORDER
+    #     synthetic proposal regardless of catalog/cone state. Useful
+    #     for system checks where the IC wants to exercise the queue,
+    #     map overlay, and approval path end-to-end without waiting
+    #     for real data.
+    #   - everything else            → run the normal catalog+cone flow
+    #     below. (Future: refinement instructions like "shrink the order
+    #     zone 200m south" will branch here too.)
+    instruction_raw = (
+        (state.scratch or {}).get("consult_instructions") or {}
+    ).get(AGENT_NAME, "") or ""
+    instruction = instruction_raw.strip().lower()
+    if instruction and any(
+        kw in instruction
+        for kw in ("test", "demo", "synthetic", "system check", "smoke", "exercise")
+    ):
+        log.info(
+            "evac_intel: handling IC test-mode instruction %r → "
+            "firing synthetic WARNING + ORDER proposals",
+            instruction_raw[:120],
+        )
+        return await _run_synthetic_test_mode(state, instruction_raw)
 
     # ---- Upstream output extraction ----------------------------------- #
     spread = state.outputs.get("spread_simulation")
@@ -518,26 +795,91 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
     ]
     active_evac_geoms = [g for g in active_evac_geoms if g is not None]
 
+    # ---- Pre-filter: shortlist zones worth examining --------------------- #
+    #
+    # The statewide static catalog routinely returns >1,000 zones in a
+    # half-degree AOI. Looping every zone through the per-zone LLM call
+    # would block the briefing for tens of minutes. A zone only deserves
+    # the LLM treatment if it could plausibly change status — i.e. it
+    # already overlaps the cone, sits adjacent to an active ORDER zone,
+    # or is itself currently active.
+    #
+    # All other zones are coalesced into a single "status maintained"
+    # bucket (cheap, deterministic). Maintained-NORMAL zones are not
+    # individually recorded in zone_changes — that's just noise; the
+    # agent's audience cares about the proposed *changes*, not the 950+
+    # zones that stayed put.
+    #
+    # `LLM_CALL_CAP` is a final safety belt: even after the geometry
+    # shortlist, we never fire more than this many Haiku calls per
+    # briefing. Sorted by 12-hr overlap so the most relevant zones win.
+    LLM_CALL_CAP = int(os.environ.get("EMBERSIGHT_EVAC_LLM_CAP", "20"))
+
+    candidates: list[dict] = []
     for zone in zones:
         zone_geom = _coerce_geom(zone["polygon_wkt"])
-        overlaps = {
-            "6h": _overlap_fraction(zone_geom, cone_6h),
-            "12h": _overlap_fraction(zone_geom, cone_12h),
-            "24h": _overlap_fraction(zone_geom, cone_24h),
-        }
+        ov_6h = _overlap_fraction(zone_geom, cone_6h)
+        ov_12h = _overlap_fraction(zone_geom, cone_12h)
+        ov_24h = _overlap_fraction(zone_geom, cone_24h)
 
-        # Adjacency nudge: if a NORMAL zone borders an already-active evac
-        # zone (within ~250 m), bias it toward WARNING so the LLM/rule
-        # is more aggressive about proposing an upgrade.
         adjacent_to_order = False
         if zone_geom is not None and active_evac_geoms:
             try:
-                buffered = zone_geom.buffer(0.0025)  # ~250 m at CA latitudes
+                buffered = zone_geom.buffer(0.0025)  # ~250 m at CA lats
                 adjacent_to_order = any(
                     buffered.intersects(g) for g in active_evac_geoms
                 )
             except Exception:  # noqa: BLE001
                 adjacent_to_order = False
+
+        worth_examining = (
+            ov_24h > 0.0
+            or adjacent_to_order
+            or zone["current_status"] != "NORMAL"
+        )
+        if not worth_examining:
+            continue
+
+        candidates.append(
+            {
+                "zone": zone,
+                "zone_geom": zone_geom,
+                "overlaps": {"6h": ov_6h, "12h": ov_12h, "24h": ov_24h},
+                "adjacent_to_order": adjacent_to_order,
+            }
+        )
+
+    # Most-relevant-first so the LLM cap chooses well.
+    candidates.sort(
+        key=lambda c: (
+            c["overlaps"]["6h"],
+            c["overlaps"]["12h"],
+            c["overlaps"]["24h"],
+            int(c["adjacent_to_order"]),
+        ),
+        reverse=True,
+    )
+    skipped_zone_count = len(zones) - len(candidates)
+    log.info(
+        "evac_intel: %d/%d zones shortlisted for analysis (%d skipped as "
+        "untouched-NORMAL). LLM cap=%d.",
+        len(candidates), len(zones), skipped_zone_count, LLM_CALL_CAP,
+    )
+
+    # ---- Pre-compute per-candidate features (no LLM yet) ----------------- #
+    #
+    # The expensive thing is the LLM call. We do it in a single parallel
+    # `asyncio.gather` after this pre-pass, then walk candidates a second
+    # time with the LLM results pinned to each.
+    import asyncio as _asyncio  # noqa: PLC0415
+
+    enriched: list[dict] = []
+    llm_targets: list[int] = []  # indices into `enriched` that get an LLM call
+    for cand in candidates:
+        zone = cand["zone"]
+        zone_geom = cand["zone_geom"]
+        overlaps = cand["overlaps"]
+        adjacent_to_order = cand["adjacent_to_order"]
 
         population = evac_tools.estimate_population(zone["polygon_wkt"])
         egress = evac_tools.compute_evacuation_routes_clear(
@@ -546,8 +888,6 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
             spread_cone=cones.get("6h") or primary_cone_obj,
         )
 
-        # Zone phasing — order/advisory/watch bucketing for downstream
-        # planners. Independent of the LLM-driven status-change proposal.
         phase = _phase_for_zone(
             zone_geom, primary_cone_geom, egress, incident, cone_radius
         )
@@ -558,13 +898,74 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         elif phase == "watch":
             zones_watch.append(_phase_entry(zone, phase, egress, population))
 
-        # Bias overlaps slightly upward if zone is adjacent to an ORDER
-        # zone — the deterministic rule below will then favor WARNING.
         effective_overlaps = dict(overlaps)
         if adjacent_to_order and effective_overlaps["12h"] < 0.10:
             effective_overlaps["12h"] = 0.10
 
-        llm_out = _llm_proposal(zone, effective_overlaps, population, egress)
+        # LLM gate — same logic as before, just decided up-front so we
+        # can dispatch the calls in a single gather.
+        use_llm = (
+            len(llm_targets) < LLM_CALL_CAP
+            and (
+                effective_overlaps["6h"] >= 0.02
+                or effective_overlaps["12h"] >= 0.05
+                or adjacent_to_order
+                or zone["current_status"] != "NORMAL"
+            )
+        )
+        idx = len(enriched)
+        enriched.append(
+            {
+                "zone": zone,
+                "zone_geom": zone_geom,
+                "overlaps": overlaps,
+                "effective_overlaps": effective_overlaps,
+                "adjacent_to_order": adjacent_to_order,
+                "population": population,
+                "egress": egress,
+                "use_llm": use_llm,
+            }
+        )
+        if use_llm:
+            llm_targets.append(idx)
+
+    # ---- Fan out every LLM call concurrently ----------------------------- #
+    #
+    # Each call takes ~2-3s against Anthropic; serial they cost up to
+    # LLM_CALL_CAP × 3s = 60s of blocked event loop. Parallel they
+    # finish in roughly one call's worth of wall-time (~3s) and don't
+    # block other uvicorn requests in between (healthz, SSE, etc.).
+    if llm_targets:
+        llm_results = await _asyncio.gather(
+            *(
+                _llm_proposal_async(
+                    enriched[i]["zone"],
+                    enriched[i]["effective_overlaps"],
+                    enriched[i]["population"],
+                    enriched[i]["egress"],
+                )
+                for i in llm_targets
+            ),
+            return_exceptions=True,
+        )
+        for i, res in zip(llm_targets, llm_results):
+            enriched[i]["llm_out"] = (
+                res if not isinstance(res, BaseException) else None
+            )
+    llm_calls = sum(
+        1 for e in enriched if e["use_llm"] and e.get("llm_out") is not None
+    )
+
+    # ---- Per-zone proposal + interrupt loop ------------------------------- #
+    for cand in enriched:
+        zone = cand["zone"]
+        overlaps = cand["overlaps"]
+        effective_overlaps = cand["effective_overlaps"]
+        adjacent_to_order = cand["adjacent_to_order"]
+        population = cand["population"]
+        egress = cand["egress"]
+        llm_out = cand.get("llm_out") if cand.get("use_llm") else None
+
         if llm_out is not None:
             proposed_status, rationale = llm_out
             rationale_source = "llm"
@@ -738,10 +1139,9 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
     )
 
     summary = (
-        f"{counts['proposed']} zone changes PROPOSED, "
-        f"{counts['approved']} approved, "
-        f"{counts['edited']} edited, "
-        f"{counts['rejected']} rejected"
+        f"{counts['proposed']} zone changes PROPOSED "
+        f"({len(candidates)}/{len(zones)} zones reviewed; "
+        f"{llm_calls} LLM call{'s' if llm_calls != 1 else ''})"
     )
 
     output = AgentOutput(
@@ -753,6 +1153,10 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
             "zones_advisory": zones_advisory,
             "zones_watch": zones_watch,
             "zones_fetched": len(zones),
+            "zones_reviewed": len(candidates),
+            "zones_skipped_untouched": skipped_zone_count,
+            "llm_calls": llm_calls,
+            "llm_call_cap": LLM_CALL_CAP,
             "counts": counts,
             "bbox": bbox,
             "cone_radius_deg": cone_radius,

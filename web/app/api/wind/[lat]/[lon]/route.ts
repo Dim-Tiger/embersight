@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { buildSyntheticWindGrid, readTestMode } from "@/lib/testModeServer";
 
 // Sample a square grid of wind vectors around (lat, lon) from Open-Meteo
 // and return them in a shape ready for IDW interpolation client-side by
@@ -10,7 +11,9 @@ import { NextResponse } from "next/server";
 const GRID_SIZE = 7; // 7x7 = 49 points
 const HALF_DEG = 0.6; // ~66km half-extent at ~38°N — covers fire vicinity
 
-export const revalidate = 300;
+// Cookie-personalised → can't share a static cache. Real-data branch still
+// hits next.revalidate underneath.
+export const dynamic = "force-dynamic";
 
 type Vector = { lat: number; lon: number; speed: number; direction: number };
 
@@ -23,6 +26,13 @@ export async function GET(
   const cLon = Number(lon);
   if (!Number.isFinite(cLat) || !Number.isFinite(cLon)) {
     return NextResponse.json({ error: "bad coords" }, { status: 400 });
+  }
+
+  const testMode = await readTestMode();
+  if (testMode?.enabled) {
+    return NextResponse.json(
+      buildSyntheticWindGrid(cLat, cLon, testMode.wind),
+    );
   }
 
   const lats: number[] = [];

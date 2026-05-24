@@ -216,12 +216,26 @@ function handleFrame(frame: string, ctx: StoreCtx) {
       const kind = p.kind as string | undefined;
       const name = p.name as string | undefined;
 
-      s.appendEvent({
-        ts: Date.now(),
-        kind: event,
-        name: name ?? null,
-        data: parsed,
-      });
+      // Filter the firehose. `on_chat_model_stream` fires once per LLM
+      // token; with the evac_intel async refactor that's up to 20 LLM
+      // calls in parallel × ~100 tokens each, i.e. ~2000 store mutations
+      // in a few seconds. Every appendEvent rewrites a 500-item array
+      // and notifies every Zustand subscriber, which re-renders the map
+      // and starves user input — clicking a fire would fly to the
+      // incident, then the bombardment would queue updates faster than
+      // the map could process them, leaving the camera stuck and pan/
+      // zoom unresponsive. We never USE chat_model_stream events in the
+      // UI (the streaming text is consumed via `chat_token` in chat
+      // mode); they're pure diagnostic noise. Drop them before append.
+      const isTokenStream = kind === "on_chat_model_stream";
+      if (!isTokenStream) {
+        s.appendEvent({
+          ts: Date.now(),
+          kind: event,
+          name: name ?? null,
+          data: parsed,
+        });
+      }
 
       if (!name) return;
       if (kind === "on_chain_start" && AGENT_SET.has(name)) {

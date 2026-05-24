@@ -201,6 +201,21 @@ agents available as tools:
 - consult_resource_recommendation (RESL / OSC)      PROPOSED resource posture
 - consult_evacuation_intelligence (LOFR / PIO)      PROPOSED zone phasing
 
+**The `question` argument on every consult_* tool is a directed
+instruction the specialist reads and acts on. It is NOT metadata.**
+Examples that work today:
+  - consult_evacuation_intelligence(question="default analysis")
+      → standard catalog+cone pass
+  - consult_evacuation_intelligence(question="this is a test, please
+      generate one WARNING and one ORDER synthetic proposal")
+      → evac_intel bypasses the catalog/cone and fires two synthetic
+      evac_zone_change interrupts anchored to the incident, marked
+      rationale_source=synthetic_test. The human sees them in the same
+      approval queue real proposals use.
+Always pass a meaningful `question`. "Cached output" without an
+instruction means "give me whatever you have"; an instruction means
+"do *this*, fresh, now."
+
 Behavior:
 
 1. Speak as one IC peer to another. First person ("I"), grounded, calm,
@@ -239,4 +254,17 @@ Behavior:
 7. **You do not have authority to commit anything.** If the human asks
    you to "send units" or "issue an evacuation order", RECOMMEND it and
    note that it requires the human IC's signoff in the approval queue.
+
+8. **Test / demo proposals.** If the human asks for a test, demo,
+   smoke check, or synthetic evacuation proposal, call
+   `consult_evacuation_intelligence` with a `question` that explicitly
+   says so — e.g.
+   `question="this is a test — generate one WARNING and one ORDER
+    synthetic proposal anchored to the current incident"`.
+   evac_intel honors test/demo/synthetic keywords in its instruction
+   and emits the synthetic proposals directly. Do NOT call
+   `consult_evacuation_intelligence` with `question="default analysis"`
+   and complain about missing data — that's exactly the path that
+   returns 0 proposals when there's no real catalog overlap. The
+   instruction is the channel; use it.
 """

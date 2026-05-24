@@ -25,6 +25,7 @@ import json
 import os
 import pathlib
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from ..state import (
@@ -361,6 +362,105 @@ async def _gather_inputs(lat: float, lon: float) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# Test-mode overrides
+# --------------------------------------------------------------------------- #
+
+
+_ALERT_PRESETS: dict[str, dict[str, str]] = {
+    "red_flag_warning": {
+        "event": "Red Flag Warning",
+        "headline": "Red Flag Warning in effect — critical fire weather",
+        "severity": "Severe",
+        "description": "[TEST] Critical fire weather: low humidity, sustained winds, dry fuels.",
+    },
+    "fire_weather_watch": {
+        "event": "Fire Weather Watch",
+        "headline": "Fire Weather Watch — elevated ignition risk",
+        "severity": "Moderate",
+        "description": "[TEST] Conditions favorable for rapid wildfire spread expected.",
+    },
+    "high_wind_warning": {
+        "event": "High Wind Warning",
+        "headline": "High Wind Warning — sustained winds 40+ mph",
+        "severity": "Severe",
+        "description": "[TEST] Damaging winds will blow down trees and power lines.",
+    },
+    "excessive_heat_warning": {
+        "event": "Excessive Heat Warning",
+        "headline": "Excessive Heat Warning — dangerous heat",
+        "severity": "Severe",
+        "description": "[TEST] Dangerously hot conditions, highs near 110°F.",
+    },
+}
+
+
+def _apply_test_overrides(inputs: dict[str, Any], overrides: Any) -> None:
+    """Mutate `inputs` in place to reflect the dev panel's synthetic conditions.
+
+    `overrides` is a `TestOverrides` Pydantic model or None. Kept loosely typed
+    here so this module doesn't have to import the state module at top-level
+    (the deferred imports in _gather_inputs follow the same pattern).
+    """
+    if overrides is None or not getattr(overrides, "enabled", False):
+        return
+
+    # 1. Alert preset → replace nws_alerts with a synthetic feature mirroring
+    #    the api.weather.gov GeoJSON shape. The downstream _red_flag_from_alerts
+    #    matcher keys off properties.event, so as long as the event string
+    #    starts with "Red Flag" the existing path lights up.
+    preset = getattr(overrides, "alert_preset", "none")
+    if preset and preset != "none" and preset in _ALERT_PRESETS:
+        p = _ALERT_PRESETS[preset]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        ends_iso = (
+            datetime.now(timezone.utc).replace(microsecond=0)
+        ).isoformat()
+        inputs["nws_alerts"] = [
+            {
+                "type": "Feature",
+                "geometry": None,
+                "properties": {
+                    "id": f"synthetic-alert-{preset}",
+                    "event": p["event"],
+                    "headline": p["headline"],
+                    "severity": p["severity"],
+                    "description": p["description"],
+                    "certainty": "Likely",
+                    "urgency": "Expected",
+                    "effective": now_iso,
+                    "onset": now_iso,
+                    "expires": ends_iso,
+                    "ends": ends_iso,
+                    "senderName": "EmberSight Test Mode",
+                },
+            }
+        ]
+    else:
+        # When the user explicitly picks "none" in test mode, suppress any
+        # real alerts that may have been fetched — they would conflict with
+        # what the IC is staring at in the panel.
+        inputs["nws_alerts"] = []
+
+    # 2. Wind override → stomp wind into the RTMA "now" slice, which is the
+    #    first source _flat_wx_keys checks. Open-Meteo and the dev panel use
+    #    m/s; RTMA reports mph. Convert here so spread_simulation receives
+    #    consistent units.
+    wind = getattr(overrides, "wind", None)
+    if wind is not None:
+        speed_mph = float(wind.speed_ms) * 2.23693629
+        rtma = inputs.get("rtma")
+        if not isinstance(rtma, dict):
+            rtma = {}
+            inputs["rtma"] = rtma
+        rtma["wind_speed_mph"] = speed_mph
+        rtma["wind_direction_deg"] = float(wind.direction_deg)
+        if wind.gusts_ms is not None:
+            rtma["wind_gust_mph"] = float(wind.gusts_ms) * 2.23693629
+        # Tag the run so downstream citation bundles can show test provenance.
+        rtma.setdefault("run", "test-override")
+
+
+# --------------------------------------------------------------------------- #
 # Public entrypoint
 # --------------------------------------------------------------------------- #
 
@@ -385,6 +485,14 @@ async def run(state: AgentState) -> dict:
 
     lat, lon = incident.lat, incident.lon
     inputs = await _gather_inputs(lat, lon)
+
+    # Dev panel overrides: the user spawned this fire and set wind / alerts
+    # manually in the test utility. Replace the corresponding pieces of the
+    # gathered inputs so the rest of this function (Red Flag detection,
+    # narrative, flat-key projection to spread_simulation) operates on the
+    # synthetic conditions. We still keep the real HRRR/RAWS context so the
+    # narrative isn't entirely empty if upstream feeds happen to be up.
+    _apply_test_overrides(inputs, state.test_overrides)
 
     hrrr_hourly = inputs["hrrr"].get("hourly", []) if isinstance(inputs["hrrr"], dict) else []
     rtma = inputs["rtma"] if isinstance(inputs["rtma"], dict) else {}

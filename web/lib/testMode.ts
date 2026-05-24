@@ -70,7 +70,12 @@ export type TestModeStore = {
   reset: () => void;
 };
 
-const STORAGE_KEY = "embersight-test-mode";
+// Cookie-based persistence (NOT localStorage) so the Next.js API routes and
+// the agent-stream proxy can read it server-side and pass synthetic data all
+// the way through to the Python agent — otherwise the AI would still pull
+// real weather/wind for the synthetic fire.
+export const TEST_COOKIE = "embersight_test";
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
 const DEFAULT_WIND: WindOverride = {
   direction_deg: 45, // NE — drives toward SW (downslope, classic CA pattern)
@@ -97,20 +102,42 @@ type Persisted = {
   alertPreset: WeatherAlertPreset;
 };
 
-function readInitial(): Persisted {
-  if (typeof window === "undefined") {
-    return {
-      enabled: DEFAULTS.enabled,
-      syntheticIncidents: DEFAULTS.syntheticIncidents,
-      draftName: DEFAULTS.draftName,
-      draftAcres: DEFAULTS.draftAcres,
-      wind: DEFAULTS.wind,
-      alertPreset: DEFAULTS.alertPreset,
-    };
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const target = name + "=";
+  for (const raw of document.cookie.split(";")) {
+    const c = raw.trim();
+    if (c.startsWith(target)) {
+      return decodeURIComponent(c.slice(target.length));
+    }
   }
+  return null;
+}
+
+function writeCookie(name: string, value: string | null) {
+  if (typeof document === "undefined") return;
+  if (value === null) {
+    document.cookie = `${name}=; path=/; max-age=0; samesite=lax`;
+    return;
+  }
+  document.cookie =
+    `${name}=${encodeURIComponent(value)}; path=/; ` +
+    `max-age=${COOKIE_MAX_AGE}; samesite=lax`;
+}
+
+function readInitial(): Persisted {
+  const fallback: Persisted = {
+    enabled: DEFAULTS.enabled,
+    syntheticIncidents: DEFAULTS.syntheticIncidents,
+    draftName: DEFAULTS.draftName,
+    draftAcres: DEFAULTS.draftAcres,
+    wind: DEFAULTS.wind,
+    alertPreset: DEFAULTS.alertPreset,
+  };
+  if (typeof window === "undefined") return fallback;
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) throw new Error("empty");
+    const raw = readCookie(TEST_COOKIE);
+    if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<Persisted>;
     return {
       enabled: !!parsed.enabled,
@@ -129,19 +156,22 @@ function readInitial(): Persisted {
       alertPreset: (parsed.alertPreset ?? DEFAULTS.alertPreset) as WeatherAlertPreset,
     };
   } catch {
-    return {
-      enabled: DEFAULTS.enabled,
-      syntheticIncidents: DEFAULTS.syntheticIncidents,
-      draftName: DEFAULTS.draftName,
-      draftAcres: DEFAULTS.draftAcres,
-      wind: DEFAULTS.wind,
-      alertPreset: DEFAULTS.alertPreset,
-    };
+    return fallback;
   }
 }
 
 function persist(state: TestModeStore) {
   if (typeof window === "undefined") return;
+  // When disabled with no synthetics, drop the cookie entirely — server routes
+  // then take the fast no-cookie path and skip all override logic.
+  if (
+    !state.enabled &&
+    state.syntheticIncidents.length === 0 &&
+    state.alertPreset === DEFAULTS.alertPreset
+  ) {
+    writeCookie(TEST_COOKIE, null);
+    return;
+  }
   const snapshot: Persisted = {
     enabled: state.enabled,
     syntheticIncidents: state.syntheticIncidents,
@@ -151,9 +181,18 @@ function persist(state: TestModeStore) {
     alertPreset: state.alertPreset,
   };
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    const payload = JSON.stringify(snapshot);
+    // Cookies max out around 4 KB — synthetic incident list is small but
+    // guard anyway so we don't silently truncate.
+    if (payload.length > 3800) {
+      console.warn(
+        "[testMode] payload too large for cookie, dropping older synthetics",
+      );
+      snapshot.syntheticIncidents = snapshot.syntheticIncidents.slice(-5);
+    }
+    writeCookie(TEST_COOKIE, JSON.stringify(snapshot));
   } catch {
-    // localStorage full / disabled — fail quiet, in-memory state still works.
+    // document unavailable / cookie write blocked — in-memory state still works.
   }
 }
 

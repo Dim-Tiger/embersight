@@ -29,6 +29,7 @@ try:  # langgraph 1.0+
 except ImportError:  # pragma: no cover -- older fallback
     from langgraph.prebuilt import InjectedToolCallId  # type: ignore
 
+from ..hitl import request_human_decision
 from ..state import AgentOutput, AgentState
 from . import (
     evacuation_intelligence,
@@ -119,21 +120,47 @@ async def _consult_impl(
     must_refresh: bool,
     state: AgentState,
     tool_call_id: str,
+    question: str | None = None,
 ) -> Command:
-    # Visibility into what the consult tool actually sees. If this logs
-    # "cached_outputs=[]" while the briefing clearly populated outputs,
-    # InjectedState isn't delivering the merged checkpoint state to the
-    # tool — a known footgun on some langgraph versions.
-    log.info(
-        "consult_%s: incident=%s cached_outputs=%s must_refresh=%s",
+    # Plumb the IC's `question` through to the specialist as a directed
+    # instruction parked in state.scratch.consult_instructions[agent_name].
+    # Each specialist's run() reads its own slot and can branch on it
+    # (e.g. evac_intel honors "test"/"demo"/"synthetic" by emitting
+    # synthetic WARNING+ORDER proposals instead of operating on real
+    # catalog data). This is the channel that lets the IC actually
+    # direct its team rather than just poking specialists into rerunning
+    # the same logic — without it, "tell evac_intel to make a test zone"
+    # is impossible to express in the protocol.
+    if question:
+        instructions = dict(state.scratch.get("consult_instructions") or {})
+        instructions[agent_name] = question
+        state.scratch["consult_instructions"] = instructions
+
+    # Visibility into what the consult tool actually sees. Logged at
+    # WARNING so it surfaces under uvicorn's default INFO threshold for
+    # third-party loggers. If this logs "cached_outputs=[]" while the
+    # briefing clearly populated outputs, InjectedState isn't delivering
+    # the merged checkpoint state — a known footgun on some langgraph
+    # versions and the most likely explanation for the IC's recurring
+    # "values_at_risk hasn't run yet" complaint mid-chat.
+    log.warning(
+        "[consult] consult_%s entered: incident=%s cached_outputs=%s "
+        "must_refresh=%s question=%r",
         agent_name,
         state.incident.id if state.incident else None,
         sorted(state.outputs.keys()),
         must_refresh,
+        (question or "")[:120],
     )
 
+    # If we got a non-trivial instruction we always re-run the specialist,
+    # even when a cached output exists. A cached output is the wrong answer
+    # to a different question.
+    has_instruction = bool(question and question.strip())
+    effective_refresh = must_refresh or has_instruction
+
     cached = state.outputs.get(agent_name)
-    if cached is not None and not must_refresh:
+    if cached is not None and not effective_refresh:
         summary = _summarize(cached, agent_name)
         return Command(
             update={
@@ -206,7 +233,7 @@ async def consult_weather_wind(
     is suspected.
     """
     return await _consult_impl(
-        "weather_wind", must_refresh, _resolve_state(state), tool_call_id
+        "weather_wind", must_refresh, _resolve_state(state), tool_call_id, question
     )
 
 
@@ -224,7 +251,7 @@ async def consult_terrain_fuel(
     expanded or fuel conditions changed dramatically.
     """
     return await _consult_impl(
-        "terrain_fuel", must_refresh, _resolve_state(state), tool_call_id
+        "terrain_fuel", must_refresh, _resolve_state(state), tool_call_id, question
     )
 
 
@@ -243,7 +270,7 @@ async def consult_spread_simulation(
     surprises the team.
     """
     return await _consult_impl(
-        "spread_simulation", must_refresh, _resolve_state(state), tool_call_id
+        "spread_simulation", must_refresh, _resolve_state(state), tool_call_id, question
     )
 
 
@@ -261,7 +288,7 @@ async def consult_values_at_risk(
     only when the spread cone changes materially.
     """
     return await _consult_impl(
-        "values_at_risk", must_refresh, _resolve_state(state), tool_call_id
+        "values_at_risk", must_refresh, _resolve_state(state), tool_call_id, question
     )
 
 
@@ -279,7 +306,7 @@ async def consult_routing_staging(
     staging access changes (road closure, new ignition near staging).
     """
     return await _consult_impl(
-        "routing_staging", must_refresh, _resolve_state(state), tool_call_id
+        "routing_staging", must_refresh, _resolve_state(state), tool_call_id, question
     )
 
 
@@ -297,7 +324,7 @@ async def consult_resource_recommendation(
     Refresh when posture clearly needs to escalate or de-escalate.
     """
     return await _consult_impl(
-        "resource_recommendation", must_refresh, _resolve_state(state), tool_call_id
+        "resource_recommendation", must_refresh, _resolve_state(state), tool_call_id, question
     )
 
 
@@ -312,13 +339,197 @@ async def consult_evacuation_intelligence(
 
     Covers: PROPOSED evacuation order / warning / watch zones (Cal OES
     Zonehaven schema), egress route status. ALL output is PROPOSED.
-    Refresh when the spread cone or wind direction shifts.
+
+    The `question` argument is a directed instruction the specialist
+    will read and act on, not just metadata. Use it to tell evac_intel
+    what you actually want:
+      - "default analysis"                            → standard catalog+cone pass
+      - "this is a test, generate one WARNING and one ORDER synthetic
+         proposal"                                     → fires two synthetic
+                                                         interrupts (good for
+                                                         demos / system checks)
+      - "shrink the proposed ORDER zone 200m south"   → refinement (future)
+    `must_refresh=True` is automatic whenever `question` is non-empty —
+    a cached output is the wrong answer to a different question.
     """
     return await _consult_impl(
         "evacuation_intelligence",
         must_refresh,
         _resolve_state(state),
         tool_call_id,
+        question,
+    )
+
+
+@tool
+async def synthesize_test_evac_proposal(
+    status: str,
+    state: Annotated[AgentState, InjectedState] = None,  # type: ignore[assignment]
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+) -> Command:
+    """Create a SYNTHETIC evac_zone_change proposal for testing/demo.
+
+    Use this when the human IC explicitly asks for a *test* or *demo*
+    evacuation proposal (e.g. "make Evac Intel create one warning and
+    one order zone for my system test"). It bypasses the normal
+    catalog/cone pipeline and emits a single ``evac_zone_change``
+    interrupt with a synthetic polygon centered near the incident, so
+    the approval queue, map overlay, and Refine chat paths can be
+    exercised end-to-end without waiting for real spread cones or live
+    Genasys data.
+
+    Parameters
+    ----------
+    status: "WARNING" or "ORDER" — the proposed status the IC should
+        approve / reject. NORMAL is rejected (no point proposing a
+        no-op).
+
+    The tool fires the LangGraph ``interrupt()`` directly. The chat
+    graph pauses; the human approves or rejects via the same
+    /agent/resume endpoint the briefing path uses; on approve the
+    polygon flows into ``acceptedEvacZones`` and renders solid on the
+    map.
+
+    Constraints carried over from the production path:
+    - Verb is PROPOSED, not "issued" / "ordered".
+    - The envelope includes WHY bullets explicitly marked as
+      ``rationale_source="synthetic_test"`` so the IC card surfaces
+      "DEMO" rather than implying real-data backing.
+    """
+    s = _resolve_state(state)
+    proposed = (status or "").strip().upper()
+    if proposed not in {"WARNING", "ORDER"}:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=json.dumps(
+                            {
+                                "status": "error",
+                                "error": (
+                                    "synthesize_test_evac_proposal requires "
+                                    "status in {'WARNING', 'ORDER'}; got "
+                                    f"{status!r}"
+                                ),
+                            }
+                        ),
+                        tool_call_id=tool_call_id,
+                        name="synthesize_test_evac_proposal",
+                    )
+                ]
+            }
+        )
+
+    inc = s.incident
+    if inc is None:
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=json.dumps(
+                            {
+                                "status": "error",
+                                "error": "no incident in state — synthesize requires a selected fire.",
+                            }
+                        ),
+                        tool_call_id=tool_call_id,
+                        name="synthesize_test_evac_proposal",
+                    )
+                ]
+            }
+        )
+
+    # Synthetic polygon: a ~2 km square offset NE of the incident for
+    # ORDER (closer, hotter) or NW for WARNING. Tiny so the demo polygon
+    # is visually distinct from real catalog zones.
+    half = 0.012  # ~1.3 km at CA latitudes
+    if proposed == "ORDER":
+        cx, cy = inc.lon + 0.015, inc.lat + 0.012
+        zid = f"TEST-ORDER-{int(__import__('time').time())}"
+        zname = f"Test Order Zone (synthetic, near {inc.name})"
+        population = 1850
+        why = [
+            "Synthetic test proposal — IC requested a demo ORDER zone.",
+            "Polygon placed ~1.5 km NE of incident centroid for visual clarity.",
+            "Egress modeled as at-risk to exercise the impact card.",
+        ]
+        impact = {
+            "human_displacement_estimate": population,
+            "residential_structures_estimate": 740,
+            "egress_clear": False,
+            "egress_blocked_edges": 2,
+        }
+    else:  # WARNING
+        cx, cy = inc.lon - 0.018, inc.lat + 0.014
+        zid = f"TEST-WARN-{int(__import__('time').time())}"
+        zname = f"Test Warning Zone (synthetic, near {inc.name})"
+        population = 920
+        why = [
+            "Synthetic test proposal — IC requested a demo WARNING zone.",
+            "Polygon placed ~1.8 km NW of incident centroid for visual clarity.",
+            "Egress modeled as clear to exercise the impact card.",
+        ]
+        impact = {
+            "human_displacement_estimate": population,
+            "residential_structures_estimate": 365,
+            "egress_clear": True,
+            "egress_blocked_edges": 0,
+        }
+
+    polygon_geojson = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [cx - half, cy - half],
+                [cx + half, cy - half],
+                [cx + half, cy + half],
+                [cx - half, cy + half],
+                [cx - half, cy - half],
+            ]
+        ],
+    }
+
+    envelope = {
+        "type": "evac_zone_change",
+        "zone_id": zid,
+        "name": zname,
+        "jurisdiction": "Synthetic (test)",
+        "current_status": "NORMAL",
+        "proposed_status": proposed,
+        "rationale": why[0],
+        "rationale_source": "synthetic_test",
+        "why": why,
+        "impact": impact,
+        "polygon_geojson": polygon_geojson,
+        "population_estimate": population,
+    }
+
+    # Fire the interrupt and wait for the human's decision. The chat
+    # graph pauses here; the IC's next-turn synthesis will include the
+    # decision once /agent/resume runs.
+    decision = request_human_decision("evac_zone_change", envelope)
+
+    summary = {
+        "status": "ok",
+        "proposed_status": proposed,
+        "zone_id": zid,
+        "decision": decision,
+        "note": (
+            "Synthetic test proposal fired as an evac_zone_change "
+            "interrupt. The IC approves or rejects via the same "
+            "approval queue used for real proposals."
+        ),
+    }
+    return Command(
+        update={
+            "messages": [
+                ToolMessage(
+                    content=json.dumps(summary, default=str),
+                    tool_call_id=tool_call_id,
+                    name="synthesize_test_evac_proposal",
+                )
+            ]
+        }
     )
 
 
@@ -330,4 +541,9 @@ ALL_TOOLS = [
     consult_routing_staging,
     consult_resource_recommendation,
     consult_evacuation_intelligence,
+    # synthesize_test_evac_proposal was a separate tool that did the
+    # same thing as consult_evacuation_intelligence(question="test mode...").
+    # Kept defined above as a fallback but no longer exposed to the IC —
+    # the instruction-passthrough channel is the canonical way to direct
+    # specialists.
 ]

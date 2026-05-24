@@ -1,6 +1,11 @@
 // Proxy SSE from the FastAPI agent service to the browser.
 // We POST the start payload and pipe the upstream response body straight through.
 
+import {
+  readTestModeFromRequest,
+  toAgentOverrides,
+} from "@/lib/testModeServer";
+
 const AGENT_BASE =
   process.env.AGENT_BASE_URL ?? "http://localhost:8000";
 
@@ -8,7 +13,23 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
-  const body = await req.text();
+  const rawBody = await req.text();
+
+  // If the user has test mode on, inject the synthetic overrides into the
+  // body sent to the Python agent. This is what makes the agent "believe"
+  // the synthetic fire — its weather_wind tool short-circuits with the
+  // configured wind/alert preset instead of pulling real upstream data.
+  let body = rawBody;
+  const overrides = toAgentOverrides(readTestModeFromRequest(req));
+  if (overrides) {
+    try {
+      const parsed = JSON.parse(rawBody);
+      parsed.test_overrides = overrides;
+      body = JSON.stringify(parsed);
+    } catch {
+      // Body wasn't JSON — leave it alone. Agent will return 422 anyway.
+    }
+  }
 
   let upstream: Response;
   try {
