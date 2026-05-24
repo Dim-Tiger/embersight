@@ -57,6 +57,11 @@ def get_road_network(
     import osmnx as ox  # type: ignore[import-not-found]
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # Keep osmnx's intermediate JSON cache in the same place so cwd stays clean.
+    try:
+        ox.settings.cache_folder = str(CACHE_DIR / "overpass-json")
+    except Exception:
+        pass
     cache_path = CACHE_DIR / f"{_bbox_hash(bbox, network_type)}.graphml"
     if cache_path.exists():
         return ox.load_graphml(cache_path)

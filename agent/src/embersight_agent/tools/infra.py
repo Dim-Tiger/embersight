@@ -19,13 +19,13 @@ from typing import Any
 import httpx
 
 HOSPITALS_URL = (
-    "https://services1.arcgis.com/Hp6G80Pky0om7QvQ/ArcGIS/rest/services/"
-    "Hospital/FeatureServer/0/query"
+    "https://services1.arcgis.com/0MSEUqKaxRlEPj5g/arcgis/rest/services/"
+    "Hospitals2/FeatureServer/0/query"
 )
 
 SCHOOLS_URL = (
-    "https://services1.arcgis.com/Ua5sjt3LWTPigjyD/ArcGIS/rest/services/"
-    "Public_School_Location_201819/FeatureServer/0/query"
+    "https://services.arcgis.com/XG15cJAlne2vxtgt/ArcGIS/rest/services/"
+    "Public_Schools/FeatureServer/3/query"
 )
 
 TRANSMISSION_URL = (
@@ -33,19 +33,25 @@ TRANSMISSION_URL = (
     "Electric_Power_Transmission_Lines/FeatureServer/0/query"
 )
 
+# USGS National Map structures MapServer — layer 51 is the nationwide
+# Fire Stations / EMS Stations layer. Its sibling endpoint on
+# services1/Hp6G80Pky0om7QvQ ("Fire_Station/FeatureServer/0") was
+# decommissioned and now returns HTTP 400 "Invalid URL".
 FIRE_STATIONS_URL = (
-    "https://services1.arcgis.com/Hp6G80Pky0om7QvQ/ArcGIS/rest/services/"
-    "Fire_Station/FeatureServer/0/query"
+    "https://carto.nationalmap.gov/arcgis/rest/services/"
+    "structures/MapServer/51/query"
 )
 
+# FEMA hosts the State EOC FeatureServer (Local EOC was retired with
+# the rest of the HIFLD Hp6G80Pky0om7QvQ org).
 EOC_URL = (
-    "https://services1.arcgis.com/Hp6G80Pky0om7QvQ/ArcGIS/rest/services/"
-    "Emergency_Operations_Center_EOC/FeatureServer/0/query"
+    "https://gis.fema.gov/arcgis/rest/services/FEMA/STATE_EOC/"
+    "FeatureServer/0/query"
 )
 
 COMM_TOWER_URL = (
-    "https://services1.arcgis.com/Hp6G80Pky0om7QvQ/ArcGIS/rest/services/"
-    "Cellular_Towers/FeatureServer/0/query"
+    "https://services2.arcgis.com/FiaPA4ga0iQKduv3/ArcGIS/rest/services/"
+    "Cellular_Towers_in_the_United_States/FeatureServer/0/query"
 )
 
 
@@ -199,6 +205,21 @@ def query_transmission_lines(
     return out
 
 
+def _ci_get(props: dict[str, Any], *keys: str) -> Any:
+    """First non-empty match for any of `keys`, compared case-insensitively.
+    Needed because the three layers we hit return different casings —
+    USGS structures and FEMA EOC use lowercase, Cellular_Towers uses
+    PascalCase (`StrucType`, `Licensee`)."""
+    if not props:
+        return None
+    lower = {k.lower(): v for k, v in props.items()}
+    for k in keys:
+        v = lower.get(k.lower())
+        if v not in (None, ""):
+            return v
+    return None
+
+
 def query_critical_facilities(
     bbox: tuple[float, float, float, float],
 ) -> dict[str, Any]:
@@ -207,8 +228,10 @@ def query_critical_facilities(
 
     for key, url, fields in (
         ("fire_stations", FIRE_STATIONS_URL, "NAME,ADDRESS,CITY"),
-        ("eocs", EOC_URL, "NAME,COUNTY,STATE"),
-        ("comm_towers", COMM_TOWER_URL, "STRUC_TYPE,OWNER,HEIGHT"),
+        ("eocs", EOC_URL, "NAME,CITY,STATE"),
+        # Cellular_Towers_in_the_United_States enforces case-sensitive
+        # field names on outFields, unlike most ArcGIS services.
+        ("comm_towers", COMM_TOWER_URL, "StrucType,Licensee,LocCity"),
     ):
         try:
             data = _fetch_features(url, bbox, fields)
@@ -222,14 +245,16 @@ def query_critical_facilities(
             if lonlat is None:
                 continue
             lon, lat = lonlat
+            name = (
+                _ci_get(props, "NAME", "StrucType", "STRUC_TYPE", "Licensee")
+                or "Unknown"
+            )
             rows.append(
                 {
-                    "name": props.get("NAME")
-                    or props.get("STRUC_TYPE")
-                    or "Unknown",
+                    "name": name,
                     "lat": lat,
                     "lon": lon,
-                    **{k: v for k, v in props.items() if k not in ("NAME",)},
+                    **{k: v for k, v in props.items() if k.lower() != "name"},
                 }
             )
         out[key] = rows

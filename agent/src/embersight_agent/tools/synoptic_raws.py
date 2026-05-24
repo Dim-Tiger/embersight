@@ -4,6 +4,10 @@ Pulls remote automated weather station (RAWS) observations — wind speed,
 wind direction, RH, temperature — for stations inside a bounding box.
 
 `SYNOPTIC_TOKEN` is required (see https://developers.synopticdata.com/).
+The value can be either a Synoptic API token or an API key — if the call
+fails with "Invalid token", we transparently exchange the key for a token
+via Synoptic's `/v2/auth` endpoint and retry.
+
 When the token is missing or the API errors, callers get an empty obs list
 so the agent can degrade gracefully instead of crashing the whole graph.
 """
@@ -15,6 +19,8 @@ import math
 import os
 from datetime import timedelta
 from typing import Any
+
+import httpx
 
 # Latitude is ~111 km per degree everywhere; longitude varies with latitude.
 _KM_PER_DEG_LAT = 111.0
@@ -35,6 +41,46 @@ def _have_token() -> bool:
     return bool(os.environ.get("SYNOPTIC_TOKEN"))
 
 
+_TOKEN_CACHE: dict[str, str] = {}
+
+
+def _exchange_api_key_for_token(api_key: str) -> str | None:
+    """Trade a Synoptic API *key* for a usable token via /v2/auth.
+
+    Returns None if the exchange fails — callers fall back to the original
+    value, which lets a real token still work.
+    """
+    try:
+        resp = httpx.get(
+            "https://api.synopticdata.com/v2/auth",
+            params={"apikey": api_key},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json().get("TOKEN")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_token() -> str | None:
+    """Return a Synoptic *token*, exchanging from an API key if needed.
+
+    Synoptic tokens are 32-char hex strings; longer/shorter values are
+    treated as account API keys and exchanged via `/v2/auth`. The result
+    is memoized to avoid a round-trip on every call.
+    """
+    raw = os.environ.get("SYNOPTIC_TOKEN")
+    if not raw:
+        return None
+    cached = _TOKEN_CACHE.get(raw)
+    if cached:
+        return cached
+    looks_like_token = len(raw) == 32 and all(c in "0123456789abcdef" for c in raw.lower())
+    token = raw if looks_like_token else (_exchange_api_key_for_token(raw) or raw)
+    _TOKEN_CACHE[raw] = token
+    return token
+
+
 def _fetch_sync(
     bbox: tuple[float, float, float, float],
     lookback_hours: int,
@@ -43,11 +89,14 @@ def _fetch_sync(
     from synoptic import services as synoptic_services
 
     bbox_str = ",".join(f"{v:.4f}" for v in bbox)
+    token = _resolve_token()
+
     api = synoptic_services.TimeSeries(
         bbox=bbox_str,
         recent=timedelta(hours=lookback_hours),
         vars="wind_speed,wind_direction,wind_gust,air_temp,relative_humidity",
         units="english",
+        token=token,
     )
     df = api.df()
 

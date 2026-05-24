@@ -104,26 +104,71 @@ async def _llm_narrate(context: str) -> str | None:
 
 
 def _extract_weather(weather_output: AgentOutput | None) -> dict:
-    """Pull wind speed, wind direction, and RAWS fuel moisture from weather payload."""
+    """Pull wind speed, wind direction, and RAWS fuel moisture from weather payload.
+
+    Preferred source is ``payload.critical_window`` (the worst HRRR hour in the
+    24-h window, which is the right hour to drive a spread cone). Falls back to
+    the flat top-level ``wind_speed_mph`` / ``wind_dir_deg`` keys when the
+    critical window is unavailable.
+
+    Both sources report wind direction in meteorological "FROM" convention. The
+    returned ``wind_dir_deg`` preserves that convention; the caller flips it by
+    180° before feeding pyretechnics, which expects fire-head "TO" direction.
+    """
     if weather_output is None:
         return {}
     p = weather_output.payload or {}
+    cw = p.get("critical_window") or {}
+
+    wind_speed = cw.get("wind_speed_mph")
+    if wind_speed is None:
+        wind_speed = p.get("wind_speed_mph", 15.0)
+
+    # critical_window uses HRRR's wind_direction_deg; flat path uses wind_dir_deg.
+    wind_dir = cw.get("wind_direction_deg")
+    if wind_dir is None:
+        wind_dir = p.get("wind_dir_deg", 270.0)
+
     return {
-        "wind_speed_mph": float(p.get("wind_speed_mph", 15.0)),
-        "wind_dir_deg": float(p.get("wind_dir_deg", 270.0)),  # TO direction (downwind)
+        "wind_speed_mph": float(wind_speed),
+        "wind_dir_deg": float(wind_dir),  # MET "FROM" convention
         "fuel_moisture": p.get("fuel_moisture", {}),
-        "rh_pct": float(p.get("rh_pct", 20.0)),
-        "temp_f": float(p.get("temp_f", 90.0)),
+        "rh_pct": float(cw.get("rh_pct", p.get("rh_pct", 20.0))),
+        "temp_f": float(cw.get("temp_f", p.get("temp_f", 90.0))),
+        "_source": "critical_window" if cw else "flat",
     }
 
 
 def _extract_terrain_fuel(terrain_output: AgentOutput | None) -> dict:
-    """Pull fuel model, slope, and aspect from terrain payload."""
+    """Pull fuel model, slope, and aspect from terrain payload.
+
+    ``fuel_model`` may arrive in three shapes — handled in order:
+      1. Dict with ``dominant_classes: [{code, fraction}, ...]`` (top-rank wins).
+      2. Plain FBFM40 code string (the flat-projection contract).
+      3. Missing — fall back to ``payload.fuel_detail.dominant_classes``
+         (the rich LANDFIRE structure terrain_fuel publishes alongside the
+         flat code).
+    """
     if terrain_output is None:
         return {}
     p = terrain_output.payload or {}
+
+    code: str | None = None
+    fuel_field = p.get("fuel_model")
+    if isinstance(fuel_field, dict):
+        classes = fuel_field.get("dominant_classes") or []
+        if classes:
+            code = classes[0].get("code")
+    elif isinstance(fuel_field, str) and fuel_field:
+        code = fuel_field
+    if not code:
+        detail = p.get("fuel_detail") or {}
+        classes = detail.get("dominant_classes") or []
+        if classes:
+            code = classes[0].get("code")
+
     return {
-        "fuel_model": str(p.get("fuel_model", "GS2")),
+        "fuel_model": code or "GS2",
         "slope_pct": float(p.get("slope_pct", 15.0)),
         "aspect_deg": float(p.get("aspect_deg", 225.0)),
     }
@@ -205,6 +250,60 @@ def _cones_to_geojson(
 
 
 # --------------------------------------------------------------------------- #
+# High-risk zone derivation (from cone, sans Cal OES Zonehaven cross-ref)
+# --------------------------------------------------------------------------- #
+
+
+_CARDINALS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def _bearing_to_cardinal(deg: float) -> str:
+    """8-point compass bin. 0° = N, 90° = E, increasing clockwise."""
+    idx = int(((deg + 22.5) % 360.0) // 45.0)
+    return _CARDINALS[idx]
+
+
+def _high_risk_zones(mc_result: dict) -> list[dict]:
+    """Derive high-risk sectors from the p75 Monte-Carlo band per horizon.
+
+    Without a Cal OES Zonehaven polygon set loaded, we cannot publish real
+    zone IDs; this is a sector descriptor good enough for the IC dashboard
+    and master_ic headline routing. Each entry names the cardinal heading
+    of the p75 band's centroid, distance from ignition, projected area,
+    and horizon — i.e. "where the fire is most likely to be in N hours".
+    """
+    zones: list[dict] = []
+    for h in (6, 12, 24):
+        entry = mc_result.get(h)
+        if not entry:
+            continue
+        bands = entry.get("bands", [])
+        if len(bands) < 3:
+            continue
+        p75 = bands[2]
+        if p75 is None or p75.is_empty:
+            continue
+        cx, cy = p75.centroid.x, p75.centroid.y
+        # Convert local (east=x, north=y) centroid into compass bearing.
+        bearing = (math.degrees(math.atan2(cx, cy)) + 360.0) % 360.0
+        distance_km = math.hypot(cx, cy) / 1000.0
+        area_km2 = p75.area / 1_000_000.0
+        sector = _bearing_to_cardinal(bearing)
+        zones.append(
+            {
+                "id": f"head-{h}h-{sector}",
+                "sector": sector,
+                "bearing_deg": round(bearing, 1),
+                "distance_km": round(distance_km, 2),
+                "horizon_h": h,
+                "probability_min": 0.75,
+                "area_km2": round(area_km2, 2),
+            }
+        )
+    return zones
+
+
+# --------------------------------------------------------------------------- #
 # Confidence from MC ensemble
 # --------------------------------------------------------------------------- #
 
@@ -267,12 +366,18 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     # ------------------------------------------------------------------ #
     # 2. Build base inputs for Monte Carlo
     # ------------------------------------------------------------------ #
+    # Weather reports wind in MET FROM convention; pyretechnics_spread expects
+    # the fire-head TO direction (downwind heading). Flip by 180° here so the
+    # ellipse rotates correctly, then preserve the FROM value in the output
+    # payload for display.
+    wind_from_deg = weather.get("wind_dir_deg", 270.0)
+    wind_to_deg = (wind_from_deg + 180.0) % 360.0
     base_inputs = {
         "fuel_model": terrain.get("fuel_model", "GS2"),
         "slope_pct": terrain.get("slope_pct", 15.0),
         "aspect_deg": terrain.get("aspect_deg", 225.0),
         "wind_speed_mph": weather.get("wind_speed_mph", 15.0),
-        "wind_dir_deg": weather.get("wind_dir_deg", 270.0),
+        "wind_dir_deg": wind_to_deg,
         "fuel_moisture": fm,
     }
 
@@ -293,6 +398,8 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     cones_geojson, cone_bands = _cones_to_geojson(
         mc_result, lat0, lon0, tools["polygon_local_to_geojson"]
     )
+
+    high_risk_zones = _high_risk_zones(mc_result)
 
     # 24-hour p25 burn area (km²) — key metric
     burn_area_km2 = None
@@ -469,10 +576,13 @@ async def run(state: AgentState) -> dict:  # noqa: C901
             "flame_length_ft": round(meta.get("flame_length_ft_mean", 0.0), 1),
             "burn_area_24h_km2_p25": burn_area_km2,
             "trigger_breaches": trigger_breaches,
+            "high_risk_zones": high_risk_zones,
             "n_mc_samples": int(meta.get("n", 200)),
             "fuel_model": base_inputs["fuel_model"],
             "wind_speed_mph": base_inputs["wind_speed_mph"],
-            "wind_dir_deg": base_inputs["wind_dir_deg"],
+            # Surface MET FROM convention in the payload (display contract);
+            # the +180° fire-head TO direction lives inside base_inputs only.
+            "wind_dir_deg": wind_from_deg,
             "fuel_moisture": fm,
         },
         confidence=confidence,
@@ -507,6 +617,7 @@ def _low_confidence_output(incident_name: str, reason: str) -> AgentOutput:
             "head_ros_chains_per_hr": None,
             "flame_length_ft": None,
             "trigger_breaches": [],
+            "high_risk_zones": [],
         },
         confidence=0.20,
         confidence_driver="insufficient upstream inputs",

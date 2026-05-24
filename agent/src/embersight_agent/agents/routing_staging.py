@@ -316,31 +316,45 @@ async def run(state: AgentState) -> dict:
                 nearest_water_name = _feature_name(w, "water")
 
     # --- Confidence ---------------------------------------------------------
-    # 1.0 if road graph + ≥2 candidate stations + ≥1 water source.
+    # Real drive routes are the dominant signal: if at least one candidate
+    # has a primary_routes entry, confidence is floored above 0.6.
     have_graph = road_graph is not None
+    have_routes = any(c.get("routes") for c in enriched)
+    routed_count = sum(1 for c in enriched if c.get("routes"))
     have_stations = len(fire_stations) >= 2
     have_water = len(water) >= 1
     have_candidates = len(enriched) >= 1
     drivers: list[str] = []
     confidence = 1.0
-    if not have_graph:
-        confidence -= 0.35
-        drivers.append("road graph unavailable")
+    if have_routes:
+        drivers.append(
+            f"drive routes computed for {routed_count}/{len(enriched)} candidate(s)"
+        )
+    elif not have_graph:
+        confidence -= 0.40
+        drivers.append(
+            f"road graph unavailable ({graph_error or 'unknown error'})"
+        )
+    elif not have_candidates:
+        confidence -= 0.40
+        drivers.append("no paved+water staging candidates within AOI")
+    else:
+        confidence -= 0.40
+        drivers.append("road graph built but no drivable route to any candidate")
     if not have_stations:
-        confidence -= 0.20
+        confidence -= 0.15
         drivers.append(f"only {len(fire_stations)} fire stations in AOI")
     if not have_water:
-        confidence -= 0.20
+        confidence -= 0.15
         drivers.append("no water features in AOI")
-    if not have_candidates:
-        confidence -= 0.25
-        drivers.append("no paved+water staging candidates")
     if osm_failures:
-        confidence -= 0.10
+        confidence -= 0.05
         drivers.append(f"Overpass failures: {','.join(osm_failures)}")
     confidence = max(0.05, min(1.0, confidence))
-    if not drivers:
-        drivers.append("road graph + ≥2 stations + ≥1 water source present")
+    # Hard floor: if we actually routed against a real road graph, the
+    # output is decision-useful even when ancillary layers are thin.
+    if have_routes:
+        confidence = max(confidence, 0.65)
 
     # --- Payload + narrative ------------------------------------------------
     payload = {

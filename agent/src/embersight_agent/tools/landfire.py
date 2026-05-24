@@ -14,24 +14,37 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
-# Resolved at module load — these are LFPS layer IDs for LANDFIRE 2022 (LF 2020 remap).
-FBFM40_LAYER = "220F40_22"
-CANOPY_COVER_LAYER = "220CC_22"
-SLOPE_DEG_LAYER = "SLPD2020"
-ASPECT_LAYER = "ASP2020"
-ELEVATION_LAYER = "ELEV2020"
+# LFPS v2 layer names — the legacy `<acronym>_<yr>` codes (e.g. 220F40_22) were
+# retired with the May-2025 API cutover; current names look like `LFYYYY_<acro>`.
+FBFM40_LAYER = "LF2022_FBFM40"
+CANOPY_COVER_LAYER = "LF2022_CC"
+SLOPE_DEG_LAYER = "LF2020_SlpD"
+ASPECT_LAYER = "LF2020_Asp"
+ELEVATION_LAYER = "LF2020_Elev"
 
-LANDFIRE_VERSION = "LF 2020 (2022 capable)"
-LANDFIRE_SOURCE_URL = (
-    "https://lfps.usgs.gov/arcgis/rest/services/LandfireProductService/"
-    "GPServer/LandfireProductService"
-)
+LANDFIRE_VERSION = "LF 2022 (fuel/canopy) + LF 2020 (topographic)"
+
+# v2 GP service endpoints. The old /arcgis/rest/services/.../submitJob path is
+# intercepted by the LFPS Next.js frontend and never reaches ArcGIS — only the
+# `/api/job/...` endpoints below return JSON.
+LFPS_SUBMIT_URL = "https://lfps.usgs.gov/api/job/submit"
+LFPS_STATUS_URL = "https://lfps.usgs.gov/api/job/status"
+LFPS_USER_AGENT = "embersight-agent (+https://github.com/Dim-Tiger/embersight)"
+LANDFIRE_SOURCE_URL = LFPS_SUBMIT_URL
 
 CACHE_DIR = Path(os.environ.get("EMBERSIGHT_LANDFIRE_CACHE", "/tmp/landfire-cache"))
+
+# v2 API requires a contact email per submission. Override with
+# EMBERSIGHT_LANDFIRE_EMAIL when running outside dev.
+_DEFAULT_EMAIL = "embersight-agent@example.com"
+
+_POLL_INTERVAL_SEC = 5.0
+_POLL_TIMEOUT_SEC = float(os.environ.get("EMBERSIGHT_LANDFIRE_TIMEOUT", "600"))
 
 # Scott & Burgan FBFM40 pixel value -> short label.
 # Reference: Scott & Burgan 2005, RMRS-GTR-153; LANDFIRE uses the same codes
@@ -124,17 +137,79 @@ def _cache_path_for(bbox: tuple[float, float, float, float], layer: str) -> Path
     return sub / f"{layer}.tif"
 
 
+def _submit_job(bbox: tuple[float, float, float, float], layer: str, email: str) -> str:
+    """POST a single-layer job to LFPS v2 and return the job id."""
+    import requests  # lazy
+
+    params = {
+        "Email": email,
+        "Layer_List": layer,
+        "Area_of_Interest": _bbox_str(bbox),
+        "Output_Projection": "4326",
+    }
+    headers = {"Accept": "application/json", "User-Agent": LFPS_USER_AGENT}
+    r = requests.get(LFPS_SUBMIT_URL, params=params, headers=headers, timeout=60)
+    r.raise_for_status()
+    body = r.json()
+    job_id = body.get("jobId")
+    if not job_id:
+        raise RuntimeError(f"LFPS submit returned no jobId: {body}")
+    return job_id
+
+
+def _poll_job(job_id: str) -> str:
+    """Poll LFPS v2 status until the job succeeds; return the outputFile URL."""
+    import requests  # lazy
+
+    headers = {"Accept": "application/json", "User-Agent": LFPS_USER_AGENT}
+    deadline = time.monotonic() + _POLL_TIMEOUT_SEC
+    last_status = "Pending"
+    while time.monotonic() < deadline:
+        time.sleep(_POLL_INTERVAL_SEC)
+        r = requests.get(
+            LFPS_STATUS_URL, params={"JobId": job_id}, headers=headers, timeout=60
+        )
+        r.raise_for_status()
+        body = r.json()
+        last_status = body.get("status", "Unknown")
+        if "Succeeded" in last_status:
+            url = body.get("outputFile")
+            if not url:
+                raise RuntimeError(f"LFPS job {job_id} succeeded but had no outputFile")
+            return url
+        if "Failed" in last_status:
+            msgs = [m.get("description", "") for m in body.get("messages", [])]
+            err = next((m for m in msgs if "ERROR" in m), "; ".join(msgs[-3:]))
+            raise RuntimeError(f"LFPS job {job_id} failed: {err}")
+    raise TimeoutError(
+        f"LFPS job {job_id} did not finish within {_POLL_TIMEOUT_SEC:.0f}s "
+        f"(last status: {last_status})"
+    )
+
+
+def _download_zip(url: str, dest: Path) -> None:
+    import requests  # lazy
+
+    with requests.get(url, stream=True, timeout=300) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as out:
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    out.write(chunk)
+
+
 def _fetch_layer(bbox: tuple[float, float, float, float], layer: str) -> Path:
     """Download a single LANDFIRE layer to the local cache; return the .tif path."""
     tif_path = _cache_path_for(bbox, layer)
     if tif_path.exists() and tif_path.stat().st_size > 0:
         return tif_path
 
-    import landfire  # lazy: heavy + optional
+    email = os.environ.get("EMBERSIGHT_LANDFIRE_EMAIL", _DEFAULT_EMAIL)
+    job_id = _submit_job(bbox, layer, email)
+    output_url = _poll_job(job_id)
 
     zip_path = tif_path.with_suffix(".zip")
-    lf = landfire.Landfire(bbox=_bbox_str(bbox), output_crs="4326")
-    lf.request_data(layers=[layer], output_path=str(zip_path), show_status=False)
+    _download_zip(output_url, zip_path)
 
     with zipfile.ZipFile(zip_path) as zf:
         tif_members = [n for n in zf.namelist() if n.lower().endswith(".tif")]

@@ -13,11 +13,13 @@ import {
   Wind,
 } from "lucide-react";
 import { useEffect, useRef } from "react";
-import { AgentFeed } from "./components/panels/AgentFeed";
 import { ApprovalQueue } from "./components/panels/ApprovalQueue";
+import { ChatPanel } from "./components/panels/ChatPanel";
 import { EvacuationTab } from "./components/panels/EvacuationTab";
 import { IAPDraft } from "./components/panels/IAPDraft";
 import { IncidentMap } from "./components/map/IncidentMap";
+import { LiveFeed } from "./components/panels/LiveFeed";
+import { PipelineLadder } from "./components/panels/PipelineLadder";
 import { ResourcesTab } from "./components/panels/ResourcesTab";
 import { ThreatsTab } from "./components/panels/ThreatsTab";
 import { useAgentStream } from "./components/panels/useAgentStream";
@@ -182,14 +184,31 @@ function NoIncidentState() {
 }
 
 function OperationsTab() {
+  // Four independent panels in the right column. Each has its own bounded
+  // scroll region — none can push another. The chat is the only flex-grow
+  // panel; the other three have fixed shares of the column height so the
+  // pipeline ladder and live stream can't shove the chat around when they
+  // grow.
   return (
     <div className="grid h-full min-h-0 grid-cols-[1fr_360px] grid-rows-[minmax(0,1fr)] gap-px bg-smoke-700">
       <div className="min-h-0 bg-smoke-900">
         <IncidentMap />
       </div>
-      <aside className="grid min-h-0 grid-rows-[minmax(0,1fr)_minmax(0,40%)] gap-px bg-smoke-700">
+      <aside
+        className="grid min-h-0 gap-px bg-smoke-700"
+        style={{
+          gridTemplateRows:
+            "minmax(120px, 22%) minmax(0, 1fr) minmax(80px, 14%) minmax(80px, 22%)",
+        }}
+      >
         <div className="min-h-0 overflow-hidden bg-smoke-900">
-          <AgentFeed />
+          <PipelineLadder />
+        </div>
+        <div className="min-h-0 overflow-hidden bg-smoke-900">
+          <ChatPanel />
+        </div>
+        <div className="min-h-0 overflow-hidden bg-smoke-900">
+          <LiveFeed />
         </div>
         <div className="min-h-0 overflow-hidden bg-smoke-900">
           <ApprovalQueue />
