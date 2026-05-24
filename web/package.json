@@ -32,6 +32,12 @@
     "tailwind-merge": "^2.5.4",
     "zustand": "^5.0.1"
   },
+  "pnpm": {
+    "overrides": {
+      "@tanstack/react-query": "5.100.13",
+      "@tanstack/query-core": "5.100.13"
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.9.0",
     "@types/react": "^18.3.12",
