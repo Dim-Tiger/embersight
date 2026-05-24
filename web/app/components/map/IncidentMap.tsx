@@ -717,22 +717,24 @@ export function IncidentMap() {
             image: canvas.toDataURL(),
             bounds: wind.bounds,
             imageUnscale: [minV, maxV],
-            // Sparse, long-lived, thick particles read as discrete
-            // jet-style contrails rather than dense particle fog.
-            numParticles: 550,
-            maxAge: 220,
-            speedFactor: 55,
-            width: 3.4,
-            speedRange: [0, 25],
-            // Contrail palette: bright white core at low/mid speed
-            // (the classic jet-trail look), warming to amber → orange →
-            // red as wind speed climbs into red-flag territory.
+            // Few, long, thin particles read as cohesive wind streams —
+            // long trails (high maxAge) with narrow line width (~1.5)
+            // beats many fat particles for a streamline feel.
+            numParticles: 280,
+            maxAge: 360,
+            speedFactor: 70,
+            width: 1.6,
+            speedRange: [0, 22],
+            // Streamline palette: faint slate tail → bright white core →
+            // amber → orange → red as wind speed climbs. Kept narrow on
+            // the white-core band so most streams read as cohesive white
+            // lines, with warm colors reserved for genuinely strong wind.
             colorRamp: [
-              [0.0, [203, 213, 225, 200]], // slate-300 (faint tail)
-              [0.15, [248, 250, 252, 245]], // near-white core
-              [0.4, [255, 255, 255, 255]], // pure white contrail
+              [0.0, [148, 163, 184, 160]], // slate-400 (ghost tail)
+              [0.12, [226, 232, 240, 220]], // slate-200
+              [0.3, [255, 255, 255, 250]], // pure white core
               [0.6, [253, 224, 71, 250]], // yellow-300
-              [0.8, [249, 115, 22, 250]], // orange-500
+              [0.8, [249, 115, 22, 252]], // orange-500
               [1.0, [220, 38, 38, 255]], // red-600
             ],
           }),
@@ -1055,12 +1057,12 @@ function Legend({
               <path
                 d="M1 5 Q 12 1, 22 4 T 43 3"
                 stroke="url(#wind-stream-grad)"
-                strokeWidth="2.2"
+                strokeWidth="1.2"
                 strokeLinecap="round"
                 fill="none"
               />
             </svg>
-            <span>Flowing contrails — direction & speed</span>
+            <span>Streamlines — direction & speed</span>
           </div>
           {center && (
             <div>
