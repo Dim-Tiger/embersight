@@ -138,6 +138,10 @@ export function IncidentMap() {
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const coneLabelRef = useRef<maplibregl.Marker | null>(null);
   const deckOverlayRef = useRef<MapboxOverlay | null>(null);
+  // Tracks whether the most recent zoom delta came from the user (true) or
+  // from a programmatic camera animation like flyTo (false). Read by the
+  // "dismiss perimeter on zoom-out" effect so a flyTo dip doesn't count.
+  const lastZoomFromUserRef = useRef(false);
   const [mapLoaded, setMapLoaded] = useState(false);
   const [showWind, setShowWind] = useState(true);
   const [showEvac, setShowEvac] = useState(true);
@@ -236,8 +240,18 @@ export function IncidentMap() {
     map.on("load", () => setMapLoaded(true));
     // Flip the boolean state only when crossing the perimeter-visibility
     // threshold so we don't trigger re-renders on every zoom tick.
-    map.on("zoom", () => {
+    // Also remember whether the most recent zoom transition was driven by
+    // the user (wheel, pinch, double-click) or by a programmatic camera
+    // animation (flyTo, easeTo). MapLibre's parabolic flyTo curve briefly
+    // dips zoom below the start position before climbing — without this
+    // discrimination, switching between two fires at zoom 11 momentarily
+    // crosses the perimeter threshold and trips the "user zoomed out"
+    // dismiss-perimeter effect, hiding the perimeter on the new fire.
+    map.on("zoom", (e) => {
       const z = map.getZoom();
+      lastZoomFromUserRef.current = !!(
+        e as unknown as { originalEvent?: unknown }
+      ).originalEvent;
       setAbovePerimeterZoom((prev) => {
         const next = z >= PERIMETER_HIDE_CIRCLE_ZOOM;
         return prev === next ? prev : next;
@@ -290,23 +304,25 @@ export function IncidentMap() {
           "satellite-overlay",
           SATELLITE_STYLE.sources["esri-world-imagery"],
         );
-        // Add at the bottom (just above the basemap's background) so every
-        // user data layer naturally sits on top.
-        const firstNonBg = map
-          .getStyle()
-          .layers.find((l) => l.id !== "background")?.id;
-        map.addLayer(
-          {
-            id: "satellite-overlay",
-            type: "raster",
-            source: "satellite-overlay",
-          },
-          firstNonBg,
-        );
-        // Push every user layer above the new raster so we don't cover them.
+        // Install the raster on top of every carto vector layer that's
+        // already in the style — when satellite is visible we want it to
+        // fully cover the dark base (otherwise carto labels/water/roads
+        // bleed through, and any not-yet-loaded satellite tiles leave
+        // dark gaps that look like rendering corruption). Then we push
+        // every user data layer above the raster so the overlays sit on
+        // top of the satellite imagery as well.
+        map.addLayer({
+          id: "satellite-overlay",
+          type: "raster",
+          source: "satellite-overlay",
+        });
         for (const id of [
           "evac-fill",
           "evac-outline",
+          "suggested-evac-fill",
+          "suggested-evac-line",
+          "accepted-evac-fill",
+          "accepted-evac-line",
           "cone-outline-glow",
           "cone-fill",
           "cone-outline",
@@ -354,10 +370,15 @@ export function IncidentMap() {
     setPerimeterEnabled(!!selectedIncidentId);
   }, [selectedIncidentId]);
 
-  // Dismiss the perimeter the moment the user zooms back out below the
-  // threshold.  We do NOT re-enable it on zoom-in — only selection does that.
+  // Dismiss the perimeter when the user zooms back out below the threshold.
+  // Crucially we only dismiss on USER-initiated zoom (wheel, pinch) — not
+  // on the parabolic dip MapLibre's flyTo performs mid-animation, which
+  // otherwise hides the perimeter on the new fire when switching between
+  // two already-zoomed-in incidents.
   useEffect(() => {
-    if (!abovePerimeterZoom) setPerimeterEnabled(false);
+    if (!abovePerimeterZoom && lastZoomFromUserRef.current) {
+      setPerimeterEnabled(false);
+    }
   }, [abovePerimeterZoom]);
 
   // Render incidents as native WebGL circle layers
