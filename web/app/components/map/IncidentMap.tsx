@@ -313,6 +313,22 @@ export function IncidentMap() {
     infraVisibility,
   );
 
+  // When the Operations tab becomes active after being hidden (display:none),
+  // ResizeObserver may not fire because the element had zero dimensions while
+  // hidden. Call map.resize() explicitly so the canvas matches the container.
+  const activeTab = useStore((s) => s.activeTab);
+  useEffect(() => {
+    if (activeTab !== "Operations" || !mapRef.current) return;
+    const map = mapRef.current;
+    requestAnimationFrame(() => {
+      try {
+        map.resize();
+      } catch {
+        /* map disposed */
+      }
+    });
+  }, [activeTab]);
+
   // Init map
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;

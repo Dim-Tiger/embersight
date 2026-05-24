@@ -293,44 +293,39 @@ export default function Page() {
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
-        {/*
-          IncidentMap is rendered inside <OperationsView> in a STABLE DOM
-          location so it survives the no-incident → incident transition
-          without unmounting. A prior structure conditionally rendered
-          two separate <IncidentMap /> instances (one in NoIncidentState,
-          one in OperationsTab), each with its own maplibregl.Map and
-          ResizeObserver. The transition created a new map inside a
-          different-width container; layout reflow fired ResizeObserver
-          multiple times during the CSS shrink, and MapLibre's task
-          scheduler reentered:
-            "Attempting to run(), but is already running."
-          → map froze at "an arbitrary place" and became uninteractive.
-          Now the map is mounted exactly once for the Operations tab,
-          and the right column is the ONLY thing that swaps between
-          no-incident and incident-selected.
-        */}
-        {activeTab === "Operations" ? (
+        {/* OperationsView (and its map) stays mounted at all times so the
+            maplibregl.Map instance is never destroyed and recreated on tab
+            switch. Destroying + recreating triggers a resize/reentry bug
+            where the map freezes at an arbitrary position. We hide it with
+            `hidden` (display:none) instead of unmounting it, then call
+            map.resize() when it becomes visible again via the activeTab
+            effect in IncidentMap. The right column is the only thing that
+            swaps between no-incident and incident-selected. */}
+        <div className={activeTab === "Operations" ? "h-full" : "hidden"}>
           <OperationsView
             hasIncident={!!selectedIncidentId}
             loading={incidentsLoading}
             error={incidentsError ? incidentsErrorObj : null}
             empty={incidentsEmpty}
           />
-        ) : !selectedIncidentId ? (
-          <NoIncidentState
-            loading={incidentsLoading}
-            error={incidentsError ? incidentsErrorObj : null}
-            empty={incidentsEmpty}
-          />
-        ) : (
-          <>
-            {activeTab === "Briefing" && <BriefingTab />}
-            {activeTab === "Weather" && <WeatherTab />}
-            {activeTab === "Resources" && <ResourcesTab />}
-            {activeTab === "Threats" && <ThreatsTab />}
-            {activeTab === "Evacuation" && <EvacuationTab />}
-            {activeTab === "IAP" && <IAPDraft />}
-          </>
+        </div>
+        {activeTab !== "Operations" && (
+          !selectedIncidentId ? (
+            <NoIncidentState
+              loading={incidentsLoading}
+              error={incidentsError ? incidentsErrorObj : null}
+              empty={incidentsEmpty}
+            />
+          ) : (
+            <>
+              {activeTab === "Briefing" && <BriefingTab />}
+              {activeTab === "Weather" && <WeatherTab />}
+              {activeTab === "Resources" && <ResourcesTab />}
+              {activeTab === "Threats" && <ThreatsTab />}
+              {activeTab === "Evacuation" && <EvacuationTab />}
+              {activeTab === "IAP" && <IAPDraft />}
+            </>
+          )
         )}
       </main>
     </div>
