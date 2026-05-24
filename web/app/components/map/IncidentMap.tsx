@@ -200,6 +200,7 @@ export function IncidentMap() {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const coneLabelRef = useRef<maplibregl.Marker | null>(null);
+  const windCompassRef = useRef<maplibregl.Marker | null>(null);
   const deckOverlayRef = useRef<MapboxOverlay | null>(null);
   // Tracks whether the most recent zoom delta came from the user (true) or
   // from a programmatic camera animation like flyTo (false). Read by the
@@ -1770,6 +1771,69 @@ export function IncidentMap() {
       console.warn("wind layer error:", err);
     }
   }, [wind, showWind, mapLoaded, windLowZoom, basemap]);
+
+  // ---- Wind compass marker at incident center ----
+  // Single arrow that points the direction the wind is BLOWING TOWARD,
+  // sourced from the wind vector closest to the incident. This is the
+  // ground-truth indicator the IC can compare the particle flow against —
+  // if particles drift along the arrow we know the rendering matches
+  // Open-Meteo's reading; if they drift opposite the renderer is flipped.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) {
+      windCompassRef.current?.remove();
+      windCompassRef.current = null;
+      return;
+    }
+    if (!showWind || !selectedIncident || !wind?.vectors?.length) {
+      windCompassRef.current?.remove();
+      windCompassRef.current = null;
+      return;
+    }
+
+    // Pick the vector nearest the incident — Open-Meteo returns a 7×7 grid
+    // around the incident lat/lon so the centre sample is most representative.
+    const { lat, lon } = selectedIncident;
+    let best = wind.vectors[0];
+    let bestDist = Infinity;
+    for (const v of wind.vectors) {
+      const dx = v.lon - lon;
+      const dy = v.lat - lat;
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) {
+        bestDist = d;
+        best = v;
+      }
+    }
+
+    const fromDeg = best.direction;
+    const toDeg = (fromDeg + 180) % 360;
+    const speedMs = best.speed;
+
+    windCompassRef.current?.remove();
+    const el = document.createElement("div");
+    el.style.cssText =
+      "display:flex;flex-direction:column;align-items:center;gap:2px;pointer-events:none;font:600 10px ui-sans-serif,system-ui;color:#f1f5f9;";
+    el.innerHTML = `
+      <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.6);border-radius:999px;padding:2px 8px;backdrop-filter:blur(4px);white-space:nowrap;">
+        wind ${speedMs.toFixed(1)} m/s → ${Math.round(toDeg)}°
+      </div>
+      <svg width="42" height="42" viewBox="-21 -21 42 42" style="transform:rotate(${toDeg}deg);filter:drop-shadow(0 0 4px rgba(0,0,0,0.6));">
+        <path d="M 0 -16 L 6 8 L 0 4 L -6 8 Z" fill="#38bdf8" stroke="#0c1220" stroke-width="1.5" stroke-linejoin="round" />
+      </svg>
+    `;
+    windCompassRef.current = new maplibregl.Marker({
+      element: el,
+      anchor: "center",
+    })
+      .setLngLat([lon, lat])
+      .addTo(map);
+
+    return () => {
+      windCompassRef.current?.remove();
+      windCompassRef.current = null;
+    };
+  }, [wind, showWind, selectedIncident, mapLoaded]);
 
   // ---- Register custom infra icons ----
   // Pre-render each layer's emoji onto a colored disc and load it as a
