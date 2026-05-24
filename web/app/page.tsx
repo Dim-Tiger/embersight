@@ -170,14 +170,20 @@ export default function Page() {
 }
 
 function NoIncidentState() {
+  // Render the statewide map immediately so users can click a fire to
+  // select it on first open — the sidebar dropdown is not the only way in.
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-4 text-smoke-400">
-      <Flame className="h-12 w-12 text-smoke-600" />
-      <div className="text-center">
-        <p className="text-sm font-medium text-smoke-300">No incident selected</p>
-        <p className="mt-1 text-xs">
-          Choose an active fire from the left panel to begin.
-        </p>
+    <div className="relative h-full w-full">
+      <IncidentMap />
+      <div className="pointer-events-none absolute left-1/2 top-6 z-10 -translate-x-1/2">
+        <div className="flex items-center gap-2 rounded-full border border-ember-500/40 bg-smoke-800/90 px-4 py-2 text-xs text-smoke-200 shadow-lg backdrop-blur">
+          <Flame className="h-3.5 w-3.5 text-ember-400" />
+          <span>
+            Click an{" "}
+            <span className="font-semibold text-ember-300">active fire</span>{" "}
+            on the map, or choose one from the left panel, to begin.
+          </span>
+        </div>
       </div>
     </div>
   );
