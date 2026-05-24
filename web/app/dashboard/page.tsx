@@ -27,7 +27,6 @@ import { ChatPanel } from "../components/panels/ChatPanel";
 import { EvacuationTab } from "../components/panels/EvacuationTab";
 import { IAPDraft } from "../components/panels/IAPDraft";
 import { IncidentMap } from "../components/map/IncidentMap";
-import { LiveFeed } from "../components/panels/LiveFeed";
 import { PipelineLadder } from "../components/panels/PipelineLadder";
 import { ResourcesTab } from "../components/panels/ResourcesTab";
 import { ThreatsTab } from "../components/panels/ThreatsTab";
@@ -256,10 +255,7 @@ export default function Page() {
 
         {/* Footer */}
         {!sidebarCollapsed ? (
-          <div className="flex items-center justify-between border-t border-smoke-700 px-3 py-2">
-            <span className="text-[9px] text-smoke-500">
-              DRAFT · never dispatches
-            </span>
+          <div className="flex items-center justify-end border-t border-smoke-700 px-3 py-2">
             <button
               onClick={toggleTheme}
               className="flex h-6 w-6 items-center justify-center rounded text-smoke-400 transition-colors hover:bg-smoke-700 hover:text-smoke-200"
@@ -578,7 +574,7 @@ function OperationsView({
         className="grid min-h-0 gap-px bg-smoke-700"
         style={{
           gridTemplateRows:
-            "minmax(120px, 22%) minmax(0, 1fr) minmax(80px, 14%) minmax(80px, 22%)",
+            "minmax(120px, 22%) minmax(0, 1fr) minmax(80px, 36%)",
         }}
       >
         <div className="min-h-0 overflow-hidden bg-smoke-900">
@@ -586,9 +582,6 @@ function OperationsView({
         </div>
         <div className="min-h-0 overflow-hidden bg-smoke-900">
           <ChatPanel />
-        </div>
-        <div className="min-h-0 overflow-hidden bg-smoke-900">
-          <LiveFeed />
         </div>
         <div className="min-h-0 overflow-hidden bg-smoke-900">
           <ApprovalQueue />
