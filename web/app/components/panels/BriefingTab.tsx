@@ -528,16 +528,14 @@ function ConversationFeed() {
   const chat = useStore((s) => s.chat);
   const streaming = useStore((s) => s.streaming);
   const briefingComplete = useStore((s) => s.briefingComplete);
-  const currentMode = useStore((s) => s.currentMode);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
+  const errorMessage = useStore((s) => s.errorMessage);
 
-  // Same filter as ChatPanel: hide sub-agent ticker entries during chat mode
-  // so the IC's voice owns the floor; surface them during briefing so the
-  // human watches the team report in.
-  const visible = useMemo(
-    () => chat.filter((m) => m.role !== "system" || currentMode === "briefing"),
-    [chat, currentMode],
-  );
+  // Unlike the small ChatPanel, this full-page view keeps every entry
+  // visible across mode changes — the briefing narratives ARE the value
+  // here, and hiding them the moment the user asks a question feels like
+  // the chat got wiped.
+  const visible = chat;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastLengthRef = useRef(0);
@@ -575,6 +573,15 @@ function ConversationFeed() {
         {visible.map((m) => (
           <FeedItem key={m.id} message={m} />
         ))}
+        {errorMessage && (
+          <div className="flex items-start gap-2 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-[11.5px] text-red-200">
+            <AlertTriangle className="h-4 w-4 flex-shrink-0 text-red-300" />
+            <div className="min-w-0">
+              <div className="font-semibold">Stream error</div>
+              <div className="text-red-300/90 break-words">{errorMessage}</div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
