@@ -393,18 +393,31 @@ export function IncidentMap() {
       basemap === "satellite" ? "visible" : "none",
     );
 
-    // Promote every non-basemap layer above the satellite raster on every
-    // basemap flip. The previous version hardcoded an allowlist and only
-    // ran on first install — any data layer added later (or missing from
-    // the list) disappeared under the satellite raster. Walking the live
-    // style is idempotent and catches all of them.
+    // On every basemap flip, promote our data layers above the satellite
+    // raster. We detect "ours" by an allowlist of known prefixes — anything
+    // outside that list is a Carto vector basemap layer (water, roads,
+    // labels, etc.) and must stay underneath the raster, otherwise carto
+    // geometry paints on top of satellite imagery and the user sees the
+    // dark base bleeding through. Walking the live style on each flip means
+    // layers added later (e.g. the dynamic `infra-*` ones) get lifted too.
     if (basemap === "satellite") {
+      const OUR_LAYER_PREFIXES = [
+        "cone-",
+        "evac-",
+        "suggested-evac-",
+        "accepted-evac-",
+        "firms-",
+        "incidents-",
+        "perimeter-",
+        "rally-points",
+        "routes-",
+        "staging-point",
+        "infra-",
+      ];
       const layers = map.getStyle().layers ?? [];
       for (const layer of layers) {
         const id = layer.id;
-        if (id === "satellite-overlay") continue;
-        // Skip Carto vector basemap layers — they sit under the raster.
-        if (id.startsWith("carto-") || id.startsWith("background")) continue;
+        if (!OUR_LAYER_PREFIXES.some((p) => id.startsWith(p))) continue;
         try {
           map.moveLayer(id);
         } catch {
