@@ -4,6 +4,7 @@ import { create } from "zustand";
 
 export type Tab =
   | "Operations"
+  | "Briefing"
   | "Weather"
   | "Resources"
   | "Threats"
