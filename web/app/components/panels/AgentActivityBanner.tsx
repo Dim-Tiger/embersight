@@ -14,6 +14,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { stripMarkdown } from "@/app/components/Markdown";
 
 type Props = {
   /** Ordered list of agent name keys to monitor. */
@@ -148,7 +149,8 @@ export function AgentActivityBanner({
     const running = agents.find((a) => statuses[a] === "running");
     if (running) {
       const out = outputs[running];
-      if (out?.narrative) return stripPrefix(out.narrative).slice(0, 140);
+      if (out?.narrative)
+        return stripMarkdown(stripPrefix(out.narrative)).slice(0, 140);
       return `${AGENT_LABELS[running] ?? running} is gathering data…`;
     }
     if (combined === "done") {
@@ -156,7 +158,8 @@ export function AgentActivityBanner({
         .map((a) => outputs[a])
         .filter(Boolean)
         .pop();
-      if (last?.narrative) return stripPrefix(last.narrative).slice(0, 160);
+      if (last?.narrative)
+        return stripMarkdown(stripPrefix(last.narrative)).slice(0, 160);
       return "Analysis complete.";
     }
     return null;

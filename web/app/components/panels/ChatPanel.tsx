@@ -2,6 +2,7 @@
 
 import { type ChatMessage, useStore } from "@/lib/store";
 import { useEffect, useMemo, useRef } from "react";
+import { Markdown } from "@/app/components/Markdown";
 import { MessageInput } from "./MessageInput";
 
 export function ChatPanel() {
@@ -139,8 +140,12 @@ function ChatBubble({ message }: { message: ChatMessage }) {
           </ul>
         )}
 
-        <div className="whitespace-pre-wrap">
-          {text}
+        <div>
+          {isUser ? (
+            <span className="whitespace-pre-wrap">{text}</span>
+          ) : (
+            <Markdown>{text}</Markdown>
+          )}
           {streaming && (
             <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-ember-300 align-middle" />
           )}
