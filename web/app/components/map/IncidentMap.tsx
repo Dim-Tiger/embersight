@@ -18,6 +18,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const CARTO_DARK =
   "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
+// When a perimeter is loaded and the map is zoomed in past this level, hide
+// the redundant orange circle for that fire and let the perimeter speak for
+// itself.  Below this threshold the circle reappears automatically.
+const PERIMETER_HIDE_CIRCLE_ZOOM = 9;
+
 // Evac zone status → color. Keys are normalized (uppercase, trimmed).
 // Mirrors the Watch Duty / Genasys visual convention.
 const EVAC_STATUS_COLORS: Record<string, string> = {
@@ -49,10 +54,18 @@ export function IncidentMap() {
   const [showEvac, setShowEvac] = useState(true);
   const [showFirms, setShowFirms] = useState(true);
 
+  // Store selectors — placed before the derived state that depends on them.
   const { data: incidents } = useIncidents();
   const viewport = useStore((s) => s.mapViewport);
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
+
+  // True while the map zoom is above PERIMETER_HIDE_CIRCLE_ZOOM.  We only
+  // flip this boolean (not store the raw zoom) so we avoid a re-render on
+  // every incremental scroll step.
+  const [abovePerimeterZoom, setAbovePerimeterZoom] = useState(
+    () => viewport.zoom >= PERIMETER_HIDE_CIRCLE_ZOOM,
+  );
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
   const irwinId = selectedIncidentId?.startsWith("wfigs:")
@@ -84,6 +97,15 @@ export function IncidentMap() {
       "top-right",
     );
     map.on("load", () => setMapLoaded(true));
+    // Flip the boolean state only when crossing the perimeter-visibility
+    // threshold so we don't trigger re-renders on every zoom tick.
+    map.on("zoom", () => {
+      const z = map.getZoom();
+      setAbovePerimeterZoom((prev) => {
+        const next = z >= PERIMETER_HIDE_CIRCLE_ZOOM;
+        return prev === next ? prev : next;
+      });
+    });
     mapRef.current = map;
 
     popupRef.current = new maplibregl.Popup({
@@ -256,6 +278,31 @@ export function IncidentMap() {
       console.warn("perimeter layer error:", err);
     }
   }, [perimeter, mapLoaded]);
+
+  // Hide the orange circle for the selected fire when a perimeter is loaded
+  // and the map is zoomed in past PERIMETER_HIDE_CIRCLE_ZOOM.  The perimeter
+  // polygon provides much better spatial context at that scale.  When zoomed
+  // back out the circle reappears automatically.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const hasPerimeter = !!perimeter?.features?.length;
+    const shouldHide = hasPerimeter && !!selectedIncidentId && abovePerimeterZoom;
+
+    // A filter of null removes any existing filter and shows all features.
+    // When hiding, exclude only the selected fire so the others stay visible.
+    const filter: maplibregl.FilterSpecification | null = shouldHide
+      ? (["!=", ["get", "id"], selectedIncidentId] as maplibregl.FilterSpecification)
+      : null;
+
+    try {
+      if (map.getLayer("incidents-glow")) map.setFilter("incidents-glow", filter);
+      if (map.getLayer("incidents-circle")) map.setFilter("incidents-circle", filter);
+    } catch (err) {
+      console.warn("circle visibility filter error:", err);
+    }
+  }, [perimeter, selectedIncidentId, abovePerimeterZoom, mapLoaded]);
 
   // ---- Evac zone polygons (Cal OES / Zonehaven aggregation) ----
   // Filter the statewide feed to active zones in the incident's vicinity so
