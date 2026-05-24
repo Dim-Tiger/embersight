@@ -50,11 +50,20 @@ export async function consumeAgentSse(
     }
     if (buffer.trim()) handleFrame(buffer, { threadId });
   } catch (err) {
-    console.error("[sse] consumer threw", err);
+    // AbortError (DOMException) fires when the caller aborts the request
+    // intentionally (e.g. starting a new run). Browsers may also surface an
+    // abort as "TypeError: network error" / "TypeError: Failed to fetch" when
+    // the stream is already being read. Both are expected — don't log or set
+    // an error state for them; just let the caller decide.
+    if (isAbortLike(err)) {
+      useStore.getState().setConnectionStatus("closed");
+      throw err; // re-throw so useAgentStream can skip its own error handler
+    }
+    console.warn("[sse] consumer threw", err);
     useStore
       .getState()
       .setError(
-        `SSE consumer crashed: ${err instanceof Error ? err.message : String(err)}`,
+        `SSE stream error: ${err instanceof Error ? err.message : String(err)}`,
       );
     throw err;
   }
@@ -146,4 +155,21 @@ function handleFrame(frame: string, c: StoreCtx) {
 
 function stripPrefix(s: string): string {
   return s.replace(/^\[[\w_]+\]\s*/, "").trim();
+}
+
+/**
+ * Returns true for errors that represent an intentional abort or a network
+ * closure that results from aborting (browsers are inconsistent about which
+ * error type they throw when the stream is cut mid-read).
+ */
+function isAbortLike(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (
+    err instanceof TypeError &&
+    /network error|Failed to fetch|BodyStreamBuffer was aborted/i.test(
+      err.message,
+    )
+  )
+    return true;
+  return false;
 }

@@ -11,7 +11,7 @@ const CARTO_DARK =
 export function IncidentMap() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
-  const markersRef = useRef<maplibregl.Marker[]>([]);
+  const popupRef = useRef<maplibregl.Popup | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
 
   const { data: incidents } = useIncidents();
@@ -41,7 +41,18 @@ export function IncidentMap() {
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.on("load", () => setMapLoaded(true));
     mapRef.current = map;
+
+    // Create a shared reusable popup for hover tooltips
+    popupRef.current = new maplibregl.Popup({
+      closeButton: false,
+      closeOnClick: false,
+      maxWidth: "240px",
+      offset: 8,
+    });
+
     return () => {
+      popupRef.current?.remove();
+      popupRef.current = null;
       map.remove();
       mapRef.current = null;
       setMapLoaded(false);
@@ -61,36 +72,128 @@ export function IncidentMap() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIncidentId]);
 
-  // Render incident markers
+  // Render incidents as native WebGL circle layers so they zoom in sync with the map.
+  // Previously these were HTML <button> Marker elements which lag behind the WebGL
+  // rendering pipeline during zoom animations. Native layers are always perfectly synced.
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !incidents) return;
+    if (!map || !mapLoaded || !incidents) return;
 
-    markersRef.current.forEach((m) => m.remove());
-    markersRef.current = [];
+    const geojson: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features: incidents.map((inc) => ({
+        type: "Feature",
+        geometry: {
+          type: "Point",
+          coordinates: [inc.lon, inc.lat],
+        },
+        properties: {
+          id: inc.id,
+          name: inc.name,
+          acres: inc.acres ?? 0,
+          contained_pct:
+            inc.contained_pct != null
+              ? Math.round(inc.contained_pct * 100)
+              : null,
+          radius: sizeForAcres(inc.acres),
+        },
+      })),
+    };
 
-    for (const inc of incidents) {
-      const el = document.createElement("button");
-      el.className =
-        "rounded-full border border-ember-400/70 bg-ember-500/70 shadow-[0_0_10px_#f97316] " +
-        "hover:scale-110 transition-transform cursor-pointer";
-      const radius = sizeForAcres(inc.acres);
-      el.style.width = `${radius}px`;
-      el.style.height = `${radius}px`;
-      el.title = `${inc.name} · ${inc.acres ?? "?"} ac · ${
-        inc.contained_pct != null ? Math.round(inc.contained_pct * 100) : "?"
-      }% contained`;
-
-      el.addEventListener("click", () => {
-        setSelectedIncident(inc.id);
-      });
-
-      const marker = new maplibregl.Marker({ element: el })
-        .setLngLat([inc.lon, inc.lat])
-        .addTo(map);
-      markersRef.current.push(marker);
+    // If the source already exists just update the data (incidents refreshed)
+    const existing = map.getSource("incidents") as maplibregl.GeoJSONSource | undefined;
+    if (existing) {
+      existing.setData(geojson);
+      return;
     }
-  }, [incidents, setSelectedIncident]);
+
+    // First load: create source + layers
+    map.addSource("incidents", { type: "geojson", data: geojson });
+
+    // Soft glow ring behind each circle (wider, transparent)
+    map.addLayer({
+      id: "incidents-glow",
+      type: "circle",
+      source: "incidents",
+      paint: {
+        "circle-color": "rgba(249, 115, 22, 0.25)",
+        "circle-radius": ["*", ["get", "radius"], 1.5],
+        "circle-blur": 0.6,
+        "circle-stroke-width": 0,
+      },
+    });
+
+    // Main filled circle
+    map.addLayer({
+      id: "incidents-circle",
+      type: "circle",
+      source: "incidents",
+      paint: {
+        "circle-color": "rgba(249, 115, 22, 0.70)",
+        "circle-radius": ["get", "radius"],
+        "circle-stroke-color": "rgba(251, 146, 60, 0.85)",
+        "circle-stroke-width": 1.5,
+      },
+    });
+
+    // Pointer cursor on hover
+    map.on("mouseenter", "incidents-circle", (e) => {
+      map.getCanvas().style.cursor = "pointer";
+      if (!e.features?.length || !popupRef.current) return;
+      const props = e.features[0].properties as {
+        name: string;
+        acres: number;
+        contained_pct: number | null;
+      };
+      const coords = (
+        e.features[0].geometry as GeoJSON.Point
+      ).coordinates as [number, number];
+      popupRef.current
+        .setLngLat(coords)
+        .setHTML(
+          `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid rgba(249,115,22,0.4)">
+            <strong style="color:#fb923c">${props.name}</strong><br/>
+            ${props.acres?.toLocaleString() ?? "?"} ac &middot; ${props.contained_pct ?? "?"}% contained
+          </div>`,
+        )
+        .addTo(map);
+    });
+
+    map.on("mouseleave", "incidents-circle", () => {
+      map.getCanvas().style.cursor = "";
+      popupRef.current?.remove();
+    });
+
+    // Click to select
+    map.on("click", "incidents-circle", (e) => {
+      if (!e.features?.length) return;
+      const id = e.features[0].properties.id as string;
+      setSelectedIncident(id);
+    });
+  // setSelectedIncident is a stable Zustand selector; incidents + mapLoaded drive updates
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incidents, mapLoaded]);
+
+  // When setSelectedIncident callback reference changes (unlikely but defensive), keep click handler fresh
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const handleClick = (
+      e: maplibregl.MapMouseEvent & {
+        features?: maplibregl.MapGeoJSONFeature[];
+      },
+    ) => {
+      if (!e.features?.length) return;
+      setSelectedIncident(e.features[0].properties.id as string);
+    };
+
+    map.on("click", "incidents-circle", handleClick);
+    return () => {
+      map.off("click", "incidents-circle", handleClick);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapLoaded, setSelectedIncident]);
 
   // Render fire perimeter polygon
   useEffect(() => {
@@ -130,6 +233,10 @@ export function IncidentMap() {
           "line-dasharray": [2, 1],
         },
       });
+
+      // Keep incident circles rendered above the perimeter layers
+      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
     } catch (err) {
       console.warn("perimeter layer error:", err);
     }
