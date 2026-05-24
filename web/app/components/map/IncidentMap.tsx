@@ -253,7 +253,16 @@ export function IncidentMap() {
     map.on("click", "incidents-circle", (e) => {
       if (!e.features?.length) return;
       const id = e.features[0].properties.id as string;
+      const coords = (e.features[0].geometry as GeoJSON.Point).coordinates as [
+        number,
+        number,
+      ];
+      // Always fly in on click — this handles re-clicking an already-selected
+      // fire while zoomed out (setSelectedIncident would be a no-op for the
+      // same ID so the fly-to useEffect wouldn't re-run without this).
       setSelectedIncident(id);
+      setPerimeterEnabled(true); // restore perimeter session on every click
+      map.flyTo({ center: coords, zoom: 11, duration: 1400 });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incidents, mapLoaded]);
