@@ -111,10 +111,12 @@ export default function Page() {
             sidebarCollapsed ? "flex-col gap-2 px-2 py-3" : "gap-2 px-3 py-3.5"
           }`}
         >
-          {/* Brand → marketing landing. Opens in a new tab so the IC
-              keeps the live incident session intact. */}
+          {/* Brand → marketing landing. Points at the literal index.html
+              because Next's `public/` doesn't auto-resolve directory roots,
+              so `/landing/` 404s. Opens in a new tab so the IC keeps the
+              live incident session intact. */}
           <a
-            href="/landing/"
+            href="/landing/index.html"
             target="_blank"
             rel="noopener"
             title="About EmberSight"
