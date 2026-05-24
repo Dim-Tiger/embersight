@@ -250,6 +250,42 @@ function handleFrame(frame: string, ctx: StoreCtx) {
         } else {
           s.setAgentStatus(name, "done");
         }
+      } else if (kind === "on_chain_end" && name === "master_ic_chat") {
+        // Fallback for chat replies that never streamed tokens — happens
+        // whenever the IC node returns a static message instead of an LLM
+        // call (offline mode with no ANTHROPIC_API_KEY, missing
+        // langchain_anthropic, an exception during the LLM call). The
+        // reply lives in `output.messages[*]` as an AI message; surface it
+        // so the user sees something instead of silent dead air.
+        if (!ctx.currentChatId) {
+          const data = p.data as Record<string, unknown> | undefined;
+          const output = data?.output as Record<string, unknown> | undefined;
+          const messages = output?.messages as
+            | Array<Record<string, unknown>>
+            | undefined;
+          const lastAi = (messages ?? [])
+            .filter((m) => m.type === "ai")
+            .pop();
+          const content = lastAi?.content;
+          const text =
+            typeof content === "string"
+              ? content
+              : Array.isArray(content)
+                ? content
+                    .map((b) =>
+                      typeof b === "object" && b !== null && "text" in b
+                        ? String((b as { text: unknown }).text ?? "")
+                        : "",
+                    )
+                    .join("")
+                : "";
+          if (text.trim()) {
+            const id = `ai-${Date.now()}`;
+            s.beginAgentChat(id);
+            s.appendChatToken(id, text);
+            s.finalizeAgentChat(id);
+          }
+        }
       }
       return;
     }
