@@ -31,21 +31,27 @@ cp .env.example .env
 # fill in ANTHROPIC_API_KEY at minimum
 ```
 
-### 2. Start the agent service (port 8000)
+### 2. Run both services (one command)
 ```bash
-cd agent
-uv sync
-uv run uvicorn embersight_agent.main:app --reload --port 8000
+./start.sh
 ```
 
-### 3. Start the web app (port 3000)
-```bash
-cd web
-pnpm install
-pnpm dev
-```
+This installs deps for both `agent/` and `web/`, then boots the FastAPI
+agent service on **:8000** and the Next.js web app on **:3000**. Ctrl-C
+stops both. Logs stream to `.run/agent.log` and `.run/web.log`.
 
 Open http://localhost:3000.
+
+### Manual two-terminal alternative
+If you'd rather run them separately:
+
+```bash
+# terminal A
+cd agent && uv sync && uv run uvicorn embersight_agent.main:app --reload --port 8000
+
+# terminal B
+cd web && pnpm install && pnpm dev
+```
 
 ## How human-in-the-loop works
 

@@ -29,3 +29,4 @@ build/
 /tmp/embersight.db
 *.sqlite
 *.sqlite-journal
+.run/
