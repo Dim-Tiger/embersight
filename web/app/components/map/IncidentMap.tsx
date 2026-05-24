@@ -18,6 +18,53 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const CARTO_DARK =
   "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
+// Esri World Imagery — free satellite raster tiles. Inlined as a MapLibre
+// style so we can hot-swap basemaps without keeping a second style.json.
+const SATELLITE_STYLE: maplibregl.StyleSpecification = {
+  version: 8,
+  sources: {
+    "esri-world-imagery": {
+      type: "raster",
+      tiles: [
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      ],
+      tileSize: 256,
+      attribution:
+        "Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+    },
+  },
+  layers: [
+    {
+      id: "esri-world-imagery",
+      type: "raster",
+      source: "esri-world-imagery",
+      minzoom: 0,
+      maxzoom: 19,
+    },
+  ],
+};
+
+type Basemap = "dark" | "satellite";
+
+type RoutingPayload = {
+  primary_routes?: Array<{
+    path?: Array<[number, number]>;
+    length_km?: number;
+    est_drive_minutes?: number;
+  }>;
+  egress_routes?: Array<{
+    path?: Array<[number, number]>;
+    length_km?: number;
+    est_drive_minutes?: number;
+    bearing?: string;
+  }>;
+  candidates?: Array<{
+    name?: string;
+    loc?: [number, number];
+    score?: number;
+  }>;
+};
+
 // Evac zone status → color. Keys are normalized (uppercase, trimmed).
 // Mirrors the Watch Duty / Genasys visual convention.
 const EVAC_STATUS_COLORS: Record<string, string> = {
@@ -55,6 +102,7 @@ type ConeImpact = {
 
 type SpreadPayload = {
   cones?: Record<string, GeoJSON.Polygon | GeoJSON.MultiPolygon | null>;
+  swept_cone_24h?: GeoJSON.Polygon | GeoJSON.MultiPolygon | null;
   cone_impact?: ConeImpact | null;
   head_ros_chains_per_hr?: number | null;
   flame_length_ft?: number | null;
@@ -71,6 +119,8 @@ export function IncidentMap() {
   const [showWind, setShowWind] = useState(true);
   const [showEvac, setShowEvac] = useState(true);
   const [showFirms, setShowFirms] = useState(true);
+  const [showRoutes, setShowRoutes] = useState(true);
+  const [basemap, setBasemap] = useState<Basemap>("dark");
   const [showCone, setShowCone] = useState(true);
 
   const { data: incidents } = useIncidents();
@@ -94,6 +144,9 @@ export function IncidentMap() {
   );
   const { data: evac } = useEvacZones();
   const { data: firms } = useFirms(1);
+  const routingOutput = useStore(
+    (s) => s.agentOutputs.routing_staging,
+  ) as { payload?: RoutingPayload } | undefined;
 
   // Init map
   useEffect(() => {
@@ -131,6 +184,33 @@ export function IncidentMap() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Basemap swap: setStyle wipes all sources/layers, so flip mapLoaded
+  // off until the new style fires its own `load` event. Every layer
+  // effect below already gates on mapLoaded, so they'll rebuild cleanly.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    setMapLoaded(false);
+    // deck.gl overlay is bound to the previous style; drop it so the
+    // wind-particle effect re-attaches against the fresh style.
+    if (deckOverlayRef.current) {
+      try {
+        map.removeControl(deckOverlayRef.current);
+      } catch {
+        /* ignore */
+      }
+      deckOverlayRef.current = null;
+    }
+    const nextStyle =
+      basemap === "satellite" ? SATELLITE_STYLE : CARTO_DARK;
+    map.setStyle(nextStyle as maplibregl.StyleSpecification | string);
+    const onLoad = () => setMapLoaded(true);
+    map.once("load", onLoad);
+    return () => {
+      map.off("load", onLoad);
+    };
+  }, [basemap]);
 
   // Fly to selected incident
   useEffect(() => {
@@ -282,12 +362,24 @@ export function IncidentMap() {
     }
   }, [perimeter, mapLoaded]);
 
-  // ---- Spread prediction cone (high-vis red, tornado-warning style) ----
-  // Drawn from spread_simulation.payload.cones["24h"], labeled with
-  // cone_impact (population + critical infra inside the cone).
+  // ---- Spread prediction cone (high-vis purple, tornado-warning style) ----
+  // The spread agent now publishes a server-side Minkowski-swept polygon at
+  // `swept_cone_24h` that already extends the WFIGS perimeter forward
+  // through the 24h cone. Prefer it so the painted region exactly matches
+  // the polygon the impact queries (population + critical infra) ran
+  // against. Fall back to the raw `cones["24h"]` ellipse only when the
+  // server didn't publish a swept polygon.
   const cone24h = useMemo(() => {
     const payload = (spread?.payload ?? {}) as SpreadPayload;
-    return payload.cones?.["24h"] ?? null;
+    return payload.swept_cone_24h ?? payload.cones?.["24h"] ?? null;
+  }, [spread]);
+
+  // Did the server already do the perimeter sweep? When yes we render the
+  // polygon directly; when no, we still attempt a client-side sweep below
+  // so older payloads keep working.
+  const coneIsServerSwept = useMemo(() => {
+    const payload = (spread?.payload ?? {}) as SpreadPayload;
+    return payload.swept_cone_24h != null;
   }, [spread]);
 
   const coneImpact = useMemo<ConeImpact | null>(() => {
@@ -317,13 +409,17 @@ export function IncidentMap() {
 
     if (!showCone || !cone24h) return;
 
-    // The spread agent's cone is a single ellipse with a rear vertex at the
-    // incident point. We want the painted region to emanate from the ENTIRE
-    // downwind perimeter outline — not from one point. Take the convex hull
-    // of (perimeter vertices ∪ cone vertices). The hull wraps the fire's
-    // current outline at the rear and tapers out to the cone's tip, which is
-    // the tornado-warning-cone shape the user asked for.
-    const hullCone = buildPerimeterCone(cone24h, perimeter ?? null);
+    // If the server already published a swept polygon, use it verbatim — it's
+    // the exact geometry the impact queries ran against. Otherwise fall back
+    // to the client-side Minkowski-sum hull so older payloads still render.
+    const hullCone = coneIsServerSwept
+      ? cone24h
+      : buildPerimeterCone(
+          cone24h,
+          perimeter ?? null,
+          selectedIncident?.lon ?? null,
+          selectedIncident?.lat ?? null,
+        );
 
     const features: GeoJSON.Feature[] = [
       { type: "Feature", geometry: hullCone, properties: { kind: "cone" } },
@@ -407,7 +503,7 @@ export function IncidentMap() {
     } catch (err) {
       console.warn("cone layer error:", err);
     }
-  }, [cone24h, coneImpact, perimeter, showCone, mapLoaded]);
+  }, [cone24h, coneImpact, coneIsServerSwept, perimeter, selectedIncident, showCone, mapLoaded]);
 
   // ---- Evac zone polygons (Cal OES / Zonehaven aggregation) ----
   // Filter the statewide feed to active zones in the incident's vicinity so
@@ -670,6 +766,201 @@ export function IncidentMap() {
     }
   }, [firms, showFirms, mapLoaded]);
 
+  // ---- Agent-computed routes + staging marker ----
+  // `routing_staging.payload.primary_routes` = candidate-staging → incident
+  //   (firefighter ingress). Rendered dashed amber.
+  // `routing_staging.payload.egress_routes` = incident → nearest major-road
+  //   node in N/E/S/W (civilian egress / pushed-out fallback). Solid red.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const LAYER_IDS = [
+      "routes-egress",
+      "routes-egress-casing",
+      "routes-ingress",
+      "routes-ingress-casing",
+      "staging-point",
+    ];
+    const SOURCE_IDS = ["routes-ingress", "routes-egress", "staging"];
+    try {
+      for (const id of LAYER_IDS) {
+        if (map.getLayer(id)) map.removeLayer(id);
+      }
+      for (const id of SOURCE_IDS) {
+        if (map.getSource(id)) map.removeSource(id);
+      }
+    } catch {
+      /* map may be mid-rerender */
+    }
+
+    if (!showRoutes) return;
+    const payload = routingOutput?.payload;
+    if (!payload) return;
+
+    const toLineString = (
+      path: Array<[number, number]> | undefined,
+      props: Record<string, unknown>,
+    ): GeoJSON.Feature | null => {
+      if (!path || path.length < 2) return null;
+      // Agent emits [lat, lon]; GeoJSON wants [lon, lat].
+      const coords = path.map(([lat, lon]) => [lon, lat] as [number, number]);
+      return {
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: coords },
+        properties: props,
+      };
+    };
+
+    const ingressFeatures = (payload.primary_routes ?? [])
+      .map((r, i) =>
+        toLineString(r.path, {
+          kind: "ingress",
+          rank: i,
+          length_km: r.length_km ?? null,
+          minutes: r.est_drive_minutes ?? null,
+        }),
+      )
+      .filter((f): f is GeoJSON.Feature => f !== null);
+
+    const egressFeatures = (payload.egress_routes ?? [])
+      .map((r) =>
+        toLineString(r.path, {
+          kind: "egress",
+          bearing: r.bearing ?? "?",
+          length_km: r.length_km ?? null,
+          minutes: r.est_drive_minutes ?? null,
+        }),
+      )
+      .filter((f): f is GeoJSON.Feature => f !== null);
+
+    try {
+      if (egressFeatures.length) {
+        map.addSource("routes-egress", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: egressFeatures },
+        });
+        map.addLayer({
+          id: "routes-egress-casing",
+          type: "line",
+          source: "routes-egress",
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": "#0c0a09",
+            "line-width": 6,
+            "line-opacity": 0.7,
+          },
+        });
+        map.addLayer({
+          id: "routes-egress",
+          type: "line",
+          source: "routes-egress",
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": "#dc2626",
+            "line-width": 3.2,
+            "line-opacity": 0.95,
+          },
+        });
+      }
+
+      if (ingressFeatures.length) {
+        map.addSource("routes-ingress", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: ingressFeatures },
+        });
+        map.addLayer({
+          id: "routes-ingress-casing",
+          type: "line",
+          source: "routes-ingress",
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": "#0c0a09",
+            "line-width": 5,
+            "line-opacity": 0.6,
+          },
+        });
+        map.addLayer({
+          id: "routes-ingress",
+          type: "line",
+          source: "routes-ingress",
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": "#fbbf24",
+            "line-width": 2.4,
+            "line-opacity": [
+              "case",
+              ["==", ["get", "rank"], 0],
+              0.95,
+              0.55,
+            ],
+            "line-dasharray": [2, 1.5],
+          },
+        });
+      }
+
+      const top = payload.candidates?.[0];
+      if (top?.loc && Array.isArray(top.loc) && top.loc.length === 2) {
+        const [lat, lon] = top.loc;
+        map.addSource("staging", {
+          type: "geojson",
+          data: {
+            type: "FeatureCollection",
+            features: [
+              {
+                type: "Feature",
+                geometry: { type: "Point", coordinates: [lon, lat] },
+                properties: {
+                  name: top.name ?? "Staging",
+                  score: top.score ?? null,
+                },
+              },
+            ],
+          },
+        });
+        map.addLayer({
+          id: "staging-point",
+          type: "circle",
+          source: "staging",
+          paint: {
+            "circle-radius": 7,
+            "circle-color": "#22c55e",
+            "circle-stroke-color": "#052e16",
+            "circle-stroke-width": 2,
+          },
+        });
+
+        const showStagingPopup = (e: maplibregl.MapMouseEvent) => {
+          if (!popupRef.current) return;
+          popupRef.current
+            .setLngLat([lon, lat])
+            .setHTML(
+              `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid #22c55e66">
+                <strong style="color:#22c55e">Proposed staging</strong><br/>
+                ${escapeHtml(String(top.name ?? "Staging"))}<br/>
+                <span style="color:#94a3b8">score ${top.score ?? "?"}</span>
+              </div>`,
+            )
+            .addTo(map);
+          map.getCanvas().style.cursor = "pointer";
+          void e;
+        };
+        const hideStagingPopup = () => {
+          popupRef.current?.remove();
+          map.getCanvas().style.cursor = "";
+        };
+        map.on("mouseenter", "staging-point", showStagingPopup);
+        map.on("mouseleave", "staging-point", hideStagingPopup);
+      }
+
+      // Re-stack so fire markers stay above routes.
+      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
+    } catch (err) {
+      console.warn("routes layer error:", err);
+    }
+  }, [routingOutput, showRoutes, mapLoaded]);
+
   // ---- Wind particle layer (deck.gl overlay) ----
   useEffect(() => {
     const map = mapRef.current;
@@ -757,12 +1048,18 @@ export function IncidentMap() {
         setShowEvac={setShowEvac}
         showFirms={showFirms}
         setShowFirms={setShowFirms}
+        showRoutes={showRoutes}
+        setShowRoutes={setShowRoutes}
+        basemap={basemap}
+        setBasemap={setBasemap}
         showCone={showCone}
         setShowCone={setShowCone}
         hasCone={!!cone24h}
         wind={wind}
         evacCount={evacFiltered?.features.length ?? 0}
         firmsCount={firms?.features?.length ?? 0}
+        ingressCount={routingOutput?.payload?.primary_routes?.length ?? 0}
+        egressCount={routingOutput?.payload?.egress_routes?.length ?? 0}
       />
     </div>
   );
@@ -862,22 +1159,71 @@ function convexHull(points: Array<[number, number]>): Array<[number, number]> {
   return hull;
 }
 
+// Cap how many perimeter vertices feed the Minkowski sum so we don't blow up
+// (perimeter * cone vertices) for high-resolution WFIGS polygons.
+const MAX_PERIM_VERTICES = 96;
+
 function buildPerimeterCone(
   cone: GeoJSON.Polygon | GeoJSON.MultiPolygon,
   perimeter: GeoJSON.FeatureCollection | null,
+  incidentLon: number | null,
+  incidentLat: number | null,
 ): GeoJSON.Polygon {
-  const verts: Array<[number, number]> = [];
-  collectVertices(cone, verts);
+  const coneVerts: Array<[number, number]> = [];
+  collectVertices(cone, coneVerts);
+
+  const perimVerts: Array<[number, number]> = [];
   if (perimeter?.features?.length) {
     for (const f of perimeter.features) {
       const g = f.geometry;
       if (g?.type === "Polygon" || g?.type === "MultiPolygon") {
-        collectVertices(g, verts);
+        collectVertices(g, perimVerts);
       }
     }
   }
-  const ring = convexHull(verts);
-  return { type: "Polygon", coordinates: [ring] };
+
+  // Without a perimeter (or an incident anchor) we can't do the Minkowski
+  // sweep, so fall back to the bare cone hull.
+  if (
+    perimVerts.length === 0 ||
+    incidentLon == null ||
+    incidentLat == null
+  ) {
+    return { type: "Polygon", coordinates: [convexHull(coneVerts)] };
+  }
+
+  // The agent builds the cone with its rear vertex at the incident point.
+  // Cone-offsets relative to that anchor are what we sweep around the
+  // perimeter (Minkowski kernel).
+  const coneOffsets: Array<[number, number]> = coneVerts.map(([lo, la]) => [
+    lo - incidentLon,
+    la - incidentLat,
+  ]);
+
+  // Subsample dense perimeters so vertex-pair count stays bounded.
+  const stride = Math.max(
+    1,
+    Math.floor(perimVerts.length / MAX_PERIM_VERTICES),
+  );
+  const sampled: Array<[number, number]> = [];
+  for (let i = 0; i < perimVerts.length; i += stride) sampled.push(perimVerts[i]);
+
+  // Minkowski-sum vertex set: every cone offset translated to every
+  // sampled perimeter vertex. Convex-hulling this gives a shape whose rear
+  // matches the perimeter's downwind footprint and whose forward extent is
+  // the perimeter shape swept along the cone — i.e., the perimeter
+  // physically extended in the spread direction.
+  const swept: Array<[number, number]> = [];
+  for (const [px, py] of sampled) {
+    for (const [dx, dy] of coneOffsets) {
+      swept.push([px + dx, py + dy]);
+    }
+  }
+  // Keep the original perimeter vertices so the rear edge clings to the
+  // current fire outline even when the cone has degenerate zero-area bands.
+  for (const v of perimVerts) swept.push(v);
+
+  return { type: "Polygon", coordinates: [convexHull(swept)] };
 }
 
 function fmtInt(n: number | undefined | null): string {
@@ -963,12 +1309,18 @@ function Legend({
   setShowEvac,
   showFirms,
   setShowFirms,
+  showRoutes,
+  setShowRoutes,
+  basemap,
+  setBasemap,
   showCone,
   setShowCone,
   hasCone,
   wind,
   evacCount,
   firmsCount,
+  ingressCount,
+  egressCount,
 }: {
   hasPerimeter: boolean;
   showWind: boolean;
@@ -977,18 +1329,50 @@ function Legend({
   setShowEvac: (b: boolean) => void;
   showFirms: boolean;
   setShowFirms: (b: boolean) => void;
+  showRoutes: boolean;
+  setShowRoutes: (b: boolean) => void;
+  basemap: Basemap;
+  setBasemap: (b: Basemap) => void;
   showCone: boolean;
   setShowCone: (b: boolean) => void;
   hasCone: boolean;
   wind: WindGrid | undefined;
   evacCount: number;
   firmsCount: number;
+  ingressCount: number;
+  egressCount: number;
 }) {
   const center = wind?.vectors.length
     ? wind.vectors[Math.floor(wind.vectors.length / 2)]
     : null;
   return (
     <div className="absolute bottom-3 left-3 max-w-[260px] rounded-md bg-smoke-800/90 p-3 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
+      <div className="mb-1 font-semibold text-smoke-200">Basemap</div>
+      <div className="mb-2 inline-flex overflow-hidden rounded border border-smoke-700">
+        <button
+          type="button"
+          onClick={() => setBasemap("dark")}
+          className={`px-2 py-0.5 text-[10px] ${
+            basemap === "dark"
+              ? "bg-ember-600 text-smoke-50"
+              : "bg-smoke-900 text-smoke-300 hover:bg-smoke-800"
+          }`}
+        >
+          Dark
+        </button>
+        <button
+          type="button"
+          onClick={() => setBasemap("satellite")}
+          className={`px-2 py-0.5 text-[10px] ${
+            basemap === "satellite"
+              ? "bg-ember-600 text-smoke-50"
+              : "bg-smoke-900 text-smoke-300 hover:bg-smoke-800"
+          }`}
+        >
+          Satellite
+        </button>
+      </div>
+
       <div className="mb-1 font-semibold text-smoke-200">Layers</div>
 
       <div className="flex items-center gap-2">
@@ -1117,8 +1501,49 @@ function Legend({
         </div>
       )}
 
+      <label className="mt-2 flex cursor-pointer items-center gap-2">
+        <input
+          type="checkbox"
+          checked={showRoutes}
+          onChange={(e) => setShowRoutes(e.target.checked)}
+          className="h-3 w-3 accent-ember-500"
+        />
+        <span className="font-medium">
+          Agent routes ({ingressCount}+{egressCount})
+        </span>
+      </label>
+      {showRoutes && (ingressCount > 0 || egressCount > 0) && (
+        <div className="ml-5 mt-1 space-y-0.5 text-[10px] text-smoke-400">
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-5"
+              style={{
+                borderTop: "2px solid #dc2626",
+              }}
+            />
+            <span>Egress (incident → highway)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-5 border-t-2 border-dashed"
+              style={{ borderColor: "#fbbf24" }}
+            />
+            <span>Ingress (staging → fire)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
+            <span>Proposed staging</span>
+          </div>
+        </div>
+      )}
+      {showRoutes && ingressCount + egressCount === 0 && (
+        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-500">
+          waiting on routing_staging agent…
+        </div>
+      )}
+
       <div className="mt-2 text-[10px] text-smoke-500">
-        Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS
+        Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS · OSM/OSMnx
       </div>
     </div>
   );
