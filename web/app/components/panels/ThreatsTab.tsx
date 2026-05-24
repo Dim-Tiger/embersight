@@ -1,6 +1,8 @@
 "use client";
 
 import { useStore } from "@/lib/store";
+import { AlertTriangle } from "lucide-react";
+import { AgentActivityBanner } from "./AgentActivityBanner";
 import { AgentCard, KeyFindings, MetricGrid } from "./AgentCard";
 
 type ValuesRollup = {
@@ -137,6 +139,13 @@ export function ThreatsTab() {
             {vp.cone_source ? ` Cone source: ${vp.cone_source}.` : ""}
           </p>
         </header>
+
+        <AgentActivityBanner
+          title="Threat Analysis"
+          subtitle="Values · Terrain · Spread"
+          agents={["values_at_risk", "terrain_fuel", "spread_simulation"]}
+          icon={<AlertTriangle className="h-5 w-5" />}
+        />
 
         <AgentCard
           title="Values at Risk"
