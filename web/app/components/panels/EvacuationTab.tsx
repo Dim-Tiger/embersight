@@ -2,6 +2,8 @@
 
 import { useEvacZones } from "@/lib/queries";
 import { useStore } from "@/lib/store";
+import { Route } from "lucide-react";
+import { AgentActivityBanner } from "./AgentActivityBanner";
 import { AgentCard, KeyFindings } from "./AgentCard";
 
 type EvacPayload = {
@@ -35,6 +37,13 @@ export function EvacuationTab() {
             <span className="text-ember-200">PROPOSES</span> status changes.
           </p>
         </header>
+
+        <AgentActivityBanner
+          title="Evacuation Intelligence"
+          subtitle="Zone phasing · egress routes"
+          agents={["evacuation_intelligence"]}
+          icon={<Route className="h-5 w-5" />}
+        />
 
         <AgentCard
           title="Evacuation Intelligence"

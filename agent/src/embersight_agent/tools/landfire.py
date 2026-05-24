@@ -1,12 +1,15 @@
-"""LANDFIRE LFPS GP service wrapper (FBFM40 + slope + aspect + elevation + canopy).
+"""LANDFIRE ImageServer wrapper (FBFM40 + slope + aspect + elevation + canopy).
 
-Thin facade over the `landfire` PyPI package. Each public helper is a
-synchronous function that returns a small JSON-shaped dict; callers in
-async code should wrap them with `asyncio.to_thread` since the underlying
-LANDFIRE polling job is blocking.
+USGS publishes the same raster atlas through two paths:
+  - the LFPS GP service (async, queued, ~2 min per layer), and
+  - per-layer ArcGIS ImageServers with synchronous `exportImage` (~1 sec each).
+
+We use the ImageServer path. Each public helper is synchronous; callers in
+async code wrap them with `asyncio.to_thread` so the five layers fetch in
+parallel and the whole pull finishes in ~3-4 sec on a cold cache.
 
 Rasters are cached under /tmp/landfire-cache/<bbox-hash>/<layer>.tif so
-repeated runs in a dev session don't re-hit the public LFPS GP service.
+repeated runs in a dev session are served from disk.
 """
 
 from __future__ import annotations
@@ -14,24 +17,42 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-import zipfile
 from pathlib import Path
 from typing import Any
 
-# Resolved at module load — these are LFPS layer IDs for LANDFIRE 2022 (LF 2020 remap).
-FBFM40_LAYER = "220F40_22"
-CANOPY_COVER_LAYER = "220CC_22"
-SLOPE_DEG_LAYER = "SLPD2020"
-ASPECT_LAYER = "ASP2020"
-ELEVATION_LAYER = "ELEV2020"
+# Logical layer names — also used as cache keys, so existing on-disk caches
+# stay compatible across the LFPS→ImageServer rewrite.
+FBFM40_LAYER = "LF2022_FBFM40"
+CANOPY_COVER_LAYER = "LF2022_CC"
+SLOPE_DEG_LAYER = "LF2020_SlpD"
+ASPECT_LAYER = "LF2020_Asp"
+ELEVATION_LAYER = "LF2020_Elev"
 
-LANDFIRE_VERSION = "LF 2020 (2022 capable)"
-LANDFIRE_SOURCE_URL = (
-    "https://lfps.usgs.gov/arcgis/rest/services/LandfireProductService/"
-    "GPServer/LandfireProductService"
-)
+LANDFIRE_VERSION = "LF 2022 (fuel/canopy) + LF 2020 (topographic)"
+
+# Per-layer ImageServer service paths (CONUS variant — AK/HI not needed for CA).
+_IMAGE_SERVER_BASE = "https://lfps.usgs.gov/arcgis/rest/services"
+_LAYER_SERVICES: dict[str, str] = {
+    FBFM40_LAYER:       "Landfire_LF2022/LF2022_FBFM40_CONUS",
+    CANOPY_COVER_LAYER: "Landfire_LF2022/LF2022_CC_CONUS",
+    SLOPE_DEG_LAYER:    "Landfire_Topo/LF2020_SlpD_CONUS",
+    ASPECT_LAYER:       "Landfire_Topo/LF2020_Asp_CONUS",
+    ELEVATION_LAYER:    "Landfire_Topo/LF2020_Elev_CONUS",
+}
+LANDFIRE_SOURCE_URL = _IMAGE_SERVER_BASE
+LANDFIRE_USER_AGENT = "embersight-agent (+https://github.com/Dim-Tiger/embersight)"
 
 CACHE_DIR = Path(os.environ.get("EMBERSIGHT_LANDFIRE_CACHE", "/tmp/landfire-cache"))
+
+# exportImage requires a pixel size. LANDFIRE rasters are native 30 m; clamp to
+# a square that respects native resolution while staying under ArcGIS's
+# practical 4096-pixel ceiling.
+_NATIVE_RES_M = 30.0
+_MAX_PIXELS = 2048
+
+# Hard ceiling on a single exportImage call — even cold network paths return
+# in seconds, so anything past this is a hung server, not a slow one.
+_EXPORT_TIMEOUT_SEC = float(os.environ.get("EMBERSIGHT_LANDFIRE_TIMEOUT", "30"))
 
 # Scott & Burgan FBFM40 pixel value -> short label.
 # Reference: Scott & Burgan 2005, RMRS-GTR-153; LANDFIRE uses the same codes
@@ -124,29 +145,76 @@ def _cache_path_for(bbox: tuple[float, float, float, float], layer: str) -> Path
     return sub / f"{layer}.tif"
 
 
+def _pixel_size(bbox: tuple[float, float, float, float]) -> tuple[int, int]:
+    """Pick a (width, height) for exportImage that respects native 30 m resolution.
+
+    Degrees → metres uses cos(lat) for longitude and a flat 111 km for latitude.
+    Result is clamped to `_MAX_PIXELS` per axis to keep ArcGIS happy.
+    """
+    x1, y1, x2, y2 = _normalize_bbox(bbox)
+    mid_lat = (y1 + y2) / 2.0
+    width_m = (x2 - x1) * 111_000.0 * max(math.cos(math.radians(mid_lat)), 0.1)
+    height_m = (y2 - y1) * 111_000.0
+    w = max(8, min(_MAX_PIXELS, int(round(width_m / _NATIVE_RES_M))))
+    h = max(8, min(_MAX_PIXELS, int(round(height_m / _NATIVE_RES_M))))
+    return w, h
+
+
+def _export_image(bbox: tuple[float, float, float, float], layer: str, dest: Path) -> None:
+    """Sync GET against the layer's ImageServer/exportImage; write a GeoTIFF."""
+    import requests  # lazy
+
+    service = _LAYER_SERVICES.get(layer)
+    if service is None:
+        raise ValueError(f"no ImageServer mapping for layer {layer!r}")
+
+    x1, y1, x2, y2 = _normalize_bbox(bbox)
+    w, h = _pixel_size(bbox)
+    params = {
+        "bbox": f"{x1},{y1},{x2},{y2}",
+        "bboxSR": "4326",
+        "imageSR": "4326",
+        "size": f"{w},{h}",
+        "format": "tiff",
+        "interpolation": "RSP_NearestNeighbor",  # categorical FBFM40/aspect must not interpolate
+        "f": "image",
+    }
+    url = f"{_IMAGE_SERVER_BASE}/{service}/ImageServer/exportImage"
+    headers = {"User-Agent": LANDFIRE_USER_AGENT}
+
+    with requests.get(
+        url, params=params, headers=headers, stream=True, timeout=_EXPORT_TIMEOUT_SEC
+    ) as r:
+        r.raise_for_status()
+        # ArcGIS quietly returns HTML on errors with a 200 — verify content type.
+        ctype = r.headers.get("Content-Type", "")
+        if "tiff" not in ctype.lower():
+            body = r.content[:400].decode("utf-8", "replace")
+            raise RuntimeError(
+                f"exportImage for {layer} returned non-TIFF ({ctype}): {body}"
+            )
+        with open(dest, "wb") as out:
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    out.write(chunk)
+
+
 def _fetch_layer(bbox: tuple[float, float, float, float], layer: str) -> Path:
     """Download a single LANDFIRE layer to the local cache; return the .tif path."""
     tif_path = _cache_path_for(bbox, layer)
     if tif_path.exists() and tif_path.stat().st_size > 0:
         return tif_path
 
-    import landfire  # lazy: heavy + optional
-
-    zip_path = tif_path.with_suffix(".zip")
-    lf = landfire.Landfire(bbox=_bbox_str(bbox), output_crs="4326")
-    lf.request_data(layers=[layer], output_path=str(zip_path), show_status=False)
-
-    with zipfile.ZipFile(zip_path) as zf:
-        tif_members = [n for n in zf.namelist() if n.lower().endswith(".tif")]
-        if not tif_members:
-            raise RuntimeError(f"LANDFIRE response for {layer} contained no .tif")
-        with zf.open(tif_members[0]) as src, open(tif_path, "wb") as dst:
-            dst.write(src.read())
-
+    tmp_path = tif_path.with_suffix(".tif.partial")
     try:
-        zip_path.unlink()
-    except FileNotFoundError:
-        pass
+        _export_image(bbox, layer, tmp_path)
+        tmp_path.replace(tif_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
     return tif_path
 
@@ -229,12 +297,22 @@ def get_fuel_model(bbox: tuple[float, float, float, float]) -> dict[str, Any]:
     }
 
 
-def _summarize_continuous(tif: Path, nodata_max: float | None = None) -> dict[str, float]:
+def _summarize_continuous(
+    tif: Path,
+    valid_range: tuple[float, float] | None = None,
+) -> dict[str, float]:
+    """Mean/percentile stats over the in-range pixels of a continuous raster.
+
+    `valid_range=(lo, hi)` drops pixels outside [lo, hi]. ImageServer GeoTIFFs
+    do not preserve nodata tags, so int16 sentinels (e.g. -32768) leak in and
+    have to be filtered out by physical bounds — clamp at the caller.
+    """
     import numpy as np
 
     values = _read_raster_values(tif).astype(float)
-    if nodata_max is not None:
-        values = values[values < nodata_max]
+    if valid_range is not None:
+        lo, hi = valid_range
+        values = values[(values >= lo) & (values <= hi)]
     if values.size == 0:
         return {"mean": float("nan"), "p10": float("nan"), "p90": float("nan"),
                 "min": float("nan"), "max": float("nan"), "pixels": 0}
@@ -253,8 +331,9 @@ def _aspect_distribution(tif: Path) -> dict[str, float]:
     import numpy as np
 
     values = _read_raster_values(tif).astype(float)
-    # LANDFIRE aspect uses -1 for flat; clip out and count separately.
-    flat = values[values < 0].size
+    # LANDFIRE aspect: -1 = flat, 0-360 = azimuth. Anything else (e.g. the
+    # int16 -32768 sentinel ImageServer leaves untagged) is nodata, not flat.
+    flat = values[(values >= -1) & (values < 0)].size
     aspects = values[(values >= 0) & (values <= 360)]
     total = aspects.size + flat
     if total == 0:
@@ -280,9 +359,9 @@ def get_terrain(bbox: tuple[float, float, float, float]) -> dict[str, Any]:
     elev_tif = _fetch_layer(bbox, ELEVATION_LAYER)
 
     return {
-        "slope_deg": _summarize_continuous(slope_tif),
+        "slope_deg": _summarize_continuous(slope_tif, valid_range=(0.0, 90.0)),
         "aspect_distribution": _aspect_distribution(aspect_tif),
-        "elevation_m": _summarize_continuous(elev_tif),
+        "elevation_m": _summarize_continuous(elev_tif, valid_range=(-500.0, 9000.0)),
         "layers": {
             "slope": SLOPE_DEG_LAYER,
             "aspect": ASPECT_LAYER,

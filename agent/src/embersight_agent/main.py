@@ -2,15 +2,14 @@
 
 Exposes:
   GET  /healthz
-  POST /agent/stream     -> Server-Sent Events of agent activity
-  POST /agent/resume     -> resume a paused interrupt with Command(resume=...)
-  GET  /agent/pending    -> list checkpoints currently sitting on an interrupt
+  POST /agent/stream     -> SSE: briefing OR chat run (selected via `mode`)
+  POST /agent/resume     -> SSE: resume a paused interrupt with Command(resume=...)
+  GET  /agent/pending/{thread_id} -> peek at a paused interrupt
 
 Events emitted on /agent/stream follow the Vercel AI SDK "data part" shape:
   data: {"type":"agent-event", "value": {...}}\\n\\n
-Plus framing events: start, interrupt_pending, done, error, and
-`dialogue` events that surface the synthesized orchestrator <-> subagent
-conversation alongside the raw LangGraph events.
+Framing events: start, tool_call_start, tool_call_end, chat_token,
+interrupt_pending, done, error.
 """
 
 from __future__ import annotations
@@ -19,11 +18,12 @@ import json
 import logging
 import os
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -35,7 +35,7 @@ load_dotenv()
 log = logging.getLogger("embersight")
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="EmberSight Agent", version="0.1.0")
+app = FastAPI(title="EmberSight Agent", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,8 +52,10 @@ app.add_middleware(
 
 class StreamRequest(BaseModel):
     incident: Incident
+    mode: Literal["briefing", "chat"] = "briefing"
+    message: str = ""  # used in chat mode
     operational_period: int = 1
-    user_query: str = ""
+    user_query: str = ""  # legacy, kept for back-compat with the old client
     thread_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
 
@@ -81,118 +83,18 @@ def _sse(event: str, payload: Any) -> dict:
     return {"event": event, "data": json.dumps(payload, default=str)}
 
 
-# Short, human-readable task descriptions for each subagent. Surfaced as
-# synthesized "Orchestrator -> <agent>" dialogue messages when the
-# corresponding LangGraph node starts.
-AGENT_TASK_DESCRIPTIONS: dict[str, str] = {
-    "weather_wind": (
-        "Analyze 24h fire weather (HRRR + RTMA + RAWS + NWS alerts) and "
-        "compute a Red Flag flag plus critical window."
-    ),
-    "terrain_fuel": (
-        "Pull terrain (slope/aspect) and fuel beds (LANDFIRE FBFM40) "
-        "across the projected AOI."
-    ),
-    "values_at_risk": (
-        "Identify structures, schools, hospitals, and critical "
-        "infrastructure inside the projected spread cone."
-    ),
-    "routing_staging": (
-        "Find roads, staging candidates, and water sources within reach "
-        "of the incident."
-    ),
-    "spread_simulation": (
-        "Run a wind-and-fuel-driven spread model and produce 1/6/12/24h "
-        "spread cones."
-    ),
-    "resource_recommendation": (
-        "Recommend engines, hand crews, dozers, and aviation based on "
-        "spread + values. PROPOSE only — IC must approve."
-    ),
-    "evacuation_intelligence": (
-        "Propose evacuation phasing and route-status changes for zones "
-        "intersecting the spread cone. PROPOSE only."
-    ),
-    "master_ic": (
-        "Synthesize all subagent outputs into a draft ICS 201/202/204 "
-        "and pause for IC approval."
-    ),
-}
-
-
-def _dialogue_event(
-    from_: str,
-    to: str,
-    text: str,
-    *,
-    kind: str = "message",
-    extra: dict | None = None,
-) -> dict:
-    """Build a payload for the `dialogue` SSE event.
-
-    The frontend renders these as a chat-style transcript between the
-    orchestrator and each subagent. `kind` is "request" / "response" /
-    "thinking" so the UI can style them differently.
-    """
-    payload: dict = {"from": from_, "to": to, "text": text, "kind": kind}
-    if extra:
-        payload.update(extra)
-    return payload
-
-
-def _extract_agent_output_from_chain_end(
-    name: str, data: Any
-) -> dict | None:
-    """Pull the AgentOutput dict for `name` from an on_chain_end event."""
-    if not isinstance(data, dict):
-        return None
-    output = data.get("output")
-    if not isinstance(output, dict):
-        return None
-    outputs = output.get("outputs")
-    if not isinstance(outputs, dict):
-        return None
-    ao = outputs.get(name)
-    if isinstance(ao, dict):
-        return ao
-    # Pydantic model — coerce via _safe
-    safe = _safe(ao)
-    return safe if isinstance(safe, dict) else None
-
-
-async def _run_and_stream(
-    initial_state_or_command: AgentState | Command,
+async def _stream_briefing(
+    initial_state: AgentState | Command,
     thread_id: str,
 ) -> AsyncIterator[dict]:
     config = {"configurable": {"thread_id": thread_id}}
-    async with compiled_graph() as graph:
-        yield _sse("start", {"thread_id": thread_id})
-        # Once-only "orchestrator kicks off the team" dialogue marker so the
-        # UI has a deterministic first message.
-        yield _sse(
-            "dialogue",
-            _dialogue_event(
-                from_="orchestrator",
-                to="team",
-                text=(
-                    "Kicking off analysis. Fanning out to the seven "
-                    "specialist subagents."
-                ),
-                kind="kickoff",
-            ),
-        )
+    async with compiled_graph(mode="briefing") as graph:
+        yield _sse("start", {"thread_id": thread_id, "mode": "briefing"})
         try:
             async for event in graph.astream_events(
-                initial_state_or_command, config=config, version="v2"
+                initial_state, config=config, version="v2"
             ):
-                # Forward only the high-signal events. LangGraph emits a lot
-                # of low-level LLM-token events too; the UI consumes
-                # node-start/end + custom data emissions.
                 kind = event.get("event", "")
-                name = event.get("name")
-                metadata = event.get("metadata") or {}
-                langgraph_node = metadata.get("langgraph_node")
-
                 if kind in (
                     "on_chain_start",
                     "on_chain_end",
@@ -203,59 +105,13 @@ async def _run_and_stream(
                         "agent-event",
                         {
                             "kind": kind,
-                            "name": name,
+                            "name": event.get("name"),
                             "data": _safe(event.get("data")),
                             "run_id": event.get("run_id"),
                             "tags": event.get("tags", []),
-                            "langgraph_node": langgraph_node,
                         },
                     )
 
-                # ---- Synthesize dialogue at agent boundaries ---------------
-                if (
-                    kind == "on_chain_start"
-                    and isinstance(name, str)
-                    and name in AGENT_TASK_DESCRIPTIONS
-                ):
-                    yield _sse(
-                        "dialogue",
-                        _dialogue_event(
-                            from_="orchestrator",
-                            to=name,
-                            text=AGENT_TASK_DESCRIPTIONS[name],
-                            kind="request",
-                        ),
-                    )
-                elif (
-                    kind == "on_chain_end"
-                    and isinstance(name, str)
-                    and name in AGENT_TASK_DESCRIPTIONS
-                ):
-                    ao = _extract_agent_output_from_chain_end(
-                        name, event.get("data")
-                    )
-                    if ao:
-                        narrative = ao.get("narrative") or ""
-                        conf = ao.get("confidence")
-                        yield _sse(
-                            "dialogue",
-                            _dialogue_event(
-                                from_=name,
-                                to="orchestrator",
-                                text=narrative,
-                                kind="response",
-                                extra={
-                                    "confidence": conf,
-                                    "confidence_driver": ao.get(
-                                        "confidence_driver"
-                                    ),
-                                },
-                            ),
-                        )
-
-            # After astream_events drains, check whether the graph paused
-            # on an interrupt. If yes, surface it so the UI can present an
-            # approval card.
             snapshot = await graph.aget_state(config)
             pending = _extract_pending_interrupt(snapshot)
             if pending is not None:
@@ -263,9 +119,88 @@ async def _run_and_stream(
                     "interrupt_pending",
                     {"thread_id": thread_id, "interrupt": pending},
                 )
-            yield _sse("done", {"thread_id": thread_id})
+            yield _sse("done", {"thread_id": thread_id, "mode": "briefing"})
         except Exception as exc:  # noqa: BLE001
-            log.exception("agent stream error")
+            log.exception("briefing stream error")
+            yield _sse("error", {"message": str(exc)})
+
+
+async def _stream_chat(
+    state_patch: dict[str, Any],
+    thread_id: str,
+) -> AsyncIterator[dict]:
+    """Run one chat turn. The patch contains the new HumanMessage plus
+    enough state metadata (incident etc.) for the master_ic_chat node."""
+    config = {"configurable": {"thread_id": thread_id}}
+    async with compiled_graph(mode="chat") as graph:
+        yield _sse("start", {"thread_id": thread_id, "mode": "chat"})
+        try:
+            async for event in graph.astream_events(
+                state_patch, config=config, version="v2"
+            ):
+                kind = event.get("event", "")
+                name = event.get("name")
+                data = event.get("data") or {}
+
+                if kind == "on_tool_start" and name and name.startswith("consult_"):
+                    yield _sse(
+                        "tool_call_start",
+                        {
+                            "name": name,
+                            "args": _safe(data.get("input")),
+                            "run_id": event.get("run_id"),
+                        },
+                    )
+                elif kind == "on_tool_end" and name and name.startswith("consult_"):
+                    output = _safe(data.get("output"))
+                    yield _sse(
+                        "tool_call_end",
+                        {
+                            "name": name,
+                            "summary": output,
+                            "run_id": event.get("run_id"),
+                        },
+                    )
+                elif kind == "on_chat_model_stream":
+                    chunk = data.get("chunk")
+                    delta = ""
+                    if chunk is not None:
+                        c = getattr(chunk, "content", "")
+                        if isinstance(c, list):
+                            # Anthropic streams content as a list of blocks
+                            delta = "".join(
+                                (b.get("text", "") if isinstance(b, dict) else "")
+                                for b in c
+                            )
+                        else:
+                            delta = c if isinstance(c, str) else str(c)
+                    if delta:
+                        yield _sse(
+                            "chat_token",
+                            {"delta": delta, "run_id": event.get("run_id")},
+                        )
+                elif kind in ("on_chain_start", "on_chain_end"):
+                    yield _sse(
+                        "agent-event",
+                        {
+                            "kind": kind,
+                            "name": name,
+                            "data": _safe(data),
+                            "run_id": event.get("run_id"),
+                            "tags": event.get("tags", []),
+                        },
+                    )
+
+            snapshot = await graph.aget_state(config)
+            pending = _extract_pending_interrupt(snapshot)
+            if pending is not None:
+                yield _sse(
+                    "interrupt_pending",
+                    {"thread_id": thread_id, "interrupt": pending},
+                )
+            yield _sse("done", {"thread_id": thread_id, "mode": "chat"})
+        except Exception as exc:  # noqa: BLE001
+            log.exception("chat stream error")
             yield _sse("error", {"message": str(exc)})
 
 
@@ -299,24 +234,40 @@ def _extract_pending_interrupt(snapshot: Any) -> dict | None:
 
 @app.post("/agent/stream")
 async def agent_stream(req: StreamRequest) -> EventSourceResponse:
-    initial = AgentState(
-        incident=req.incident,
-        operational_period=req.operational_period,
-        user_query=req.user_query,
-    )
-    return EventSourceResponse(_run_and_stream(initial, req.thread_id))
+    if req.mode == "briefing":
+        initial = AgentState(
+            incident=req.incident,
+            operational_period=req.operational_period,
+            mode="briefing",
+            user_query=req.user_query,
+        )
+        return EventSourceResponse(_stream_briefing(initial, req.thread_id))
+
+    # chat mode
+    text = (req.message or req.user_query or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="message required in chat mode")
+    patch: dict[str, Any] = {
+        "messages": [HumanMessage(content=text)],
+        "incident": req.incident,
+        "operational_period": req.operational_period,
+        "mode": "chat",
+    }
+    return EventSourceResponse(_stream_chat(patch, req.thread_id))
 
 
 @app.post("/agent/resume")
 async def agent_resume(req: ResumeRequest) -> EventSourceResponse:
     cmd = Command(resume=req.decision)
-    return EventSourceResponse(_run_and_stream(cmd, req.thread_id))
+    # Resumes are always against the briefing graph (only briefing emits
+    # interrupts in v0.2). Same checkpointer, so the thread state is intact.
+    return EventSourceResponse(_stream_briefing(cmd, req.thread_id))
 
 
 @app.get("/agent/pending/{thread_id}")
 async def agent_pending(thread_id: str) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
-    async with compiled_graph() as graph:
+    async with compiled_graph(mode="briefing") as graph:
         snapshot = await graph.aget_state(config)
         pending = _extract_pending_interrupt(snapshot)
         if pending is None:

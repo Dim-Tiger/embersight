@@ -9,6 +9,7 @@ trigger-point violations.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import pathlib
@@ -18,6 +19,10 @@ from typing import Any
 
 from ..hitl import audit_entry, request_human_decision
 from ..state import AgentOutput, AgentState, CitationBundle, Dataset, Model
+
+# Average residents per residential structure — same default the evac tool uses
+# so the population number on the cone matches the evac intel agent's math.
+_HOUSEHOLD_SIZE = 2.5
 
 AGENT_NAME = "spread_simulation"
 _PROMPT_PATH = pathlib.Path(__file__).parent.parent / "prompts" / "spread_simulation.md"
@@ -104,26 +109,71 @@ async def _llm_narrate(context: str) -> str | None:
 
 
 def _extract_weather(weather_output: AgentOutput | None) -> dict:
-    """Pull wind speed, wind direction, and RAWS fuel moisture from weather payload."""
+    """Pull wind speed, wind direction, and RAWS fuel moisture from weather payload.
+
+    Preferred source is ``payload.critical_window`` (the worst HRRR hour in the
+    24-h window, which is the right hour to drive a spread cone). Falls back to
+    the flat top-level ``wind_speed_mph`` / ``wind_dir_deg`` keys when the
+    critical window is unavailable.
+
+    Both sources report wind direction in meteorological "FROM" convention. The
+    returned ``wind_dir_deg`` preserves that convention; the caller flips it by
+    180° before feeding pyretechnics, which expects fire-head "TO" direction.
+    """
     if weather_output is None:
         return {}
     p = weather_output.payload or {}
+    cw = p.get("critical_window") or {}
+
+    wind_speed = cw.get("wind_speed_mph")
+    if wind_speed is None:
+        wind_speed = p.get("wind_speed_mph", 15.0)
+
+    # critical_window uses HRRR's wind_direction_deg; flat path uses wind_dir_deg.
+    wind_dir = cw.get("wind_direction_deg")
+    if wind_dir is None:
+        wind_dir = p.get("wind_dir_deg", 270.0)
+
     return {
-        "wind_speed_mph": float(p.get("wind_speed_mph", 15.0)),
-        "wind_dir_deg": float(p.get("wind_dir_deg", 270.0)),  # TO direction (downwind)
+        "wind_speed_mph": float(wind_speed),
+        "wind_dir_deg": float(wind_dir),  # MET "FROM" convention
         "fuel_moisture": p.get("fuel_moisture", {}),
-        "rh_pct": float(p.get("rh_pct", 20.0)),
-        "temp_f": float(p.get("temp_f", 90.0)),
+        "rh_pct": float(cw.get("rh_pct", p.get("rh_pct", 20.0))),
+        "temp_f": float(cw.get("temp_f", p.get("temp_f", 90.0))),
+        "_source": "critical_window" if cw else "flat",
     }
 
 
 def _extract_terrain_fuel(terrain_output: AgentOutput | None) -> dict:
-    """Pull fuel model, slope, and aspect from terrain payload."""
+    """Pull fuel model, slope, and aspect from terrain payload.
+
+    ``fuel_model`` may arrive in three shapes — handled in order:
+      1. Dict with ``dominant_classes: [{code, fraction}, ...]`` (top-rank wins).
+      2. Plain FBFM40 code string (the flat-projection contract).
+      3. Missing — fall back to ``payload.fuel_detail.dominant_classes``
+         (the rich LANDFIRE structure terrain_fuel publishes alongside the
+         flat code).
+    """
     if terrain_output is None:
         return {}
     p = terrain_output.payload or {}
+
+    code: str | None = None
+    fuel_field = p.get("fuel_model")
+    if isinstance(fuel_field, dict):
+        classes = fuel_field.get("dominant_classes") or []
+        if classes:
+            code = classes[0].get("code")
+    elif isinstance(fuel_field, str) and fuel_field:
+        code = fuel_field
+    if not code:
+        detail = p.get("fuel_detail") or {}
+        classes = detail.get("dominant_classes") or []
+        if classes:
+            code = classes[0].get("code")
+
     return {
-        "fuel_model": str(p.get("fuel_model", "GS2")),
+        "fuel_model": code or "GS2",
         "slope_pct": float(p.get("slope_pct", 15.0)),
         "aspect_deg": float(p.get("aspect_deg", 225.0)),
     }
@@ -205,6 +255,60 @@ def _cones_to_geojson(
 
 
 # --------------------------------------------------------------------------- #
+# High-risk zone derivation (from cone, sans Cal OES Zonehaven cross-ref)
+# --------------------------------------------------------------------------- #
+
+
+_CARDINALS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def _bearing_to_cardinal(deg: float) -> str:
+    """8-point compass bin. 0° = N, 90° = E, increasing clockwise."""
+    idx = int(((deg + 22.5) % 360.0) // 45.0)
+    return _CARDINALS[idx]
+
+
+def _high_risk_zones(mc_result: dict) -> list[dict]:
+    """Derive high-risk sectors from the p75 Monte-Carlo band per horizon.
+
+    Without a Cal OES Zonehaven polygon set loaded, we cannot publish real
+    zone IDs; this is a sector descriptor good enough for the IC dashboard
+    and master_ic headline routing. Each entry names the cardinal heading
+    of the p75 band's centroid, distance from ignition, projected area,
+    and horizon — i.e. "where the fire is most likely to be in N hours".
+    """
+    zones: list[dict] = []
+    for h in (6, 12, 24):
+        entry = mc_result.get(h)
+        if not entry:
+            continue
+        bands = entry.get("bands", [])
+        if len(bands) < 3:
+            continue
+        p75 = bands[2]
+        if p75 is None or p75.is_empty:
+            continue
+        cx, cy = p75.centroid.x, p75.centroid.y
+        # Convert local (east=x, north=y) centroid into compass bearing.
+        bearing = (math.degrees(math.atan2(cx, cy)) + 360.0) % 360.0
+        distance_km = math.hypot(cx, cy) / 1000.0
+        area_km2 = p75.area / 1_000_000.0
+        sector = _bearing_to_cardinal(bearing)
+        zones.append(
+            {
+                "id": f"head-{h}h-{sector}",
+                "sector": sector,
+                "bearing_deg": round(bearing, 1),
+                "distance_km": round(distance_km, 2),
+                "horizon_h": h,
+                "probability_min": 0.75,
+                "area_km2": round(area_km2, 2),
+            }
+        )
+    return zones
+
+
+# --------------------------------------------------------------------------- #
 # Confidence from MC ensemble
 # --------------------------------------------------------------------------- #
 
@@ -230,6 +334,124 @@ def _mc_confidence(mc_result: dict, horizon: int = 24) -> tuple[float, str]:
     else:
         driver = "high directional/moisture uncertainty — wide spread cone"
     return confidence, driver
+
+
+# --------------------------------------------------------------------------- #
+# Cone-impact: population + critical infrastructure inside the 24h cone
+# --------------------------------------------------------------------------- #
+
+
+def _cone_geojson_to_wkt(cone_geojson: dict | None) -> str | None:
+    """Convert the 24h cone GeoJSON polygon to a WKT string for spatial joins."""
+    if not cone_geojson:
+        return None
+    try:
+        from shapely.geometry import shape  # noqa: PLC0415
+
+        return shape(cone_geojson).wkt
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _wkt_bbox(polygon_wkt: str) -> tuple[float, float, float, float] | None:
+    try:
+        from shapely import wkt  # noqa: PLC0415
+
+        geom = wkt.loads(polygon_wkt)
+        minx, miny, maxx, maxy = geom.bounds
+        return float(minx), float(miny), float(maxx), float(maxy)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _gather_cone_impact(polygon_wkt: str, bbox: tuple[float, float, float, float]) -> dict:
+    """Run all six spatial queries in parallel and roll them up.
+
+    Mirrors the values_at_risk fan-out but is computed against the actual
+    spread cone the agent just produced so the cone label is consistent
+    with the geometry it describes.
+    """
+    from ..tools.buildings import query_ms_buildings, query_usa_structures
+    from ..tools.evac import estimate_population
+    from ..tools.infra import (
+        query_critical_facilities,
+        query_hospitals,
+        query_schools,
+        query_transmission_lines,
+    )
+
+    loop = asyncio.get_running_loop()
+    tasks = {
+        "ms_buildings": loop.run_in_executor(None, query_ms_buildings, polygon_wkt),
+        "usa_structures": loop.run_in_executor(None, query_usa_structures, polygon_wkt),
+        "hospitals": loop.run_in_executor(None, query_hospitals, bbox),
+        "schools": loop.run_in_executor(None, query_schools, bbox),
+        "transmission": loop.run_in_executor(None, query_transmission_lines, bbox),
+        "critical_facilities": loop.run_in_executor(None, query_critical_facilities, bbox),
+        "population_est": loop.run_in_executor(None, estimate_population, polygon_wkt),
+    }
+    raw: dict[str, Any] = {}
+    for key, fut in tasks.items():
+        try:
+            raw[key] = await fut
+        except Exception as exc:  # noqa: BLE001
+            raw[key] = {"error": f"task:{exc}"}
+
+    ms = raw.get("ms_buildings") or {}
+    usa = raw.get("usa_structures") or {}
+    hospitals = [h for h in (raw.get("hospitals") or []) if isinstance(h, dict) and "error" not in h]
+    schools = [s for s in (raw.get("schools") or []) if isinstance(s, dict) and "error" not in s]
+    lines = [ln for ln in (raw.get("transmission") or []) if isinstance(ln, dict) and "error" not in ln]
+    critical = raw.get("critical_facilities") or {}
+    by_occ = (usa.get("by_occupancy") or {}) if isinstance(usa, dict) else {}
+
+    residential = int(by_occ.get("Residential", 0) or 0)
+    # Two population estimators; take the larger as a defensible upper bound for
+    # the cone label (footprint-density vs. residential-occupancy * household).
+    pop_from_residential = int(round(residential * _HOUSEHOLD_SIZE))
+    pop_from_density = (
+        int(raw.get("population_est", 0))
+        if not isinstance(raw.get("population_est"), dict)
+        else 0
+    )
+    population_estimate = max(pop_from_residential, pop_from_density)
+
+    return {
+        "population_estimate": population_estimate,
+        "structures_total": int(ms.get("count", 0)) if isinstance(ms, dict) else 0,
+        "residential_count": residential,
+        "commercial_count": int(by_occ.get("Commercial", 0) or 0),
+        "public_count": int(by_occ.get("Public", 0) or 0),
+        "industrial_count": int(by_occ.get("Industrial", 0) or 0),
+        "hospitals_count": len(hospitals),
+        "hospitals_total_beds": sum(int(h.get("beds", 0) or 0) for h in hospitals),
+        "schools_count": len(schools),
+        "schools_total_enrollment": sum(int(s.get("enrollment", 0) or 0) for s in schools),
+        "transmission_segments": len(lines),
+        "transmission_max_kv": max(
+            (float(ln.get("voltage_kv", 0) or 0) for ln in lines),
+            default=0.0,
+        ),
+        "critical_facilities_total": (
+            int(critical.get("total", 0)) if isinstance(critical, dict) else 0
+        ),
+    }
+
+
+def _impact_findings(impact: dict) -> list[str]:
+    """Headline bullets used in the cone label and key_findings list."""
+    return [
+        f"~{impact['population_estimate']:,} people in 24h cone",
+        f"{impact['residential_count']:,} residential structures "
+        f"({impact['structures_total']:,} total)",
+        f"{impact['hospitals_count']} hospitals "
+        f"({impact['hospitals_total_beds']:,} beds), "
+        f"{impact['schools_count']} schools "
+        f"({impact['schools_total_enrollment']:,} students)",
+        f"{impact['transmission_segments']} transmission segments "
+        f"(max {impact['transmission_max_kv']:.0f} kV), "
+        f"{impact['critical_facilities_total']} critical facilities",
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -267,12 +489,18 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     # ------------------------------------------------------------------ #
     # 2. Build base inputs for Monte Carlo
     # ------------------------------------------------------------------ #
+    # Weather reports wind in MET FROM convention; pyretechnics_spread expects
+    # the fire-head TO direction (downwind heading). Flip by 180° here so the
+    # ellipse rotates correctly, then preserve the FROM value in the output
+    # payload for display.
+    wind_from_deg = weather.get("wind_dir_deg", 270.0)
+    wind_to_deg = (wind_from_deg + 180.0) % 360.0
     base_inputs = {
         "fuel_model": terrain.get("fuel_model", "GS2"),
         "slope_pct": terrain.get("slope_pct", 15.0),
         "aspect_deg": terrain.get("aspect_deg", 225.0),
         "wind_speed_mph": weather.get("wind_speed_mph", 15.0),
-        "wind_dir_deg": weather.get("wind_dir_deg", 270.0),
+        "wind_dir_deg": wind_to_deg,
         "fuel_moisture": fm,
     }
 
@@ -293,6 +521,22 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     cones_geojson, cone_bands = _cones_to_geojson(
         mc_result, lat0, lon0, tools["polygon_local_to_geojson"]
     )
+
+    high_risk_zones = _high_risk_zones(mc_result)
+
+    # ------------------------------------------------------------------ #
+    # 5b. Cone impact — population + critical infra inside the 24h cone
+    # ------------------------------------------------------------------ #
+    cone_impact: dict | None = None
+    cone_24h_geojson = cones_geojson.get("24h")
+    cone_24h_wkt = _cone_geojson_to_wkt(cone_24h_geojson)
+    if cone_24h_wkt:
+        bbox = _wkt_bbox(cone_24h_wkt)
+        if bbox is not None:
+            try:
+                cone_impact = await _gather_cone_impact(cone_24h_wkt, bbox)
+            except Exception as exc:  # noqa: BLE001
+                cone_impact = {"error": f"impact_gather_failed:{exc}"}
 
     # 24-hour p25 burn area (km²) — key metric
     burn_area_km2 = None
@@ -377,6 +621,15 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     # ------------------------------------------------------------------ #
     # 8. LLM narrative
     # ------------------------------------------------------------------ #
+    impact_str = ""
+    if cone_impact and "error" not in cone_impact:
+        impact_str = (
+            f" | Cone impact: ~{cone_impact['population_estimate']:,} people, "
+            f"{cone_impact['residential_count']:,} residences, "
+            f"{cone_impact['hospitals_count']} hospitals, "
+            f"{cone_impact['schools_count']} schools, "
+            f"{cone_impact['critical_facilities_total']} critical facilities"
+        )
     context_for_llm = (
         f"Incident: {incident_name} | Fuel: {base_inputs['fuel_model']} | "
         f"Slope: {base_inputs['slope_pct']}% | Wind: {base_inputs['wind_speed_mph']} mph "
@@ -387,18 +640,30 @@ async def run(state: AgentState) -> dict:  # noqa: C901
         f"24h p25 burn area: {burn_area_km2} km² | "
         f"Trigger breaches: {trigger_breaches} | "
         f"Confidence: {confidence:.2f} ({confidence_driver})"
+        f"{impact_str}"
     )
     llm_narrative = await _llm_narrate(context_for_llm)
 
     if not llm_narrative:
         ros_mph = meta.get("ros_fpm_mean", 0.0) * 60.0 / 5280.0
         ros_chains = meta.get("ros_fpm_mean", 0.0) * 60.0 / 66.0
+        impact_sentence = ""
+        if cone_impact and "error" not in cone_impact:
+            impact_sentence = (
+                f"Projected to expose ~{cone_impact['population_estimate']:,} people, "
+                f"{cone_impact['residential_count']:,} residences, "
+                f"{cone_impact['hospitals_count']} hospitals, "
+                f"{cone_impact['schools_count']} schools, and "
+                f"{cone_impact['critical_facilities_total']} critical facilities "
+                "inside the 24h cone. "
+            )
         llm_narrative = (
             f"SPREAD SIMULATION — {incident_name}: "
             f"Head ROS {ros_chains:.1f} chains/hr ({ros_mph:.1f} mph), "
             f"flame length {meta.get('flame_length_ft_mean', 0.0):.0f} ft. "
             f"24-hour projected burn area (≥25% probability): "
             f"{burn_area_km2 if burn_area_km2 is not None else 'N/A'} km². "
+            f"{impact_sentence}"
             f"Confidence {confidence:.0%} — {confidence_driver}. "
             + (
                 f"RECOMMEND immediate trigger-point review: "
@@ -430,6 +695,8 @@ async def run(state: AgentState) -> dict:  # noqa: C901
             else "none"
         ),
     ]
+    if cone_impact and "error" not in cone_impact:
+        key_findings.extend(_impact_findings(cone_impact))
 
     # ------------------------------------------------------------------ #
     # 10. Citation bundle
@@ -469,10 +736,14 @@ async def run(state: AgentState) -> dict:  # noqa: C901
             "flame_length_ft": round(meta.get("flame_length_ft_mean", 0.0), 1),
             "burn_area_24h_km2_p25": burn_area_km2,
             "trigger_breaches": trigger_breaches,
+            "high_risk_zones": high_risk_zones,
+            "cone_impact": cone_impact,
             "n_mc_samples": int(meta.get("n", 200)),
             "fuel_model": base_inputs["fuel_model"],
             "wind_speed_mph": base_inputs["wind_speed_mph"],
-            "wind_dir_deg": base_inputs["wind_dir_deg"],
+            # Surface MET FROM convention in the payload (display contract);
+            # the +180° fire-head TO direction lives inside base_inputs only.
+            "wind_dir_deg": wind_from_deg,
             "fuel_moisture": fm,
         },
         confidence=confidence,
@@ -507,6 +778,8 @@ def _low_confidence_output(incident_name: str, reason: str) -> AgentOutput:
             "head_ros_chains_per_hr": None,
             "flame_length_ft": None,
             "trigger_breaches": [],
+            "high_risk_zones": [],
+            "cone_impact": None,
         },
         confidence=0.20,
         confidence_driver="insufficient upstream inputs",

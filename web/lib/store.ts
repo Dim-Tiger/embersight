@@ -60,31 +60,29 @@ export type MapViewport = {
   zoom: number;
 };
 
+export type ToolCallStatus = "running" | "done" | "error";
+
+export type ToolCall = {
+  id: string;             // run_id from backend
+  name: string;           // consult_weather_wind etc.
+  agentLabel: string;     // "Weather & Wind"
+  args?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+  status: ToolCallStatus;
+  ts: number;
+};
+
 export type ChatMessage = {
   id: string;
-  role: "user" | "agent";
+  role: "user" | "agent" | "system";
   text: string;
   ts: number;
   agentName?: string;
+  streaming?: boolean;          // true while chat_token deltas accumulate
+  toolCalls?: ToolCall[];       // delegations the IC made during this turn
 };
 
-/**
- * Inter-agent dialogue message. Distinct from `ChatMessage` (which is the
- * user-facing narrative chat) — these surface the actual exchange between
- * the orchestrator and each subagent: the request issued to the agent,
- * any live "thinking" tokens streamed while it runs, and the final
- * response with its narrative + confidence.
- */
-export type DialogueMessage = {
-  id: string;
-  from: string; // "orchestrator" or an agent slug
-  to: string; // "orchestrator", "team", or an agent slug
-  text: string;
-  ts: number;
-  kind: "request" | "response" | "thinking" | "kickoff";
-  confidence?: number | null;
-  confidenceDriver?: string | null;
-};
+export type RunMode = "briefing" | "chat";
 
 export type Store = {
   selectedIncidentId: string | null;
@@ -102,11 +100,9 @@ export type Store = {
   connectionStatus: "idle" | "posting" | "responded" | "consuming" | "closed";
   chunkCount: number;
   frameCount: number;
+  briefingComplete: boolean;
+  currentMode: RunMode | null;
   chat: ChatMessage[];
-  dialogue: DialogueMessage[];
-  /** Live, in-flight LLM-token buffer keyed by langgraph_node name.
-   * Cleared when the agent's `response` dialogue message arrives. */
-  thinking: Record<string, string>;
   pendingUserQuery: string | null;
   setSelectedIncident: (id: string | null) => void;
   setSelectedThread: (id: string | null) => void;
@@ -123,10 +119,19 @@ export type Store = {
   setConnectionStatus: (s: Store["connectionStatus"]) => void;
   incChunk: () => void;
   incFrame: () => void;
+  setBriefingComplete: (b: boolean) => void;
+  setCurrentMode: (m: RunMode | null) => void;
+  // Chat turn helpers used by the SSE consumer
+  beginAgentChat: (id: string) => void;
+  appendChatToken: (id: string, delta: string) => void;
+  finalizeAgentChat: (id: string) => void;
+  attachToolCall: (chatId: string, call: ToolCall) => void;
+  resolveToolCall: (
+    chatId: string,
+    callId: string,
+    summary: Record<string, unknown>,
+  ) => void;
   appendChat: (m: ChatMessage) => void;
-  appendDialogue: (d: DialogueMessage) => void;
-  appendThinking: (agent: string, chunk: string) => void;
-  clearThinking: (agent: string) => void;
   setPendingUserQuery: (q: string | null) => void;
   upsertInterrupt: (i: PendingInterrupt) => void;
   removeInterrupt: (id?: string) => void;
@@ -156,9 +161,9 @@ export const useStore = create<Store>((set) => ({
   connectionStatus: "idle",
   chunkCount: 0,
   frameCount: 0,
+  briefingComplete: false,
+  currentMode: null,
   chat: [],
-  dialogue: [],
-  thinking: {},
   pendingUserQuery: null,
   restartCount: 0,
   setSelectedIncident: (id) => set({ selectedIncidentId: id }),
@@ -181,14 +186,15 @@ export const useStore = create<Store>((set) => ({
       agentOutputs: {},
       agentStatuses: {},
       pendingInterrupts: [],
-      dialogue: [],
-      thinking: {},
       streaming: false,
       done: false,
       errorMessage: null,
       connectionStatus: "idle",
       chunkCount: 0,
       frameCount: 0,
+      briefingComplete: false,
+      currentMode: null,
+      chat: [],
     }),
   setStreaming: (b) => set({ streaming: b }),
   setDone: (b) => set({ done: b }),
@@ -196,23 +202,56 @@ export const useStore = create<Store>((set) => ({
   setConnectionStatus: (s) => set({ connectionStatus: s }),
   incChunk: () => set((s) => ({ chunkCount: s.chunkCount + 1 })),
   incFrame: () => set((s) => ({ frameCount: s.frameCount + 1 })),
-  appendChat: (m) => set((s) => ({ chat: [...s.chat.slice(-199), m] })),
-  appendDialogue: (d) =>
-    set((s) => ({ dialogue: [...s.dialogue.slice(-299), d] })),
-  appendThinking: (agent, chunk) =>
+  setBriefingComplete: (b) => set({ briefingComplete: b }),
+  setCurrentMode: (m) => set({ currentMode: m }),
+  beginAgentChat: (id) =>
     set((s) => ({
-      thinking: {
-        ...s.thinking,
-        [agent]: (s.thinking[agent] ?? "") + chunk,
-      },
+      chat: [
+        ...s.chat.slice(-199),
+        {
+          id,
+          role: "agent",
+          agentName: "Master IC",
+          text: "",
+          ts: Date.now(),
+          streaming: true,
+        },
+      ],
     })),
-  clearThinking: (agent) =>
-    set((s) => {
-      if (!(agent in s.thinking)) return s;
-      const next = { ...s.thinking };
-      delete next[agent];
-      return { thinking: next };
-    }),
+  appendChatToken: (id, delta) =>
+    set((s) => ({
+      chat: s.chat.map((m) =>
+        m.id === id ? { ...m, text: (m.text || "") + delta } : m,
+      ),
+    })),
+  finalizeAgentChat: (id) =>
+    set((s) => ({
+      chat: s.chat.map((m) => (m.id === id ? { ...m, streaming: false } : m)),
+    })),
+  attachToolCall: (chatId, call) =>
+    set((s) => ({
+      chat: s.chat.map((m) =>
+        m.id === chatId
+          ? { ...m, toolCalls: [...(m.toolCalls ?? []), call] }
+          : m,
+      ),
+    })),
+  resolveToolCall: (chatId, callId, summary) =>
+    set((s) => ({
+      chat: s.chat.map((m) =>
+        m.id === chatId
+          ? {
+              ...m,
+              toolCalls: (m.toolCalls ?? []).map((c) =>
+                c.id === callId
+                  ? { ...c, summary, status: "done" as const }
+                  : c,
+              ),
+            }
+          : m,
+      ),
+    })),
+  appendChat: (m) => set((s) => ({ chat: [...s.chat.slice(-199), m] })),
   setPendingUserQuery: (q) => set({ pendingUserQuery: q }),
   requestRestart: () => set((s) => ({ restartCount: s.restartCount + 1 })),
   upsertInterrupt: (i) =>

@@ -137,16 +137,67 @@ def _stub_recommendation(
     acres = float(incident.get("acres") or 0.0)
     var = context.get("values_at_risk") or {}
     terrain = context.get("terrain_fuel") or {}
+    spread = context.get("spread_simulation") or {}
 
+    # --- values-at-risk count (real upstream shape: payload.rollup.*) ---
+    rollup = var.get("rollup") or {}
+    tallies = var.get("tallies") or {}
     structure_count = int(
-        var.get("structure_count") or var.get("structures") or 0
+        rollup.get("structure_count")
+        or tallies.get("structures")
+        or var.get("structure_count")
+        or var.get("structures")
+        or 0
     )
-    has_hospital = bool(var.get("hospitals") or var.get("critical_facilities"))
-    slope_pct = float(terrain.get("slope_pct") or terrain.get("slope") or 0.0)
+    has_hospital = bool(
+        rollup.get("hospitals")
+        or rollup.get("critical_facilities")
+        or var.get("hospitals")
+        or var.get("critical_facilities")
+    )
 
-    if acres >= 1000 or structure_count >= 200 or has_hospital:
+    # --- fuel hazard (real upstream shape: terrain_fuel.fuel_model / slope_deg) ---
+    fuel_model = (
+        terrain.get("fuel_model") or terrain.get("fbfm40") or "unknown fuel model"
+    )
+    slope_pct = float(
+        terrain.get("slope_pct")
+        or terrain.get("slope_deg")
+        or terrain.get("slope")
+        or 0.0
+    )
+    flame_length_ft = float(spread.get("flame_length_ft") or 0.0)
+    if flame_length_ft >= 11.0 or slope_pct >= 40:
+        fuel_hazard = "extreme"
+    elif flame_length_ft >= 8.0 or slope_pct >= 25:
+        fuel_hazard = "high"
+    elif flame_length_ft >= 4.0:
+        fuel_hazard = "moderate"
+    else:
+        fuel_hazard = "low"
+
+    # --- spread cone size (real upstream shape: spread_simulation.burn_area_24h_km2_p25) ---
+    cone_area_km2 = float(spread.get("burn_area_24h_km2_p25") or 0.0)
+    head_ros = float(spread.get("head_ros_chains_per_hr") or 0.0)
+    if cone_area_km2 > 0:
+        cone_size_str = f"{cone_area_km2:.1f} km² @24h (p25 cone)"
+    elif head_ros > 0:
+        cone_size_str = f"head ROS {head_ros:.1f} ch/hr (cone area not reported)"
+    else:
+        cone_size_str = "cone size not reported"
+
+    var_str = (
+        f"{structure_count} structures"
+        + (" incl. hospital" if has_hospital else "")
+        if structure_count or has_hospital
+        else "VAR count not reported"
+    )
+    fuel_str = f"{fuel_model} / {fuel_hazard} hazard ({slope_pct:.0f}% slope)"
+    cite = f"[cone={cone_size_str}; VAR={var_str}; fuel={fuel_str}]"
+
+    if cone_area_km2 >= 5.0 or structure_count >= 200 or has_hospital:
         urgency = "high"
-    elif acres >= 100 or structure_count >= 25:
+    elif cone_area_km2 >= 1.0 or acres >= 100 or structure_count >= 25:
         urgency = "med"
     else:
         urgency = "low"
@@ -172,8 +223,8 @@ def _stub_recommendation(
                 type="Type-3 Engine",
                 quantity=type3_engines,
                 rationale=(
-                    "Wildland-capable initial attack; sized to projected "
-                    "24h cone."
+                    f"Wildland-capable initial attack sized to the projected "
+                    f"24h cone {cite}."
                 ),
                 distance_to_staging_min=20,
                 arrival_window="0-2h",
@@ -183,8 +234,7 @@ def _stub_recommendation(
                 type="Type-1 Engine",
                 quantity=type1_engines,
                 rationale=(
-                    "Structure defense in the WUI footprint identified by "
-                    "values-at-risk."
+                    f"Structure defense in the WUI footprint {cite}."
                 ),
                 distance_to_staging_min=35,
                 arrival_window="1-3h",
@@ -194,8 +244,8 @@ def _stub_recommendation(
                 type="Water Tender",
                 quantity=tenders,
                 rationale=(
-                    "Mobile water supply for engines operating beyond "
-                    "hydrant coverage."
+                    f"Mobile water supply for engines operating beyond hydrant "
+                    f"coverage {cite}."
                 ),
                 distance_to_staging_min=45,
                 arrival_window="2-4h",
@@ -205,8 +255,7 @@ def _stub_recommendation(
                 type="Dozer (Type 2)",
                 quantity=dozers,
                 rationale=(
-                    "Direct line construction where slope permits; "
-                    "indirect line otherwise."
+                    f"Direct line where slope permits; indirect otherwise {cite}."
                 ),
                 distance_to_staging_min=60,
                 arrival_window="2-6h",
@@ -217,7 +266,9 @@ def _stub_recommendation(
                 kind="crew",
                 type="Type-1 Hotshot Crew",
                 quantity=hotshot,
-                rationale="Hot-line construction in steep / heavy-fuel divisions.",
+                rationale=(
+                    f"Hot-line construction in steep / heavy-fuel divisions {cite}."
+                ),
                 distance_to_staging_min=90,
                 arrival_window="3-8h",
             ),
@@ -225,7 +276,7 @@ def _stub_recommendation(
                 kind="crew",
                 type="Type-2 IA Crew",
                 quantity=ia_crews,
-                rationale="Mop-up, line improvement, and structure prep.",
+                rationale=f"Mop-up, line improvement, and structure prep {cite}.",
                 distance_to_staging_min=60,
                 arrival_window="2-6h",
             ),
@@ -236,8 +287,8 @@ def _stub_recommendation(
                 type="Type-1 Air Tanker (VLAT/LAT)",
                 quantity=type1_tankers,
                 rationale=(
-                    "Retardant lines ahead of the head; sized to ROS and "
-                    "cone length."
+                    f"Retardant lines ahead of the head, sized to ROS and "
+                    f"cone length {cite}."
                 ),
                 distance_to_staging_min=30,
                 arrival_window="0-2h",
@@ -247,8 +298,8 @@ def _stub_recommendation(
                 type="Type-2 Helicopter",
                 quantity=helitack,
                 rationale=(
-                    "Bucket work on hot spots and direct support of ground "
-                    "resources."
+                    f"Bucket work on hot spots and direct support of ground "
+                    f"resources {cite}."
                 ),
                 distance_to_staging_min=25,
                 arrival_window="0-1h",
@@ -258,8 +309,8 @@ def _stub_recommendation(
                 type="Lead Plane / ATGS",
                 quantity=lead_planes,
                 rationale=(
-                    "Tactical coordination once multiple fixed-wing assets "
-                    "are on-scene."
+                    f"Tactical coordination once multiple fixed-wing assets are "
+                    f"on-scene {cite}."
                 ),
                 distance_to_staging_min=40,
                 arrival_window="1-3h",
@@ -270,21 +321,29 @@ def _stub_recommendation(
                 kind="overhead",
                 type="Incident Commander (Type appropriate)",
                 quantity=1,
-                rationale="Single point of accountability for the operational period.",
+                rationale=(
+                    f"Single point of accountability for the operational period "
+                    f"{cite}."
+                ),
                 arrival_window="0-1h",
             ),
             ResourceLineItem(
                 kind="overhead",
                 type="Operations Section Chief",
                 quantity=1,
-                rationale="Division-level tactical management as resources scale.",
+                rationale=(
+                    f"Division-level tactical management as resources scale {cite}."
+                ),
                 arrival_window="0-2h",
             ),
             ResourceLineItem(
                 kind="overhead",
                 type="Planning Section Chief",
                 quantity=1 if urgency != "low" else 0,
-                rationale="Required once IAP cycle begins for operational period 2+.",
+                rationale=(
+                    f"Required once IAP cycle begins for operational period 2+ "
+                    f"{cite}."
+                ),
                 arrival_window="2-6h",
             ),
             ResourceLineItem(
@@ -292,16 +351,16 @@ def _stub_recommendation(
                 type="Safety Officer",
                 quantity=1,
                 rationale=(
-                    "ICS 208 ownership; mandatory once aircraft and ground "
-                    "forces co-locate."
+                    f"ICS 208 ownership; mandatory once aircraft and ground "
+                    f"forces co-locate {cite}."
                 ),
                 arrival_window="0-2h",
             ),
         ],
         rationale_summary=(
-            f"Draft based on projected acreage growth ({acres:.0f} ac baseline), "
-            f"{structure_count} structures in the values-at-risk footprint, "
-            f"and {slope_pct:.0f}% slope class. RECOMMEND ONLY — IC approval required."
+            f"Draft sized to spread cone ({cone_size_str}), "
+            f"values-at-risk ({var_str}), and fuel hazard ({fuel_str}). "
+            f"RECOMMEND ONLY — IC approval required."
         ),
         expires_at=(datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
     )
@@ -455,8 +514,8 @@ async def run(state: AgentState) -> dict[str, Any]:
         )
         out_confidence = min(confidence, 0.3)
     else:
-        unit_count = sum(
-            item.quantity
+        flat_lines = [
+            item
             for group in (
                 recommendation.apparatus,
                 recommendation.crews,
@@ -464,12 +523,31 @@ async def run(state: AgentState) -> dict[str, Any]:
                 recommendation.overhead,
             )
             for item in group
-        )
+            if item.quantity > 0
+        ]
+        unit_count = sum(item.quantity for item in flat_lines)
+        # Flat list of {kind, quantity, rationale, ...} entries — the
+        # canonical "what to bring" surface for downstream consumers and
+        # the UI. The grouped envelope under `recommendation` is retained
+        # for the ICS-201 cross-reference.
+        recommendations_flat = [
+            {
+                "kind": item.kind,
+                "type": item.type,
+                "quantity": item.quantity,
+                "rationale": item.rationale,
+                "distance_to_staging_min": item.distance_to_staging_min,
+                "arrival_window": item.arrival_window,
+            }
+            for item in flat_lines
+        ]
         payload = {
             "status": decision_kind,
             "recommendation": recommendation.model_dump(),
+            "recommendations": recommendations_flat,
             "urgency": recommendation.urgency,
             "expires_at": recommendation.expires_at,
+            "rationale_summary": recommendation.rationale_summary,
             "key_findings": _key_findings(recommendation),
             "missing_inputs": missing,
             "unit_count": unit_count,
@@ -501,6 +579,9 @@ async def run(state: AgentState) -> dict[str, Any]:
 
 
 def _build_mock_state() -> AgentState:
+    """Mock state with payload shapes that mirror the real upstream
+    agents (see master_ic._mock_state_with_dissents for the reference
+    convention)."""
     incident = Incident(
         id="ca-2026-rr-smoke",
         name="Resource-Rec Smoke Incident",
@@ -523,34 +604,82 @@ def _build_mock_state() -> AgentState:
             ),
         )
 
+    # Realistic shapes — mirror agents/spread_simulation.py:569,
+    # agents/values_at_risk.py:412, agents/terrain_fuel.py:244,
+    # agents/routing_staging.py:203.
     outputs = {
+        "weather_wind": _o(
+            "weather_wind",
+            {"wind_dir_deg": 225, "wind_mph": 18, "gust_mph": 28, "rh_pct": 14},
+        ),
         "spread_simulation": _o(
             "spread_simulation",
             {
-                "cones": {"1h": "<wkt>", "6h": "<wkt>", "12h": "<wkt>", "24h": "<wkt>"},
+                "key_findings": [
+                    "Head ROS 12.5 ch/hr; 24h cone p25 ≈ 6.4 km²",
+                ],
+                "cones": {
+                    "1h": {"type": "Polygon", "coordinates": [[[-121.13, 39.41]]]},
+                    "6h": {"type": "Polygon", "coordinates": [[[-121.13, 39.41]]]},
+                    "12h": {"type": "Polygon", "coordinates": [[[-121.13, 39.41]]]},
+                    "24h": {"type": "Polygon", "coordinates": [[[-121.13, 39.41]]]},
+                },
+                "cone_bands": {
+                    "24h": {"p25": 6.4, "p50": 8.1, "p75": 10.7, "p95": 14.2},
+                },
                 "head_ros_chains_per_hr": 12.5,
+                "head_ros_fpm_mean": 13.8,
+                "head_ros_fpm_std": 2.1,
                 "flame_length_ft": 11.0,
+                "burn_area_24h_km2_p25": 6.4,
+                "trigger_breaches": [{"id": "Figueroa-Ranch", "t_min": 220}],
+                "high_risk_zones": ["N4", "N5"],
+                "n_mc_samples": 200,
+                "fuel_model": "TL3",
+                "wind_speed_mph": 18,
+                "wind_dir_deg": 225,
+                "fuel_moisture": {"1hr": 4, "10hr": 6, "100hr": 9, "live": 75},
             },
         ),
         "values_at_risk": _o(
             "values_at_risk",
             {
-                "structure_count": 312,
-                "hospitals": 1,
-                "schools": 3,
-                "critical_facilities": ["Memorial Hospital"],
+                "cone_source": "spread_simulation.cones.24h",
+                "bbox": [-121.20, 39.35, -121.05, 39.48],
+                "rollup": {
+                    "structure_count": 312,
+                    "hospitals": 1,
+                    "schools": 3,
+                    "critical_facilities": ["Memorial Hospital"],
+                },
+                "tallies": {"structures": 312, "parcels": 198, "roads_km": 24.5},
+                "key_findings": [
+                    "312 structures and 1 hospital inside the 24h cone footprint",
+                ],
             },
         ),
         "terrain_fuel": _o(
             "terrain_fuel",
-            {"slope_pct": 28.0, "fuel_model": "TL3", "aspect": "S"},
+            {
+                "fuel_model": "TL3 moderate load conifer litter",
+                "slope_deg": 28.0,
+                "aspect": "S",
+                "elevation_m": 612,
+            },
         ),
         "routing_staging": _o(
             "routing_staging",
             {
-                "staging_lat": 39.40,
-                "staging_lon": -121.10,
-                "drive_time_min": 18,
+                "candidates": [
+                    {
+                        "name": "Hwy 70 Oroville-Quincy turnout",
+                        "lat": 39.40,
+                        "lon": -121.10,
+                        "score": 0.84,
+                        "drive_time_min": 18,
+                    }
+                ],
+                "closures": [],
                 "primary_ingress": "Hwy 70",
             },
         ),
@@ -560,7 +689,9 @@ def _build_mock_state() -> AgentState:
 
 def _smoke() -> None:
     """Run `run()` against a mock state with the HITL pause stubbed to
-    auto-approve so the interrupt path is exercised end-to-end."""
+    auto-approve so the interrupt path is exercised end-to-end. Asserts
+    the payload contract: concrete PROPOSED line items in
+    payload.recommendations, citing cone / VAR / fuel."""
 
     def _auto_approve(itype, payload):  # type: ignore[no-untyped-def]
         return {"decision": "approved", "actor": "smoke@embersight"}
@@ -572,19 +703,62 @@ def _smoke() -> None:
         patch = asyncio.run(run(state))
         output = patch["outputs"][AGENT_NAME]
         audit = patch["audit_log"][0]
+
+        # --- contract assertions --- #
+        payload = output.payload
+        assert payload.get("status") == "approved", payload.get("status")
+        assert payload.get("unit_count", 0) > 0, "no units recommended"
+
+        recs = payload.get("recommendations") or []
+        assert isinstance(recs, list) and recs, (
+            "payload.recommendations must be a non-empty list of "
+            "{kind, quantity, rationale, ...} entries — got "
+            f"{type(recs).__name__} len={len(recs)}"
+        )
+        required_keys = {"kind", "quantity", "rationale"}
+        for entry in recs:
+            missing_keys = required_keys - set(entry)
+            assert not missing_keys, (
+                f"recommendation entry missing keys {missing_keys}: {entry}"
+            )
+            assert entry["quantity"] > 0, f"zero-qty leaked into recommendations: {entry}"
+
+        # Every rationale must cite cone / VAR / fuel signals.
+        for entry in recs:
+            rat = entry["rationale"].lower()
+            assert "cone=" in rat, f"rationale missing cone citation: {entry}"
+            assert "var=" in rat, f"rationale missing VAR citation: {entry}"
+            assert "fuel=" in rat, f"rationale missing fuel citation: {entry}"
+
+        summary = payload.get("rationale_summary", "")
+        for token in ("cone", "values-at-risk", "fuel hazard"):
+            assert token in summary.lower(), (
+                f"rationale_summary missing {token!r}: {summary!r}"
+            )
+
+        # --- report --- #
         print("== resource_recommendation smoke ==")
         print(f"narrative: {output.narrative}")
         print(
             f"confidence: {output.confidence:.2f} "
             f"({output.confidence_driver})"
         )
-        print(f"urgency: {output.payload.get('urgency')}")
-        print(f"unit_count: {output.payload.get('unit_count')}")
-        findings = output.payload.get("key_findings", [])
+        print(f"urgency: {payload.get('urgency')}")
+        print(f"unit_count: {payload.get('unit_count')}")
+        print(f"recommendations ({len(recs)}):")
+        for entry in recs:
+            print(
+                f"  - {entry['quantity']}x {entry['type']} "
+                f"({entry['kind']}, arrival {entry.get('arrival_window')})"
+            )
+            print(f"      rationale: {entry['rationale']}")
+        print(f"rationale_summary: {summary}")
+        findings = payload.get("key_findings", [])
         print(f"key_findings ({len(findings)}):")
         for line in findings[:6]:
             print(f"  - {line}")
         print(f"audit decision: {audit.decision}")
+        print("OK: payload contract satisfied.")
     finally:
         globals()["request_human_decision"] = original
 

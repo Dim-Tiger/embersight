@@ -1,9 +1,10 @@
-"""Specialist subagents.
+"""Specialist subagents + Master IC nodes.
 
-Each module exposes an async `run(state: AgentState) -> dict` callable that
-returns a state patch (`{"outputs": {agent_name: AgentOutput}}`).
+Each specialist module exposes an async `run(state: AgentState) -> dict`
+callable returning a state patch (`{"outputs": {agent_name: AgentOutput}}`).
 
-Pass-1 implementations echo their role and return a stub AgentOutput so the
-end-to-end stream and HITL flow can be exercised. Pass-2 will replace the
-bodies with real tool calls.
+The Master IC has two personas in two modules:
+- `master_ic.run` synthesizes an IAP draft at the end of a briefing graph run.
+- `master_ic_chat.run` handles one conversational turn; binds the seven
+  specialists as `consult_*` tools (defined in `agents/tools.py`).
 """

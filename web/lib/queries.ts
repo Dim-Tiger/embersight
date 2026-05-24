@@ -52,6 +52,46 @@ export function useWeather(lat: number | null, lon: number | null) {
   });
 }
 
+export type WindVector = {
+  lat: number;
+  lon: number;
+  speed: number;
+  direction: number;
+};
+
+export type WindGrid = {
+  vectors: WindVector[];
+  bounds: [number, number, number, number];
+  center: { lat: number; lon: number };
+  gust_max_ms: number | null;
+  sampled_at: string;
+};
+
+export function useWind(lat: number | null, lon: number | null) {
+  return useQuery({
+    queryKey: ["wind", lat, lon],
+    enabled: lat != null && lon != null,
+    queryFn: async (): Promise<WindGrid> => {
+      const r = await fetch(`/api/wind/${lat}/${lon}`);
+      if (!r.ok) throw new Error(`wind ${r.status}`);
+      return r.json();
+    },
+    refetchInterval: 5 * 60_000,
+  });
+}
+
+export function useFirms(days = 1) {
+  return useQuery({
+    queryKey: ["firms", days],
+    queryFn: async (): Promise<GeoJSON.FeatureCollection | null> => {
+      const r = await fetch(`/api/firms?days=${days}`);
+      if (!r.ok) return null;
+      return r.json();
+    },
+    refetchInterval: 10 * 60_000,
+  });
+}
+
 export function usePerimeter(
   lat: number | null,
   lon: number | null,

@@ -99,6 +99,108 @@ def _coerce_geom(value: Any):
     return None
 
 
+def _extract_primary_cone(spread_payload: Any) -> Any:
+    """Resolve the canonical spread-cone polygon for phasing.
+
+    Prefers a top-level ``polygon_wkt`` (forward-compatible with a future
+    spread payload contract), then falls back to the widest available
+    horizon in ``cones`` (24h → 12h → 6h → 1h).
+    """
+    if not isinstance(spread_payload, dict):
+        return None
+    wkt = spread_payload.get("polygon_wkt")
+    if wkt:
+        return wkt
+    cones = spread_payload.get("cones") or {}
+    for key in ("24h", "12h", "6h", "1h"):
+        c = cones.get(key)
+        if c is not None:
+            return c
+    return None
+
+
+def _cone_radius_deg(cone_geom: Any, incident: Any) -> float:
+    """Max distance (in degrees) from the incident point to the cone boundary.
+
+    Used to define the WATCH band as a buffer of `2 × cone_radius` around
+    the incident. Returns 0.0 if either input is unusable.
+    """
+    if cone_geom is None or incident is None:
+        return 0.0
+    try:
+        from shapely.geometry import Point  # noqa: PLC0415
+
+        ip = Point(incident.lon, incident.lat)
+        # hausdorff_distance on the boundary gives the farthest cone point.
+        return float(ip.hausdorff_distance(cone_geom))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _phase_for_zone(
+    zone_geom: Any,
+    cone_geom: Any,
+    egress: dict,
+    incident: Any,
+    cone_radius_deg: float,
+) -> str | None:
+    """Classify a zone into one of: 'order' | 'advisory' | 'watch' | None.
+
+    - ORDER: a major road-graph egress edge crossing the zone boundary is
+      blocked by the spread cone (per `compute_evacuation_routes_clear`).
+    - ADVISORY (WARNING): the zone polygon touches/intersects the cone.
+    - WATCH: zone sits within 2× the cone radius of the incident point but
+      does not touch the cone itself.
+    - None: zone is outside all bands.
+    """
+    if zone_geom is None:
+        return None
+
+    egress_blocked = (egress or {}).get("clear") is False and (
+        (egress or {}).get("egress_edges_blocked", 0) > 0
+    )
+    touches_cone = False
+    if cone_geom is not None:
+        try:
+            touches_cone = bool(zone_geom.intersects(cone_geom))
+        except Exception:  # noqa: BLE001
+            touches_cone = False
+
+    if touches_cone and egress_blocked:
+        return "order"
+    if touches_cone:
+        return "advisory"
+
+    if incident is not None and cone_radius_deg > 0.0:
+        try:
+            from shapely.geometry import Point  # noqa: PLC0415
+
+            ip = Point(incident.lon, incident.lat)
+            if zone_geom.distance(ip) <= 2.0 * cone_radius_deg:
+                return "watch"
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _phase_entry(zone: dict, phase: str, egress: dict, population: int) -> dict:
+    """Compact record for the phasing bucket payloads."""
+    return {
+        "zone_id": zone["zone_id"],
+        "name": zone["name"],
+        "current_status": zone["current_status"],
+        "proposed_phase": phase.upper(),
+        "jurisdiction": zone.get("jurisdiction"),
+        "population_estimate": population,
+        "egress_status": {
+            "clear": egress.get("clear"),
+            "reason": egress.get("reason"),
+            "egress_edges_blocked": egress.get("egress_edges_blocked", 0),
+            "egress_edges_checked": egress.get("egress_edges_checked", 0),
+        },
+    }
+
+
 def _overlap_fraction(zone_geom: Any, cone_geom: Any) -> float:
     """Fraction of the zone polygon covered by the cone, in [0, 1].
 
@@ -323,6 +425,12 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         else None
     )
 
+    # Primary cone for phasing (prefer payload.polygon_wkt; fall back to
+    # the widest available horizon under payload.cones).
+    primary_cone_obj = _extract_primary_cone(spread_payload)
+    primary_cone_geom = _coerce_geom(primary_cone_obj)
+    cone_radius = _cone_radius_deg(primary_cone_geom, incident)
+
     # ---- Cal OES zone fetch ------------------------------------------- #
     bbox = _bbox_around_incident(incident)
     zones: list[dict] = []
@@ -336,6 +444,9 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
 
     # ---- Per-zone analysis + interrupts ------------------------------- #
     zone_changes: list[dict] = []
+    zones_order: list[dict] = []
+    zones_advisory: list[dict] = []
+    zones_watch: list[dict] = []
     audit_records = []
     key_findings: list[str] = []
     counts = {"proposed": 0, "approved": 0, "edited": 0, "rejected": 0}
@@ -372,8 +483,20 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         egress = evac_tools.compute_evacuation_routes_clear(
             zone["polygon_wkt"],
             road_graph,
-            spread_cone=cones.get("6h"),
+            spread_cone=cones.get("6h") or primary_cone_obj,
         )
+
+        # Zone phasing — order/advisory/watch bucketing for downstream
+        # planners. Independent of the LLM-driven status-change proposal.
+        phase = _phase_for_zone(
+            zone_geom, primary_cone_geom, egress, incident, cone_radius
+        )
+        if phase == "order":
+            zones_order.append(_phase_entry(zone, phase, egress, population))
+        elif phase == "advisory":
+            zones_advisory.append(_phase_entry(zone, phase, egress, population))
+        elif phase == "watch":
+            zones_watch.append(_phase_entry(zone, phase, egress, population))
 
         # Bias overlaps slightly upward if zone is adjacent to an ORDER
         # zone — the deterministic rule below will then favor WARNING.
@@ -518,9 +641,13 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         narrative=summary,
         payload={
             "zone_changes": zone_changes,
+            "zones_order": zones_order,
+            "zones_advisory": zones_advisory,
+            "zones_watch": zones_watch,
             "zones_fetched": len(zones),
             "counts": counts,
             "bbox": bbox,
+            "cone_radius_deg": cone_radius,
         },
         confidence=confidence,
         confidence_driver=confidence_driver,
@@ -565,6 +692,17 @@ def _smoke_run() -> None:
         f"{incident_lon + 0.03} {incident_lat + 0.03}"
         "))"
     )
+    # Z3 sits outside the 24h cone (radius 0.10) but inside the 2×-cone
+    # WATCH band (radius 0.20).
+    zone_c_wkt = (
+        "POLYGON (("
+        f"{incident_lon + 0.13} {incident_lat + 0.13}, "
+        f"{incident_lon + 0.14} {incident_lat + 0.13}, "
+        f"{incident_lon + 0.14} {incident_lat + 0.14}, "
+        f"{incident_lon + 0.13} {incident_lat + 0.14}, "
+        f"{incident_lon + 0.13} {incident_lat + 0.13}"
+        "))"
+    )
 
     async def fake_get_zones(bbox):  # noqa: ARG001
         return [
@@ -581,6 +719,14 @@ def _smoke_run() -> None:
                 "name": "Mock Zone B (further out)",
                 "current_status": "NORMAL",
                 "polygon_wkt": zone_b_wkt,
+                "last_updated_iso": "2026-05-23T00:00:00Z",
+                "jurisdiction": "Mock County",
+            },
+            {
+                "zone_id": "Z3",
+                "name": "Mock Zone C (watch band)",
+                "current_status": "NORMAL",
+                "polygon_wkt": zone_c_wkt,
                 "last_updated_iso": "2026-05-23T00:00:00Z",
                 "jurisdiction": "Mock County",
             },
@@ -632,10 +778,30 @@ def _smoke_run() -> None:
         confidence_driver="mock",
         citation_bundle=CitationBundle(),
     )
+    # Build a tiny networkx road graph with one PRIMARY edge that crosses
+    # Z1's boundary and intersects the 6h spread cone — drives Z1 into
+    # the ORDER bucket.
+    import networkx as nx
+    from shapely.geometry import LineString
+
+    rg = nx.MultiDiGraph()
+    rg.add_node(1, x=incident_lon - 0.010, y=incident_lat)
+    rg.add_node(2, x=incident_lon + 0.010, y=incident_lat)
+    rg.add_edge(
+        1,
+        2,
+        highway="primary",
+        geometry=LineString(
+            [
+                (incident_lon - 0.010, incident_lat),
+                (incident_lon + 0.010, incident_lat),
+            ]
+        ),
+    )
     routing_out = AgentOutput(
         agent="routing_staging",
-        narrative="mock routing (no graph)",
-        payload={"road_graph": None},
+        narrative="mock routing (single primary egress edge)",
+        payload={"road_graph": rg},
         confidence=0.7,
         confidence_driver="mock",
         citation_bundle=CitationBundle(),
@@ -697,6 +863,18 @@ def _smoke_run() -> None:
             f"(decision={zc['decision']})"
         )
     print("audit_records:", len(patch.get("audit_log", [])))
+
+    zo = out.payload["zones_order"]
+    za = out.payload["zones_advisory"]
+    zw = out.payload["zones_watch"]
+    print(f"zones_order   ({len(zo)}): {[z['zone_id'] for z in zo]}")
+    print(f"zones_advisory({len(za)}): {[z['zone_id'] for z in za]}")
+    print(f"zones_watch   ({len(zw)}): {[z['zone_id'] for z in zw]}")
+    print(f"cone_radius_deg: {out.payload['cone_radius_deg']:.4f}")
+    assert zo, "expected zones_order to be non-empty"
+    assert za, "expected zones_advisory to be non-empty"
+    assert zw, "expected zones_watch to be non-empty"
+    print("phasing bucket check: PASS")
 
     # Verify hard rule by inspecting our own module + tool module for
     # banned tokens. This is belt-and-suspenders alongside the PR-level

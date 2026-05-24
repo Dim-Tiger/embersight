@@ -10,18 +10,28 @@ export function MessageInput() {
   const [draft, setDraft] = useState("");
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
   const streaming = useStore((s) => s.streaming);
+  const briefingComplete = useStore((s) => s.briefingComplete);
   const { data: incidents } = useIncidents();
-  const { start } = useAgentStream();
+  const { sendMessage } = useAgentStream();
 
   const incident = incidents?.find((i) => i.id === selectedIncidentId) ?? null;
-  const disabled = !incident || streaming || draft.trim().length === 0;
+  const disabled =
+    !incident || streaming || !briefingComplete || draft.trim().length === 0;
 
   async function submit() {
     if (!incident || !draft.trim()) return;
     const q = draft.trim();
     setDraft("");
-    await start(incident, { userQuery: q });
+    await sendMessage(incident, q);
   }
+
+  const placeholder = !incident
+    ? "Select an incident to begin"
+    : !briefingComplete
+      ? "Briefing in progress — the IC will be available momentarily…"
+      : streaming
+        ? "IC is responding…"
+        : `Talk to the AI IC about ${incident.name}`;
 
   return (
     <form
@@ -34,12 +44,8 @@ export function MessageInput() {
       <input
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        placeholder={
-          incident
-            ? `Ask the team about ${incident.name}…  (re-runs the analysis with your prompt)`
-            : "Select an incident to begin"
-        }
-        disabled={!incident || streaming}
+        placeholder={placeholder}
+        disabled={!incident || streaming || !briefingComplete}
         className="flex-1 rounded bg-smoke-900 px-3 py-1.5 text-xs text-smoke-200 placeholder:text-smoke-500 focus:outline-none focus:ring-1 focus:ring-ember-500 disabled:opacity-50"
       />
       <button

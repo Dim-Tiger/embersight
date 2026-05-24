@@ -62,11 +62,12 @@ export function AgentCard({
             automatically.
           </p>
         )}
-        {status === "running" && (
-          <p className="text-[11px] italic text-ember-300">
-            Agent is running — partial output will appear when it finishes its
-            step.
-          </p>
+        {status === "running" && !output && <RunningSkeleton />}
+        {status === "running" && output && (
+          <div className="flex items-center gap-1.5 text-[11px] text-ember-300">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ember-400" />
+            Streaming new findings…
+          </div>
         )}
         {status === "error" && (
           <p className="text-[11px] text-red-300">
@@ -212,4 +213,40 @@ function StatusBadge({
 
 function stripPrefix(s: string): string {
   return s.replace(/^\[[\w_]+\]\s*/, "").trim();
+}
+
+function RunningSkeleton() {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1.5 text-[11px] text-ember-300">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        <span className="italic">Agent gathering data…</span>
+      </div>
+      <div className="space-y-1.5">
+        <SkeletonBar widthPct={92} />
+        <SkeletonBar widthPct={78} />
+        <SkeletonBar widthPct={64} />
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <SkeletonTile />
+        <SkeletonTile />
+        <SkeletonTile />
+      </div>
+    </div>
+  );
+}
+
+function SkeletonBar({ widthPct }: { widthPct: number }) {
+  return (
+    <div
+      className="h-2 animate-pulse rounded bg-smoke-800/80"
+      style={{ width: `${widthPct}%` }}
+    />
+  );
+}
+
+function SkeletonTile() {
+  return (
+    <div className="h-14 animate-pulse rounded border border-smoke-700/60 bg-smoke-900/60" />
+  );
 }

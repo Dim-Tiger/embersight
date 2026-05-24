@@ -2,7 +2,9 @@
 
 import { postResume } from "@/lib/queries";
 import { useStore } from "@/lib/store";
+import { FileText } from "lucide-react";
 import { useMemo, useState } from "react";
+import { AgentActivityBanner } from "./AgentActivityBanner";
 
 type Draft = {
   form?: string;
@@ -93,6 +95,13 @@ export function IAPDraft() {
             EmberSight only proposes; the human IC signs.
           </p>
         </header>
+
+        <AgentActivityBanner
+          title="Master IC Synthesis"
+          subtitle="Synthesises all 7 specialists into ICS forms"
+          agents={["orchestrator", "master_ic"]}
+          icon={<FileText className="h-5 w-5" />}
+        />
 
         {view.pending && (
           <div className="flex items-center justify-between rounded border border-ember-700/60 bg-ember-900/30 px-3 py-2 text-xs text-ember-200">
