@@ -1,7 +1,9 @@
 "use client";
 
 import { useStore } from "@/lib/store";
-import { AgentCard, KeyFindings, MetricGrid } from "./AgentCard";
+import { Wind } from "lucide-react";
+import { AgentActivityBanner } from "./AgentActivityBanner";
+import { AgentCard, MetricGrid } from "./AgentCard";
 
 type RedFlag = {
   event?: string;
@@ -98,6 +100,13 @@ export function WeatherTab() {
             nearby RAWS observations — produced by the Weather &amp; Wind agent.
           </p>
         </header>
+
+        <AgentActivityBanner
+          title="Weather Intelligence"
+          subtitle="HRRR · RTMA · RAWS · NWS"
+          agents={["weather_wind"]}
+          icon={<Wind className="h-5 w-5" />}
+        />
 
         {redFlag && (
           <div className="rounded border border-red-700/60 bg-red-900/30 px-3 py-2 text-xs text-red-200">

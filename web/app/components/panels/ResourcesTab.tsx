@@ -1,6 +1,8 @@
 "use client";
 
 import { useStore } from "@/lib/store";
+import { Package } from "lucide-react";
+import { AgentActivityBanner } from "./AgentActivityBanner";
 import { AgentCard, KeyFindings, MetricGrid } from "./AgentCard";
 
 type RoutingPayload = {
@@ -62,6 +64,13 @@ export function ResourcesTab() {
             dispatches — every line below requires IC approval.
           </p>
         </header>
+
+        <AgentActivityBanner
+          title="Resource Posture"
+          subtitle="Resources · Routing & Staging"
+          agents={["resource_recommendation", "routing_staging"]}
+          icon={<Package className="h-5 w-5" />}
+        />
 
         <AgentCard
           title="Resource Recommendation"
