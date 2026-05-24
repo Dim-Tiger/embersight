@@ -1708,8 +1708,8 @@ export function IncidentMap() {
             // Density scales up at low zoom so the smaller box still feels
             // alive; width grows just enough to stay legible.
             numParticles: windLowZoom ? 1800 : 1200,
-            maxAge: 220,
-            speedFactor: 520,
+            maxAge: 1100,
+            speedFactor: 52,
             width: windLowZoom ? 1.6 : 1.1,
             // Tight speed range so typical 2–10 m/s winds land in the
             // bright white band; only genuinely strong gusts trip warm.
