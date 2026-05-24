@@ -39,17 +39,42 @@ function normalizeStatus(raw: unknown): string {
     .toUpperCase();
 }
 
+type ConeImpact = {
+  population_estimate?: number;
+  residential_count?: number;
+  structures_total?: number;
+  hospitals_count?: number;
+  hospitals_total_beds?: number;
+  schools_count?: number;
+  schools_total_enrollment?: number;
+  transmission_segments?: number;
+  transmission_max_kv?: number;
+  critical_facilities_total?: number;
+  error?: string;
+};
+
+type SpreadPayload = {
+  cones?: Record<string, GeoJSON.Polygon | GeoJSON.MultiPolygon | null>;
+  cone_impact?: ConeImpact | null;
+  head_ros_chains_per_hr?: number | null;
+  flame_length_ft?: number | null;
+  burn_area_24h_km2_p25?: number | null;
+};
+
 export function IncidentMap() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
+  const coneLabelRef = useRef<maplibregl.Marker | null>(null);
   const deckOverlayRef = useRef<MapboxOverlay | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const [showWind, setShowWind] = useState(true);
   const [showEvac, setShowEvac] = useState(true);
   const [showFirms, setShowFirms] = useState(true);
+  const [showCone, setShowCone] = useState(true);
 
   const { data: incidents } = useIncidents();
+  const spread = useStore((s) => s.agentOutputs.spread_simulation);
   const viewport = useStore((s) => s.mapViewport);
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
@@ -256,6 +281,133 @@ export function IncidentMap() {
       console.warn("perimeter layer error:", err);
     }
   }, [perimeter, mapLoaded]);
+
+  // ---- Spread prediction cone (high-vis red, tornado-warning style) ----
+  // Drawn from spread_simulation.payload.cones["24h"], labeled with
+  // cone_impact (population + critical infra inside the cone).
+  const cone24h = useMemo(() => {
+    const payload = (spread?.payload ?? {}) as SpreadPayload;
+    return payload.cones?.["24h"] ?? null;
+  }, [spread]);
+
+  const coneImpact = useMemo<ConeImpact | null>(() => {
+    const payload = (spread?.payload ?? {}) as SpreadPayload;
+    const impact = payload.cone_impact;
+    if (!impact || impact.error) return null;
+    return impact;
+  }, [spread]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    try {
+      if (map.getLayer("cone-fill")) map.removeLayer("cone-fill");
+      if (map.getLayer("cone-outline")) map.removeLayer("cone-outline");
+      if (map.getLayer("cone-outline-glow"))
+        map.removeLayer("cone-outline-glow");
+      if (map.getSource("cone")) map.removeSource("cone");
+    } catch {
+      /* mid-rerender */
+    }
+    if (coneLabelRef.current) {
+      coneLabelRef.current.remove();
+      coneLabelRef.current = null;
+    }
+
+    if (!showCone || !cone24h) return;
+
+    // The spread agent's cone is a single ellipse with a rear vertex at the
+    // incident point. We want the painted region to emanate from the ENTIRE
+    // downwind perimeter outline — not from one point. Take the convex hull
+    // of (perimeter vertices ∪ cone vertices). The hull wraps the fire's
+    // current outline at the rear and tapers out to the cone's tip, which is
+    // the tornado-warning-cone shape the user asked for.
+    const hullCone = buildPerimeterCone(cone24h, perimeter ?? null);
+
+    const features: GeoJSON.Feature[] = [
+      { type: "Feature", geometry: hullCone, properties: { kind: "cone" } },
+    ];
+    if (perimeter?.features?.length) {
+      for (const pf of perimeter.features) {
+        if (
+          pf.geometry?.type === "Polygon" ||
+          pf.geometry?.type === "MultiPolygon"
+        ) {
+          features.push({
+            type: "Feature",
+            geometry: pf.geometry,
+            properties: { kind: "perimeter" },
+          });
+        }
+      }
+    }
+    const fc: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features,
+    };
+
+    try {
+      map.addSource("cone", { type: "geojson", data: fc });
+      // Soft outer halo for contrast on dark basemap.
+      map.addLayer({
+        id: "cone-outline-glow",
+        type: "line",
+        source: "cone",
+        paint: {
+          "line-color": "#c026d3",
+          "line-width": 7,
+          "line-blur": 6,
+          "line-opacity": 0.45,
+        },
+      });
+      map.addLayer({
+        id: "cone-fill",
+        type: "fill",
+        source: "cone",
+        paint: {
+          "fill-color": "#a855f7",
+          "fill-opacity": 0.3,
+          "fill-antialias": true,
+        },
+      });
+      map.addLayer({
+        id: "cone-outline",
+        type: "line",
+        source: "cone",
+        // Only outline the projected cone — leave the inner perimeter
+        // ring un-outlined so the two shapes read as one continuous body.
+        filter: ["==", ["get", "kind"], "cone"],
+        paint: {
+          "line-color": "#d946ef",
+          "line-width": 2.5,
+          "line-opacity": 0.95,
+        },
+      });
+
+      // Keep incident markers and perimeter on top of the cone.
+      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
+      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
+
+      // Place an HTML label at the cone's centroid with impact data.
+      const center = geometryCentroid(hullCone);
+      if (center) {
+        const el = document.createElement("div");
+        el.className = "cone-impact-label";
+        el.innerHTML = renderConeLabel(coneImpact);
+        coneLabelRef.current = new maplibregl.Marker({
+          element: el,
+          anchor: "center",
+        })
+          .setLngLat(center)
+          .addTo(map);
+      }
+    } catch (err) {
+      console.warn("cone layer error:", err);
+    }
+  }, [cone24h, coneImpact, perimeter, showCone, mapLoaded]);
 
   // ---- Evac zone polygons (Cal OES / Zonehaven aggregation) ----
   // Filter the statewide feed to active zones in the incident's vicinity so
@@ -536,8 +688,18 @@ export function IncidentMap() {
     if (!showWind || !wind?.vectors?.length) return;
 
     try {
+      // Open-Meteo's wind_direction_10m is meteorological "FROM" — the
+      // direction the wind originates from. maplibre-gl-wind's
+      // generateWindTexture interprets `direction` as the heading the wind
+      // travels TOWARD (u = speed·sin(dir), v = speed·cos(dir)). Pre-flip by
+      // 180° here so the particle drift matches physical wind direction and
+      // agrees with the spread-cone heading.
+      const vectorsTo = wind.vectors.map((v) => ({
+        ...v,
+        direction: (v.direction + 180) % 360,
+      }));
       const { canvas, uMin, uMax, vMin, vMax } = generateWindTexture(
-        wind.vectors,
+        vectorsTo,
         {
           width: 128,
           height: 128,
@@ -594,12 +756,180 @@ export function IncidentMap() {
         setShowEvac={setShowEvac}
         showFirms={showFirms}
         setShowFirms={setShowFirms}
+        showCone={showCone}
+        setShowCone={setShowCone}
+        hasCone={!!cone24h}
         wind={wind}
         evacCount={evacFiltered?.features.length ?? 0}
         firmsCount={firms?.features?.length ?? 0}
       />
     </div>
   );
+}
+
+function geometryCentroid(
+  geom: GeoJSON.Polygon | GeoJSON.MultiPolygon,
+): [number, number] | null {
+  // Lightweight centroid of the largest ring — good enough for label placement.
+  const rings: GeoJSON.Position[][] =
+    geom.type === "Polygon"
+      ? [geom.coordinates[0]]
+      : geom.coordinates.map((poly) => poly[0]);
+  let best: GeoJSON.Position[] | null = null;
+  let bestArea = -Infinity;
+  for (const ring of rings) {
+    if (!ring || ring.length < 3) continue;
+    let area = 0;
+    for (let i = 0; i < ring.length - 1; i++) {
+      area +=
+        ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+    }
+    area = Math.abs(area) / 2;
+    if (area > bestArea) {
+      bestArea = area;
+      best = ring;
+    }
+  }
+  if (!best) return null;
+  let x = 0;
+  let y = 0;
+  let n = 0;
+  for (const [lon, lat] of best) {
+    if (Number.isFinite(lon) && Number.isFinite(lat)) {
+      x += lon;
+      y += lat;
+      n++;
+    }
+  }
+  return n > 0 ? [x / n, y / n] : null;
+}
+
+function collectVertices(
+  geom: GeoJSON.Polygon | GeoJSON.MultiPolygon,
+  out: Array<[number, number]>,
+): void {
+  const rings: GeoJSON.Position[][] =
+    geom.type === "Polygon" ? geom.coordinates : geom.coordinates.flat();
+  for (const ring of rings) {
+    for (const [lon, lat] of ring) {
+      if (Number.isFinite(lon) && Number.isFinite(lat)) {
+        out.push([lon as number, lat as number]);
+      }
+    }
+  }
+}
+
+// Andrew's monotone-chain convex hull. Returns the hull vertices in
+// counter-clockwise order, with the first vertex repeated at the end so the
+// result is a valid GeoJSON linear ring.
+function convexHull(points: Array<[number, number]>): Array<[number, number]> {
+  if (points.length < 3) return points.slice();
+  const pts = points
+    .slice()
+    .sort((a, b) => (a[0] === b[0] ? a[1] - b[1] : a[0] - b[0]));
+  const cross = (
+    o: [number, number],
+    a: [number, number],
+    b: [number, number],
+  ) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+
+  const lower: Array<[number, number]> = [];
+  for (const p of pts) {
+    while (
+      lower.length >= 2 &&
+      cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0
+    ) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+  const upper: Array<[number, number]> = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (
+      upper.length >= 2 &&
+      cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0
+    ) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  const hull = lower.concat(upper);
+  if (hull.length > 0) hull.push(hull[0]);
+  return hull;
+}
+
+function buildPerimeterCone(
+  cone: GeoJSON.Polygon | GeoJSON.MultiPolygon,
+  perimeter: GeoJSON.FeatureCollection | null,
+): GeoJSON.Polygon {
+  const verts: Array<[number, number]> = [];
+  collectVertices(cone, verts);
+  if (perimeter?.features?.length) {
+    for (const f of perimeter.features) {
+      const g = f.geometry;
+      if (g?.type === "Polygon" || g?.type === "MultiPolygon") {
+        collectVertices(g, verts);
+      }
+    }
+  }
+  const ring = convexHull(verts);
+  return { type: "Polygon", coordinates: [ring] };
+}
+
+function fmtInt(n: number | undefined | null): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return Math.round(n).toLocaleString();
+}
+
+function renderConeLabel(impact: ConeImpact | null): string {
+  if (!impact) {
+    return `
+      <div style="font-family:ui-sans-serif,system-ui;font-size:11px;line-height:1.35;
+        color:#f5e9ff;background:rgba(59,7,100,0.92);border:1.5px solid #d946ef;
+        padding:6px 8px;border-radius:6px;box-shadow:0 2px 10px rgba(217,70,239,0.5);
+        white-space:nowrap;letter-spacing:0.02em">
+        <strong style="color:#f0abfc;text-transform:uppercase;font-size:10px">
+          24h spread cone
+        </strong>
+        <div style="opacity:0.75">impact data unavailable</div>
+      </div>
+    `;
+  }
+  return `
+    <div style="font-family:ui-sans-serif,system-ui;font-size:11px;line-height:1.4;
+      color:#f5e9ff;background:rgba(59,7,100,0.92);border:1.5px solid #d946ef;
+      padding:7px 9px;border-radius:7px;box-shadow:0 2px 12px rgba(217,70,239,0.55);
+      min-width:170px;max-width:220px">
+      <div style="font-weight:700;font-size:10px;letter-spacing:0.08em;
+        text-transform:uppercase;color:#f0abfc;margin-bottom:4px">
+        24h spread cone
+      </div>
+      <div style="font-weight:700;font-size:14px;color:#fff">
+        ~${fmtInt(impact.population_estimate)} people
+      </div>
+      <div style="border-top:1px solid rgba(240,171,252,0.3);margin:5px 0 4px 0"></div>
+      <div>🏠 ${fmtInt(impact.residential_count)} residences
+        <span style="opacity:0.65">/ ${fmtInt(impact.structures_total)} total</span>
+      </div>
+      <div>🏥 ${fmtInt(impact.hospitals_count)} hospitals
+        <span style="opacity:0.65">(${fmtInt(impact.hospitals_total_beds)} beds)</span>
+      </div>
+      <div>🏫 ${fmtInt(impact.schools_count)} schools
+        <span style="opacity:0.65">(${fmtInt(impact.schools_total_enrollment)} students)</span>
+      </div>
+      <div>⚡ ${fmtInt(impact.transmission_segments)} TX lines
+        ${
+          impact.transmission_max_kv
+            ? `<span style="opacity:0.65">max ${Math.round(impact.transmission_max_kv)} kV</span>`
+            : ""
+        }
+      </div>
+      <div>🚒 ${fmtInt(impact.critical_facilities_total)} critical facilities</div>
+    </div>
+  `;
 }
 
 function sizeForAcres(acres: Incident["acres"]): number {
@@ -632,6 +962,9 @@ function Legend({
   setShowEvac,
   showFirms,
   setShowFirms,
+  showCone,
+  setShowCone,
+  hasCone,
   wind,
   evacCount,
   firmsCount,
@@ -643,6 +976,9 @@ function Legend({
   setShowEvac: (b: boolean) => void;
   showFirms: boolean;
   setShowFirms: (b: boolean) => void;
+  showCone: boolean;
+  setShowCone: (b: boolean) => void;
+  hasCone: boolean;
   wind: WindGrid | undefined;
   evacCount: number;
   firmsCount: number;
@@ -662,6 +998,30 @@ function Legend({
         <div className="mt-1 flex items-center gap-2">
           <span className="h-0.5 w-4 border-t-2 border-dashed border-ember-500" />
           Fire perimeter (WFIGS)
+        </div>
+      )}
+
+      {hasCone && (
+        <label className="mt-2 flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={showCone}
+            onChange={(e) => setShowCone(e.target.checked)}
+            className="h-3 w-3 accent-fuchsia-500"
+          />
+          <span className="font-medium">24h spread cone</span>
+        </label>
+      )}
+      {hasCone && showCone && (
+        <div className="ml-5 mt-1 flex items-center gap-1.5 text-[10px] text-smoke-400">
+          <span
+            className="h-2 w-3 rounded-sm border"
+            style={{
+              backgroundColor: "rgba(168,85,247,0.35)",
+              borderColor: "#d946ef",
+            }}
+          />
+          <span>fire-prediction cone (purple)</span>
         </div>
       )}
 
