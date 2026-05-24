@@ -200,6 +200,7 @@ export function IncidentMap() {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const coneLabelRef = useRef<maplibregl.Marker | null>(null);
+  const windCompassRef = useRef<maplibregl.Marker | null>(null);
   const deckOverlayRef = useRef<MapboxOverlay | null>(null);
   // Tracks whether the most recent zoom delta came from the user (true) or
   // from a programmatic camera animation like flyTo (false). Read by the
@@ -1739,17 +1740,28 @@ export function IncidentMap() {
             // Tight speed range so typical 2–10 m/s winds land in the
             // bright white band; only genuinely strong gusts trip warm.
             speedRange: [0, 14],
-            // Mostly translucent → bright white core, with a faint warm
-            // wash reserved for the top end. Keeps the field reading as a
-            // cohesive flow instead of a rainbow.
-            colorRamp: [
-              [0.0, [226, 232, 240, 0]], // fully transparent tail
-              [0.1, [241, 245, 249, 140]], // soft slate fade-in
-              [0.35, [255, 255, 255, 235]], // bright white core
-              [0.6, [255, 255, 255, 255]], // peak white
-              [0.8, [253, 186, 116, 245]], // orange-300 (breezy)
-              [1.0, [239, 68, 68, 255]], // red-500 (gale)
-            ],
+            // The color ramp switches with the basemap. Dark basemap reads
+            // best with mostly-white particles + warm gust tints. Satellite
+            // imagery is light/varied (browns, greens, snow), so whites
+            // disappear into it — we use cyan → yellow → red, which pops
+            // against both light terrain and shaded canyons.
+            colorRamp:
+              basemap === "satellite"
+                ? [
+                    [0.0, [15, 23, 42, 0]], // transparent tail
+                    [0.12, [30, 64, 175, 200]], // deep blue fade-in
+                    [0.35, [56, 189, 248, 255]], // sky-400 core
+                    [0.6, [250, 204, 21, 255]], // yellow-400 (breezy)
+                    [1.0, [239, 68, 68, 255]], // red-500 (gale)
+                  ]
+                : [
+                    [0.0, [226, 232, 240, 0]], // fully transparent tail
+                    [0.1, [241, 245, 249, 140]], // soft slate fade-in
+                    [0.35, [255, 255, 255, 235]], // bright white core
+                    [0.6, [255, 255, 255, 255]], // peak white
+                    [0.8, [253, 186, 116, 245]], // orange-300 (breezy)
+                    [1.0, [239, 68, 68, 255]], // red-500 (gale)
+                  ],
           }),
         ],
       });
@@ -1758,7 +1770,70 @@ export function IncidentMap() {
     } catch (err) {
       console.warn("wind layer error:", err);
     }
-  }, [wind, showWind, mapLoaded, windLowZoom]);
+  }, [wind, showWind, mapLoaded, windLowZoom, basemap]);
+
+  // ---- Wind compass marker at incident center ----
+  // Single arrow that points the direction the wind is BLOWING TOWARD,
+  // sourced from the wind vector closest to the incident. This is the
+  // ground-truth indicator the IC can compare the particle flow against —
+  // if particles drift along the arrow we know the rendering matches
+  // Open-Meteo's reading; if they drift opposite the renderer is flipped.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) {
+      windCompassRef.current?.remove();
+      windCompassRef.current = null;
+      return;
+    }
+    if (!showWind || !selectedIncident || !wind?.vectors?.length) {
+      windCompassRef.current?.remove();
+      windCompassRef.current = null;
+      return;
+    }
+
+    // Pick the vector nearest the incident — Open-Meteo returns a 7×7 grid
+    // around the incident lat/lon so the centre sample is most representative.
+    const { lat, lon } = selectedIncident;
+    let best = wind.vectors[0];
+    let bestDist = Infinity;
+    for (const v of wind.vectors) {
+      const dx = v.lon - lon;
+      const dy = v.lat - lat;
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) {
+        bestDist = d;
+        best = v;
+      }
+    }
+
+    const fromDeg = best.direction;
+    const toDeg = (fromDeg + 180) % 360;
+    const speedMs = best.speed;
+
+    windCompassRef.current?.remove();
+    const el = document.createElement("div");
+    el.style.cssText =
+      "display:flex;flex-direction:column;align-items:center;gap:2px;pointer-events:none;font:600 10px ui-sans-serif,system-ui;color:#f1f5f9;";
+    el.innerHTML = `
+      <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.6);border-radius:999px;padding:2px 8px;backdrop-filter:blur(4px);white-space:nowrap;">
+        wind ${speedMs.toFixed(1)} m/s → ${Math.round(toDeg)}°
+      </div>
+      <svg width="42" height="42" viewBox="-21 -21 42 42" style="transform:rotate(${toDeg}deg);filter:drop-shadow(0 0 4px rgba(0,0,0,0.6));">
+        <path d="M 0 -16 L 6 8 L 0 4 L -6 8 Z" fill="#38bdf8" stroke="#0c1220" stroke-width="1.5" stroke-linejoin="round" />
+      </svg>
+    `;
+    windCompassRef.current = new maplibregl.Marker({
+      element: el,
+      anchor: "center",
+    })
+      .setLngLat([lon, lat])
+      .addTo(map);
+
+    return () => {
+      windCompassRef.current?.remove();
+      windCompassRef.current = null;
+    };
+  }, [wind, showWind, selectedIncident, mapLoaded]);
 
   // ---- Register custom infra icons ----
   // Pre-render each layer's emoji onto a colored disc and load it as a
