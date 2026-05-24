@@ -265,9 +265,41 @@ async def agent_stream(req: StreamRequest) -> EventSourceResponse:
 @app.post("/agent/resume")
 async def agent_resume(req: ResumeRequest) -> EventSourceResponse:
     cmd = Command(resume=req.decision)
-    # Resumes are always against the briefing graph (only briefing emits
-    # interrupts in v0.2). Same checkpointer, so the thread state is intact.
+    # Resume against whichever graph paused on the interrupt. Interrupts
+    # can come from EITHER the briefing graph (the original evac_intel
+    # status-change proposals) or the chat graph (the synthetic test
+    # path added when the IC was wired to direct specialists). They
+    # share a checkpointer, but each compiled graph only knows how to
+    # resume a node that exists in its own topology — invoking the
+    # wrong graph leaves the paused state untouched.
+    #
+    # Source of truth: `scratch.mode` set by the orchestrator (briefing)
+    # or the chat node (chat). We read it from the checkpoint snapshot
+    # and route the resume accordingly. Default = briefing for
+    # backwards compatibility.
+    paused_mode = await _detect_paused_mode(req.thread_id)
+    if paused_mode == "chat":
+        return EventSourceResponse(_stream_chat(cmd, req.thread_id))
     return EventSourceResponse(_stream_briefing(cmd, req.thread_id))
+
+
+async def _detect_paused_mode(thread_id: str) -> str:
+    """Inspect the checkpointed state for thread_id and return whichever
+    mode ('briefing' or 'chat') is currently paused on an interrupt.
+    Defaults to 'briefing' if we can't tell."""
+    config = {"configurable": {"thread_id": thread_id}}
+    # Try the chat graph first — if a chat-mode interrupt paused there,
+    # this snapshot will show next steps. If chat isn't paused, fall
+    # through to briefing.
+    try:
+        async with compiled_graph(mode="chat") as graph:
+            snap = await graph.aget_state(config)
+            scratch = (snap.values or {}).get("scratch") or {}
+            if scratch.get("mode") == "chat" and snap.next:
+                return "chat"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("paused-mode chat probe failed: %s", exc)
+    return "briefing"
 
 
 @app.get("/agent/pending/{thread_id}")

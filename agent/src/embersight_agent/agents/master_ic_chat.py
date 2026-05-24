@@ -97,6 +97,11 @@ async def run(state: AgentState) -> dict[str, Any]:
     respond. If the model emits tool calls, LangGraph routes through the
     ToolNode and re-enters this node with the tool results in messages.
     """
+    # Tag the thread as chat-mode so /agent/resume routes to the chat
+    # graph for any interrupts that fire from this turn. See main.py
+    # _detect_paused_mode.
+    state.scratch["mode"] = "chat"
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return _offline_reply(state)
 
@@ -149,7 +154,8 @@ async def run(state: AgentState) -> dict[str, Any]:
                     ),
                     name=AGENT_NAME,
                 )
-            ]
+            ],
+            "scratch": {"mode": "chat"},
         }
 
     # The ai_msg may include tool_calls; LangGraph routes via the conditional
@@ -159,7 +165,16 @@ async def run(state: AgentState) -> dict[str, Any]:
             ai_msg.name = AGENT_NAME  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             pass
-    return {"messages": [ai_msg]}
+    return {
+        "messages": [ai_msg],
+        # Mark the thread as paused in chat mode so /agent/resume routes
+        # the next user approval back through the chat graph (not the
+        # briefing graph). Without this tag the resume defaults to
+        # briefing and the chat graph stays paused on its interrupt,
+        # producing a "Consulting..." spinner that never resolves plus
+        # a BadRequestError on the next chat turn (orphaned tool_call).
+        "scratch": {"mode": "chat"},
+    }
 
 
 def _offline_reply(state: AgentState) -> dict[str, Any]:
@@ -182,6 +197,7 @@ def _offline_reply(state: AgentState) -> dict[str, Any]:
     )
     return {
         "messages": [AIMessage(content=text, name=AGENT_NAME)],
+        "scratch": {"mode": "chat"},
     }
 
 
