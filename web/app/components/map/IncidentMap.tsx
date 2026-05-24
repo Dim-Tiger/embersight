@@ -218,12 +218,13 @@ export function IncidentMap() {
   }, []);
 
   // Basemap swap: setStyle wipes all sources/layers, so flip mapLoaded
-  // off until the new style finishes. MapLibre's `load` event only fires
-  // once for the initial style — for subsequent setStyle calls we need
-  // `style.load`. Skip the very first render because the map is already
-  // being constructed with the right style and `load` will fire from the
-  // init effect.
-  const basemapInitialized = useRef(false);
+  // off until the new style finishes loading. Every layer effect below
+  // already gates on mapLoaded, so they'll rebuild cleanly.
+  //
+  // Why `styledata` (not `load`): MapLibre's `load` event only fires
+  // once per Map instance at initial creation. After setStyle, only
+  // `styledata` / `style.load` fire — so listening for `load` here
+  // leaves mapLoaded stuck at false and every overlay vanishes.
   useEffect(() => {
     if (!basemapInitialized.current) {
       basemapInitialized.current = true;
@@ -251,18 +252,15 @@ export function IncidentMap() {
     }
     const nextStyle =
       basemap === "satellite" ? SATELLITE_STYLE : CARTO_DARK;
-    map.setStyle(nextStyle as maplibregl.StyleSpecification | string);
-    // MapLibre v4 does not refire `load` after setStyle; the only reliable
-    // signal that the new style is fully parsed and the GL layers are
-    // ready is `styledata` + `isStyleLoaded()`. styledata can fire
-    // multiple times during a single load, so keep polling until it
-    // returns true, then detach.
+    // Register listener BEFORE setStyle — inline style specs can fire
+    // styledata synchronously, and we'd miss it otherwise.
     const onStyleData = () => {
       if (!map.isStyleLoaded()) return;
       map.off("styledata", onStyleData);
       setMapLoaded(true);
     };
     map.on("styledata", onStyleData);
+    map.setStyle(nextStyle as maplibregl.StyleSpecification | string);
     return () => {
       map.off("styledata", onStyleData);
     };
@@ -1127,18 +1125,21 @@ export function IncidentMap() {
             image: canvas.toDataURL(),
             bounds: wind.bounds,
             imageUnscale: [minV, maxV],
-            // Sparse jet-contrail look from the first wind change:
-            // 550 particles with a bright-white core contrail palette.
-            // width is kept narrow (1.5) so the particle's travel PATH
-            // (along wind direction) is the dominant visual axis — a wide
-            // width would stretch perpendicular to motion instead.
-            numParticles: 550,
-            maxAge: 220,
-            speedFactor: 55,
-            width: 1.5,
-            speedRange: [0, 25],
-            // Contrail palette: faint slate tail → near-white → pure
-            // white core → yellow → orange → red at max speed.
+            // Few, long, thin particles read as cohesive wind streams.
+            // Total trail length = maxAge * per-tick stride, where stride
+            // is (speedFactor * 0.01) / 2^zoom. The lib's prop-type
+            // min/max are advisory deck.gl validators (not runtime caps),
+            // so we push maxAge well past 255 for longer trails while
+            // keeping speedFactor low for slow, languid motion.
+            numParticles: 180,
+            maxAge: 700,
+            speedFactor: 280,
+            width: 1.6,
+            speedRange: [0, 22],
+            // Streamline palette: faint slate tail → bright white core →
+            // amber → orange → red as wind speed climbs. Kept narrow on
+            // the white-core band so most streams read as cohesive white
+            // lines, with warm colors reserved for genuinely strong wind.
             colorRamp: [
               [0.0, [203, 213, 225, 200]], // slate-300 (faint tail)
               [0.15, [248, 250, 252, 245]], // near-white core
