@@ -21,6 +21,16 @@ body {
   box-sizing: border-box;
 }
 
+/* Used by AgentActivityBanner: a left→right sweep that signals "agent is working" */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
 /* Strip the default white MapLibre popup chrome — our tooltips supply their own styling */
 .maplibregl-popup-content {
   background: transparent !important;
