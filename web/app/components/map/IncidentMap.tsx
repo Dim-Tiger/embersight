@@ -252,14 +252,16 @@ export function IncidentMap() {
     }
     const nextStyle =
       basemap === "satellite" ? SATELLITE_STYLE : CARTO_DARK;
-    // Register listener BEFORE setStyle — inline style specs can fire
-    // styledata synchronously, and we'd miss it otherwise.
+    // setStyle wipes sources/layers and MapLibre's `load` event does
+    // not re-fire. We can't gate on `isStyleLoaded()` either — it stays
+    // false indefinitely for raster basemaps whose tiles keep loading
+    // on every pan/zoom. Use the first `styledata` event after setStyle
+    // as our "style spec parsed, safe to re-add sources" signal.
     const onStyleData = () => {
-      if (!map.isStyleLoaded()) return;
       map.off("styledata", onStyleData);
       setMapLoaded(true);
     };
-    map.on("styledata", onStyleData);
+    map.once("styledata", onStyleData);
     map.setStyle(nextStyle as maplibregl.StyleSpecification | string);
     return () => {
       map.off("styledata", onStyleData);
