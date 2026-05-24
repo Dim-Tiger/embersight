@@ -72,6 +72,20 @@ def _bbox_around_incident(
     )
 
 
+def _wkt_to_geojson(wkt: str) -> dict | None:
+    """Best-effort WKT polygon → GeoJSON geometry. None on failure."""
+    if not wkt:
+        return None
+    try:
+        from shapely import wkt as _wkt  # noqa: PLC0415
+        from shapely.geometry import mapping  # noqa: PLC0415
+
+        geom = _wkt.loads(wkt)
+        return mapping(geom)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _coerce_geom(value: Any):
     """Convert WKT / GeoJSON / shapely geometry to a shapely BaseGeometry,
     or None on failure. Lazy-imports shapely."""
@@ -547,14 +561,62 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
             datetime.now(timezone.utc)
             + timedelta(minutes=DEFAULT_DECISION_TTL_MIN)
         ).isoformat()
+
+        polygon_geojson = _wkt_to_geojson(zone["polygon_wkt"])
+        residential_count = 0
+        try:
+            residential_count = max(
+                0, int(round(population / DEFAULT_HOUSEHOLD_SIZE))
+            )
+        except Exception:  # noqa: BLE001
+            residential_count = 0
+
+        # Structured "why" — assembled from the model's one-liner + the
+        # signals that drove the proposal. The IC card formats these as
+        # bullets so the human can see the reasoning, not just the answer.
+        why_bullets: list[str] = []
+        if rationale:
+            why_bullets.append(rationale)
+        if overlaps.get("6h", 0) > 0:
+            why_bullets.append(
+                f"6-hr spread cone covers {overlaps['6h']:.0%} of zone area"
+            )
+        if overlaps.get("12h", 0) > 0:
+            why_bullets.append(
+                f"12-hr cone covers {overlaps['12h']:.0%}"
+            )
+        if overlaps.get("24h", 0) > 0:
+            why_bullets.append(
+                f"24-hr cone covers {overlaps['24h']:.0%}"
+            )
+        if egress.get("clear") is False:
+            why_bullets.append(
+                f"Egress at risk — {egress.get('reason', 'route blocked')}"
+            )
+        elif egress.get("clear") is True:
+            why_bullets.append("Egress routes currently clear")
+        if adjacent_to_order:
+            why_bullets.append("Borders an existing ORDER zone")
+
+        impact = {
+            "human_displacement_estimate": population,
+            "residential_structures_estimate": residential_count,
+            "egress_clear": egress.get("clear"),
+            "egress_blocked_edges": egress.get("egress_edges_blocked", 0),
+        }
+
         envelope = {
             "type": "evac_zone_change",
             "zone_id": zone["zone_id"],
             "name": zone["name"],
+            "jurisdiction": zone.get("jurisdiction"),
             "current_status": zone["current_status"],
             "proposed_status": proposed_status,
             "rationale": rationale,
             "rationale_source": rationale_source,
+            "why": why_bullets,
+            "impact": impact,
+            "polygon_geojson": polygon_geojson,
             "population_estimate": population,
             "egress_status": egress,
             "overlaps": overlaps,

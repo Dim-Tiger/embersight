@@ -41,6 +41,48 @@ export type AgentOutput = {
 
 export type AgentStatus = "pending" | "running" | "done" | "error";
 
+export type EvacImpact = {
+  human_displacement_estimate?: number;
+  residential_structures_estimate?: number;
+  egress_clear?: boolean | null;
+  egress_blocked_edges?: number;
+};
+
+export type EvacZoneChangePayload = {
+  type?: "evac_zone_change";
+  zone_id?: string;
+  name?: string;
+  jurisdiction?: string | null;
+  current_status?: string;
+  proposed_status?: "WARNING" | "ORDER" | "NORMAL";
+  rationale?: string;
+  rationale_source?: string;
+  why?: string[];
+  impact?: EvacImpact;
+  polygon_geojson?: GeoJSON.Polygon | GeoJSON.MultiPolygon | null;
+  population_estimate?: number;
+  expires_at?: string;
+  // Inline refine chat thread, scoped to this proposal. Not part of the
+  // backend envelope — owned by the frontend so the user can talk through
+  // a single suggestion without polluting the main IC chat.
+  refineThread?: Array<{
+    id: string;
+    role: "user" | "agent";
+    text: string;
+    streaming?: boolean;
+    ts: number;
+  }>;
+  refineOpen?: boolean;
+};
+
+export type AcceptedEvacZone = {
+  zone_id: string;
+  name: string;
+  status: "WARNING" | "ORDER";
+  polygon: GeoJSON.Polygon | GeoJSON.MultiPolygon;
+  accepted_at: number;
+};
+
 export type PendingInterrupt = {
   thread_id: string;
   interrupt: {
@@ -95,6 +137,7 @@ export type Store = {
   agentOutputs: Record<string, AgentOutput>;
   agentStatuses: Record<string, AgentStatus>;
   pendingInterrupts: PendingInterrupt[];
+  acceptedEvacZones: AcceptedEvacZone[];
   streaming: boolean;
   done: boolean;
   errorMessage: string | null;
@@ -136,6 +179,25 @@ export type Store = {
   setPendingUserQuery: (q: string | null) => void;
   upsertInterrupt: (i: PendingInterrupt) => void;
   removeInterrupt: (id?: string) => void;
+  acceptEvacZone: (zone: AcceptedEvacZone) => void;
+  removeAcceptedEvacZone: (zoneId: string) => void;
+  toggleEvacRefine: (interruptId: string, open: boolean) => void;
+  appendEvacRefineMessage: (
+    interruptId: string,
+    msg: {
+      id: string;
+      role: "user" | "agent";
+      text: string;
+      streaming?: boolean;
+      ts: number;
+    },
+  ) => void;
+  updateEvacRefineMessage: (
+    interruptId: string,
+    msgId: string,
+    delta: string,
+    done?: boolean,
+  ) => void;
   restartCount: number;
   requestRestart: () => void;
 };
@@ -156,6 +218,7 @@ export const useStore = create<Store>((set) => ({
   agentOutputs: {},
   agentStatuses: {},
   pendingInterrupts: [],
+  acceptedEvacZones: [],
   streaming: false,
   done: false,
   errorMessage: null,
@@ -268,6 +331,80 @@ export const useStore = create<Store>((set) => ({
       pendingInterrupts: s.pendingInterrupts.filter(
         (x) => x.interrupt.id !== id,
       ),
+    })),
+  acceptEvacZone: (zone) =>
+    set((s) => ({
+      acceptedEvacZones: [
+        ...s.acceptedEvacZones.filter((z) => z.zone_id !== zone.zone_id),
+        zone,
+      ],
+    })),
+  removeAcceptedEvacZone: (zoneId) =>
+    set((s) => ({
+      acceptedEvacZones: s.acceptedEvacZones.filter(
+        (z) => z.zone_id !== zoneId,
+      ),
+    })),
+  toggleEvacRefine: (interruptId, open) =>
+    set((s) => ({
+      pendingInterrupts: s.pendingInterrupts.map((p) =>
+        p.interrupt.id === interruptId
+          ? {
+              ...p,
+              interrupt: {
+                ...p.interrupt,
+                payload: {
+                  ...(p.interrupt.payload ?? {}),
+                  refineOpen: open,
+                },
+              },
+            }
+          : p,
+      ),
+    })),
+  appendEvacRefineMessage: (interruptId, msg) =>
+    set((s) => ({
+      pendingInterrupts: s.pendingInterrupts.map((p) => {
+        if (p.interrupt.id !== interruptId) return p;
+        const prev = ((p.interrupt.payload as any)?.refineThread ??
+          []) as EvacZoneChangePayload["refineThread"];
+        return {
+          ...p,
+          interrupt: {
+            ...p.interrupt,
+            payload: {
+              ...(p.interrupt.payload ?? {}),
+              refineThread: [...(prev ?? []), msg],
+            },
+          },
+        };
+      }),
+    })),
+  updateEvacRefineMessage: (interruptId, msgId, delta, done) =>
+    set((s) => ({
+      pendingInterrupts: s.pendingInterrupts.map((p) => {
+        if (p.interrupt.id !== interruptId) return p;
+        const thread = ((p.interrupt.payload as any)?.refineThread ??
+          []) as EvacZoneChangePayload["refineThread"];
+        return {
+          ...p,
+          interrupt: {
+            ...p.interrupt,
+            payload: {
+              ...(p.interrupt.payload ?? {}),
+              refineThread: (thread ?? []).map((m) =>
+                m.id === msgId
+                  ? {
+                      ...m,
+                      text: m.text + delta,
+                      streaming: done ? false : m.streaming,
+                    }
+                  : m,
+              ),
+            },
+          },
+        };
+      }),
     })),
 }));
 

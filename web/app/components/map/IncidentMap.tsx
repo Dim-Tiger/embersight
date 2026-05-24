@@ -93,10 +93,10 @@ type RoutingPayload = {
 const EVAC_STATUS_COLORS: Record<string, string> = {
   "EVACUATION ORDER": "#dc2626", // red-600
   ORDER: "#dc2626",
-  "EVACUATION WARNING": "#f59e0b", // amber-500
-  WARNING: "#f59e0b",
-  "SHELTER IN PLACE": "#facc15", // yellow-400
-  SHELTER: "#facc15",
+  "EVACUATION WARNING": "#facc15", // yellow-400
+  WARNING: "#facc15",
+  "SHELTER IN PLACE": "#a855f7", // purple-500
+  SHELTER: "#a855f7",
   ADVISORY: "#3b82f6", // blue-500
   "EVACUATION ADVISORY": "#3b82f6",
 };
@@ -192,6 +192,33 @@ export function IncidentMap() {
   const routingOutput = useStore(
     (s) => s.agentOutputs.routing_staging,
   ) as { payload?: RoutingPayload } | undefined;
+  const pendingInterrupts = useStore((s) => s.pendingInterrupts);
+  const acceptedEvacZones = useStore((s) => s.acceptedEvacZones);
+
+  // Pull the polygons + status out of pending evac_zone_change interrupts so
+  // we can paint a pulsing suggestion overlay on the map. Each suggestion has
+  // a stable zone_id so the layer can find/update it between renders.
+  const suggestedEvacZones = useMemo(() => {
+    return pendingInterrupts
+      .filter((p) => p.interrupt.type === "evac_zone_change")
+      .map((p) => {
+        const payload = (p.interrupt.payload ?? {}) as Record<string, unknown>;
+        const status = String(payload.proposed_status ?? "").toUpperCase();
+        if (status !== "WARNING" && status !== "ORDER") return null;
+        const geom = payload.polygon_geojson as
+          | GeoJSON.Polygon
+          | GeoJSON.MultiPolygon
+          | undefined;
+        if (!geom) return null;
+        return {
+          zone_id: String(payload.zone_id ?? p.interrupt.id ?? Math.random()),
+          name: String(payload.name ?? "Suggested zone"),
+          status: status as "WARNING" | "ORDER",
+          geom,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+  }, [pendingInterrupts]);
 
   // Init map
   useEffect(() => {
@@ -243,69 +270,49 @@ export function IncidentMap() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Basemap swap: setStyle wipes all sources/layers, so flip mapLoaded
-  // off until the new style finishes loading. Every layer effect below
-  // already gates on mapLoaded, so they'll rebuild cleanly.
-  //
-  // Why `styledata` (not `load`): MapLibre's `load` event only fires
-  // once per Map instance at initial creation. After setStyle, only
-  // `styledata` / `style.load` fire — so listening for `load` here
-  // leaves mapLoaded stuck at false and every overlay vanishes.
-  // Skip the very first render: the map is already being constructed
-  // with the right style by the init effect above.
-  const basemapInitialized = useRef(false);
+  // Basemap swap: rather than calling setStyle (which wipes every user
+  // source/layer and forces every overlay effect to rebuild — both slow and
+  // lossy because some effects skip the rebuild when their deps haven't
+  // changed), we install the satellite raster as an overlay layer once at
+  // map load and just toggle its visibility here. The dark vector style
+  // stays underneath untouched, so none of the data layers (perimeter,
+  // incidents, evac, cone, routes, wind) ever have to re-attach when the
+  // user flips the basemap.
   useEffect(() => {
-    if (!basemapInitialized.current) {
-      basemapInitialized.current = true;
-      return;
-    }
     const map = mapRef.current;
-    if (!map) return;
-    setMapLoaded(false);
-    // deck.gl overlay is bound to the previous style; drop it so the
-    // wind-particle effect re-attaches against the fresh style.
-    if (deckOverlayRef.current) {
-      try {
-        map.removeControl(deckOverlayRef.current);
-      } catch {
-        /* ignore */
-      }
-      deckOverlayRef.current = null;
+    if (!map || !mapLoaded) return;
+    if (!map.getLayer("satellite-overlay")) return;
+    map.setLayoutProperty(
+      "satellite-overlay",
+      "visibility",
+      basemap === "satellite" ? "visible" : "none",
+    );
+  }, [basemap, mapLoaded]);
+
+  // Install the satellite raster source/layer once. Added before any user
+  // data layers (incidents/perimeter/evac/...) come in, so naturally sits
+  // below them — toggling its visibility either covers the dark style
+  // (satellite mode) or reveals it (dark mode) without disturbing overlays.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    if (map.getSource("satellite-overlay")) return;
+    try {
+      map.addSource(
+        "satellite-overlay",
+        SATELLITE_STYLE.sources["esri-world-imagery"],
+      );
+      map.addLayer({
+        id: "satellite-overlay",
+        type: "raster",
+        source: "satellite-overlay",
+        layout: { visibility: basemap === "satellite" ? "visible" : "none" },
+      });
+    } catch (err) {
+      console.warn("satellite overlay install error:", err);
     }
-    // The cone label is a DOM marker — it survives setStyle but the
-    // re-run of the cone effect will re-create it, so detach now to
-    // avoid duplicates.
-    if (coneLabelRef.current) {
-      coneLabelRef.current.remove();
-      coneLabelRef.current = null;
-    }
-    const nextStyle =
-      basemap === "satellite" ? SATELLITE_STYLE : CARTO_DARK;
-    // Mechanics, all the way down:
-    //   - MapLibre's `load` event only fires once per Map instance; it
-    //     does NOT re-fire after setStyle. The first `styledata` is our
-    //     "spec parsed, safe to re-add sources" signal.
-    //   - We can't gate on `isStyleLoaded()` either — for raster
-    //     basemaps it stays false indefinitely as tiles keep streaming
-    //     in on pan/zoom.
-    //   - `diff: false` forces a full reset. The default `diff: true`
-    //     KEEPS user-added sources alive across the swap but still
-    //     drops their layers. The per-layer effects below then take
-    //     the `if (existing) { setData; return }` short-circuit and
-    //     never re-add their layer on top of the new basemap — which
-    //     is why satellite came up blank.
-    const onStyleData = () => {
-      map.off("styledata", onStyleData);
-      setMapLoaded(true);
-    };
-    map.once("styledata", onStyleData);
-    map.setStyle(nextStyle as maplibregl.StyleSpecification | string, {
-      diff: false,
-    });
-    return () => {
-      map.off("styledata", onStyleData);
-    };
-  }, [basemap]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapLoaded]);
 
   // Fly to selected incident
   useEffect(() => {
@@ -595,13 +602,43 @@ export function IncidentMap() {
 
     try {
       map.addSource("cone", { type: "geojson", data: fc });
+      // Register diagonal orange/white stripe pattern (once per style).
+      if (!map.hasImage("cone-stripes")) {
+        const size = 16;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, size, size);
+          ctx.strokeStyle = "#f97316";
+          ctx.lineWidth = 5;
+          ctx.lineCap = "square";
+          ctx.beginPath();
+          for (let i = -size; i < size * 2; i += 8) {
+            ctx.moveTo(i, 0);
+            ctx.lineTo(i + size, size);
+          }
+          ctx.stroke();
+          try {
+            map.addImage(
+              "cone-stripes",
+              ctx.getImageData(0, 0, size, size),
+              { pixelRatio: 2 },
+            );
+          } catch {
+            /* image may have been added between check and add */
+          }
+        }
+      }
       // Soft outer halo for contrast on dark basemap.
       map.addLayer({
         id: "cone-outline-glow",
         type: "line",
         source: "cone",
         paint: {
-          "line-color": "#c026d3",
+          "line-color": "#f97316",
           "line-width": 7,
           "line-blur": 6,
           "line-opacity": 0.45,
@@ -612,8 +649,8 @@ export function IncidentMap() {
         type: "fill",
         source: "cone",
         paint: {
-          "fill-color": "#a855f7",
-          "fill-opacity": 0.3,
+          "fill-pattern": "cone-stripes",
+          "fill-opacity": 0.6,
           "fill-antialias": true,
         },
       });
@@ -625,7 +662,7 @@ export function IncidentMap() {
         // ring un-outlined so the two shapes read as one continuous body.
         filter: ["==", ["get", "kind"], "cone"],
         paint: {
-          "line-color": "#d946ef",
+          "line-color": "#f97316",
           "line-width": 2.5,
           "line-opacity": 0.95,
         },
@@ -770,6 +807,219 @@ export function IncidentMap() {
       console.warn("evac layer error:", err);
     }
   }, [evacFiltered, showEvac, mapLoaded]);
+
+  // ---- Suggested evac zones (AI proposals, pulsing) ----
+  // Yellow pulse = WARNING suggestion. Red pulse = ORDER suggestion.
+  // Lives on the map only while the corresponding interrupt is pending in
+  // the approval queue. On approve, the polygon moves to acceptedEvacZones
+  // (rendered as a solid layer below).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const SOURCE_ID = "suggested-evac";
+    const FILL_ID = "suggested-evac-fill";
+    const LINE_ID = "suggested-evac-line";
+
+    try {
+      if (map.getLayer(FILL_ID)) map.removeLayer(FILL_ID);
+      if (map.getLayer(LINE_ID)) map.removeLayer(LINE_ID);
+      if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
+    } catch {
+      /* mid-rerender */
+    }
+
+    if (!suggestedEvacZones.length) return;
+
+    const features: GeoJSON.Feature[] = suggestedEvacZones.map((z) => ({
+      type: "Feature",
+      geometry: z.geom,
+      properties: {
+        zone_id: z.zone_id,
+        name: z.name,
+        status: z.status,
+      },
+    }));
+    const fc: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features,
+    };
+
+    try {
+      map.addSource(SOURCE_ID, { type: "geojson", data: fc });
+      const colorExpr = [
+        "match",
+        ["get", "status"],
+        "ORDER",
+        "#dc2626",
+        "WARNING",
+        "#facc15",
+        "#facc15",
+      ] as unknown as maplibregl.ExpressionSpecification;
+
+      map.addLayer({
+        id: FILL_ID,
+        type: "fill",
+        source: SOURCE_ID,
+        paint: {
+          "fill-color": colorExpr,
+          "fill-opacity": 0.25,
+        },
+      });
+      map.addLayer({
+        id: LINE_ID,
+        type: "line",
+        source: SOURCE_ID,
+        paint: {
+          "line-color": colorExpr,
+          "line-width": 2,
+          "line-opacity": 0.9,
+          "line-dasharray": [2, 1.5],
+        },
+      });
+
+      // Pulse: ramp fill-opacity + line-width on a 1.4s cycle. Pure paint
+      // updates — no source mutation — so this is cheap.
+      let raf = 0;
+      const start = performance.now();
+      const tick = (now: number) => {
+        const t = ((now - start) / 1400) % 1;
+        // Smooth ease in/out via a cosine wave: 0 → 1 → 0 across the cycle.
+        const wave = (1 - Math.cos(t * Math.PI * 2)) / 2;
+        const fillOpacity = 0.18 + 0.30 * wave;
+        const lineWidth = 1.8 + 2.6 * wave;
+        try {
+          if (map.getLayer(FILL_ID)) {
+            map.setPaintProperty(FILL_ID, "fill-opacity", fillOpacity);
+          }
+          if (map.getLayer(LINE_ID)) {
+            map.setPaintProperty(LINE_ID, "line-width", lineWidth);
+          }
+        } catch {
+          /* layer torn down */
+        }
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+
+      // Hover popup so users can see which suggestion they're inspecting.
+      const showPopup = (
+        e: maplibregl.MapMouseEvent & {
+          features?: maplibregl.MapGeoJSONFeature[];
+        },
+      ) => {
+        if (!popupRef.current || !e.features?.length) return;
+        const p = e.features[0].properties as Record<string, unknown>;
+        const status = String(p.status ?? "");
+        const color = status === "ORDER" ? "#dc2626" : "#facc15";
+        popupRef.current
+          .setLngLat(e.lngLat)
+          .setHTML(
+            `<div style="font-size:12px;line-height:1.5;color:#0f172a;background:${color};padding:6px 8px;border-radius:6px;font-weight:600">
+              SUGGESTED ${status}<br/>
+              <span style="font-weight:400">${escapeHtml(String(p.name ?? ""))}</span><br/>
+              <span style="font-size:10px;font-weight:500">awaiting IC approval</span>
+            </div>`,
+          )
+          .addTo(map);
+        map.getCanvas().style.cursor = "pointer";
+      };
+      const hidePopup = () => {
+        popupRef.current?.remove();
+        map.getCanvas().style.cursor = "";
+      };
+      map.on("mousemove", FILL_ID, showPopup);
+      map.on("mouseleave", FILL_ID, hidePopup);
+
+      // Keep perimeter + incidents above suggestion overlay.
+      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
+      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
+
+      return () => {
+        cancelAnimationFrame(raf);
+        try {
+          map.off("mousemove", FILL_ID, showPopup);
+          map.off("mouseleave", FILL_ID, hidePopup);
+        } catch {
+          /* ignore */
+        }
+      };
+    } catch (err) {
+      console.warn("suggested-evac layer error:", err);
+    }
+  }, [suggestedEvacZones, mapLoaded]);
+
+  // ---- Accepted evac zones (post-approval, solid) ----
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const SOURCE_ID = "accepted-evac";
+    const FILL_ID = "accepted-evac-fill";
+    const LINE_ID = "accepted-evac-line";
+
+    try {
+      if (map.getLayer(FILL_ID)) map.removeLayer(FILL_ID);
+      if (map.getLayer(LINE_ID)) map.removeLayer(LINE_ID);
+      if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
+    } catch {
+      /* mid-rerender */
+    }
+
+    if (!acceptedEvacZones.length) return;
+
+    const features: GeoJSON.Feature[] = acceptedEvacZones.map((z) => ({
+      type: "Feature",
+      geometry: z.polygon,
+      properties: { zone_id: z.zone_id, name: z.name, status: z.status },
+    }));
+    const fc: GeoJSON.FeatureCollection = {
+      type: "FeatureCollection",
+      features,
+    };
+
+    try {
+      map.addSource(SOURCE_ID, { type: "geojson", data: fc });
+      const colorExpr = [
+        "match",
+        ["get", "status"],
+        "ORDER",
+        "#dc2626",
+        "WARNING",
+        "#facc15",
+        "#facc15",
+      ] as unknown as maplibregl.ExpressionSpecification;
+
+      map.addLayer({
+        id: FILL_ID,
+        type: "fill",
+        source: SOURCE_ID,
+        paint: {
+          "fill-color": colorExpr,
+          "fill-opacity": 0.38,
+        },
+      });
+      map.addLayer({
+        id: LINE_ID,
+        type: "line",
+        source: SOURCE_ID,
+        paint: {
+          "line-color": colorExpr,
+          "line-width": 2.5,
+          "line-opacity": 1,
+        },
+      });
+
+      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
+      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
+    } catch (err) {
+      console.warn("accepted-evac layer error:", err);
+    }
+  }, [acceptedEvacZones, mapLoaded]);
 
   // ---- VIIRS hotspots (NASA FIRMS) ----
   useEffect(() => {
@@ -1189,10 +1439,10 @@ export function IncidentMap() {
         ...v,
         direction: (v.direction + 180) % 360,
       }));
-      // When zoomed out the 66km sample box collapses to a few pixels, so we
-      // pad the rendered bounds outward. The IDW texture extrapolates the same
-      // 7x7 sample to the wider extent — fine for visualization since wind at
-      // this synoptic scale is smooth.
+      // // When zoomed out the 66km sample box collapses to a few pixels, so we
+      // // pad the rendered bounds outward. The IDW texture extrapolates the same
+      // // 7x7 sample to the wider extent — fine for visualization since wind at
+      // // this synoptic scale is smooth.
       const [w0, s0, e0, n0] = wind.bounds;
       const padX = (e0 - w0) * (windLowZoom ? 1.0 : 0.0);
       const padY = (n0 - s0) * (windLowZoom ? 1.0 : 0.0);
@@ -1202,8 +1452,16 @@ export function IncidentMap() {
         e0 + padX,
         n0 + padY,
       ];
+  
+      // Open-Meteo's wind_direction_10m is meteorological "FROM". Despite
+      // the `u = speed·sin(dir)`, `v = speed·cos(dir)` formula in
+      // maplibre-gl-wind looking like a "TO heading" convention, empirically
+      // passing the raw FROM value makes the particles drift the right way
+      // (and a pre-flip by 180° sends them upwind). Likely some combination
+      // of texture-Y orientation and lat/lon axis signs in the shader nets
+      // out to "feed it the meteorological FROM direction unchanged."
       const { canvas, uMin, uMax, vMin, vMax } = generateWindTexture(
-        vectorsTo,
+        wind.vectors,
         {
           width: 128,
           height: 128,
@@ -1830,8 +2088,8 @@ function Legend({
       {showEvac && (
         <div className="ml-5 mt-1 space-y-0.5 text-[10px]">
           <ZoneSwatch color="#dc2626" label="Order" />
-          <ZoneSwatch color="#f59e0b" label="Warning" />
-          <ZoneSwatch color="#facc15" label="Shelter in place" />
+          <ZoneSwatch color="#facc15" label="Warning" />
+          <ZoneSwatch color="#a855f7" label="Shelter in place" />
           <ZoneSwatch color="#3b82f6" label="Advisory" />
         </div>
       )}
