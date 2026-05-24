@@ -47,6 +47,7 @@ export function IncidentMap() {
   const [mapLoaded, setMapLoaded] = useState(false);
   const [showWind, setShowWind] = useState(true);
   const [showEvac, setShowEvac] = useState(true);
+  const [showFirms, setShowFirms] = useState(true);
 
   const { data: incidents } = useIncidents();
   const viewport = useStore((s) => s.mapViewport);
@@ -67,6 +68,7 @@ export function IncidentMap() {
     selectedIncident?.lon ?? null,
   );
   const { data: evac } = useEvacZones();
+  const { data: firms } = useFirms(1);
 
   // Init map
   useEffect(() => {
@@ -292,12 +294,18 @@ export function IncidentMap() {
       // Build a `match` expression over the normalized STATUS. MapLibre
       // doesn't have an upper() expression, so we drive coloring off the
       // raw STATUS attribute and list both casings if needed.
-      const colorExpr: maplibregl.ExpressionSpecification = [
+      const colorExpr = [
         "match",
-        ["upcase", ["to-string", ["coalesce", ["get", "STATUS"], ["get", "status"], ""]]],
+        [
+          "upcase",
+          [
+            "to-string",
+            ["coalesce", ["get", "STATUS"], ["get", "status"], ""],
+          ],
+        ],
         ...Object.entries(EVAC_STATUS_COLORS).flatMap(([k, v]) => [k, v]),
         "#64748b",
-      ];
+      ] as unknown as maplibregl.ExpressionSpecification;
 
       map.addLayer({
         id: "evac-fill",
@@ -364,6 +372,151 @@ export function IncidentMap() {
       console.warn("evac layer error:", err);
     }
   }, [evacFiltered, showEvac, mapLoaded]);
+
+  // ---- VIIRS hotspots (NASA FIRMS) ----
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    try {
+      if (map.getLayer("firms-heat")) map.removeLayer("firms-heat");
+      if (map.getLayer("firms-points")) map.removeLayer("firms-points");
+      if (map.getSource("firms")) map.removeSource("firms");
+    } catch {
+      /* map may be mid-rerender */
+    }
+
+    if (!showFirms || !firms?.features?.length) return;
+
+    try {
+      map.addSource("firms", { type: "geojson", data: firms });
+
+      // Heatmap at low zoom, individual hotspots at high zoom.
+      map.addLayer({
+        id: "firms-heat",
+        type: "heatmap",
+        source: "firms",
+        maxzoom: 11,
+        paint: {
+          "heatmap-weight": [
+            "interpolate",
+            ["linear"],
+            ["coalesce", ["get", "frp"], 1],
+            0, 0.1,
+            50, 0.5,
+            200, 1,
+          ],
+          "heatmap-intensity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            0, 1,
+            11, 3,
+          ],
+          "heatmap-color": [
+            "interpolate",
+            ["linear"],
+            ["heatmap-density"],
+            0, "rgba(0,0,0,0)",
+            0.2, "rgba(120, 60, 0, 0.4)",
+            0.4, "rgba(220, 100, 0, 0.6)",
+            0.7, "rgba(249, 115, 22, 0.8)",
+            1.0, "rgba(252, 211, 77, 0.95)",
+          ],
+          "heatmap-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            0, 2,
+            6, 12,
+            11, 28,
+          ],
+          "heatmap-opacity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            7, 0.85,
+            11, 0.3,
+          ],
+        },
+      });
+
+      map.addLayer({
+        id: "firms-points",
+        type: "circle",
+        source: "firms",
+        minzoom: 8,
+        paint: {
+          "circle-radius": [
+            "interpolate",
+            ["linear"],
+            ["coalesce", ["get", "frp"], 1],
+            0, 2.5,
+            50, 5,
+            200, 9,
+          ],
+          "circle-color": [
+            "interpolate",
+            ["linear"],
+            ["coalesce", ["get", "bright_ti4"], 320],
+            300, "#fde68a",
+            330, "#fb923c",
+            360, "#dc2626",
+            400, "#7f1d1d",
+          ],
+          "circle-stroke-color": "rgba(254, 215, 170, 0.6)",
+          "circle-stroke-width": 0.5,
+          "circle-opacity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            8, 0.3,
+            10, 0.85,
+          ],
+        },
+      });
+
+      const showFirmsPopup = (
+        e: maplibregl.MapMouseEvent & {
+          features?: maplibregl.MapGeoJSONFeature[];
+        },
+      ) => {
+        if (!popupRef.current || !e.features?.length) return;
+        const p = e.features[0].properties as Record<string, unknown>;
+        const coords = (e.features[0].geometry as GeoJSON.Point)
+          .coordinates as [number, number];
+        const frp = p.frp != null ? Number(p.frp).toFixed(1) : "?";
+        const bt = p.bright_ti4 != null ? Number(p.bright_ti4).toFixed(0) : "?";
+        const conf = p.confidence ? String(p.confidence) : "—";
+        const when = p.acq_datetime ? String(p.acq_datetime) : "—";
+        popupRef.current
+          .setLngLat(coords)
+          .setHTML(
+            `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid rgba(249,115,22,0.4)">
+              <strong style="color:#fb923c">VIIRS hotspot</strong><br/>
+              FRP ${frp} MW &middot; ${bt} K<br/>
+              <span style="color:#94a3b8">conf ${conf} &middot; ${when}</span>
+            </div>`,
+          )
+          .addTo(map);
+        map.getCanvas().style.cursor = "pointer";
+      };
+      const hideFirmsPopup = () => {
+        popupRef.current?.remove();
+        map.getCanvas().style.cursor = "";
+      };
+      map.on("mousemove", "firms-points", showFirmsPopup);
+      map.on("mouseleave", "firms-points", hideFirmsPopup);
+
+      // Keep perimeter + incident markers above hotspots.
+      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
+      if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
+      if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
+    } catch (err) {
+      console.warn("firms layer error:", err);
+    }
+  }, [firms, showFirms, mapLoaded]);
 
   // ---- Wind particle layer (deck.gl overlay) ----
   useEffect(() => {
@@ -432,8 +585,11 @@ export function IncidentMap() {
         setShowWind={setShowWind}
         showEvac={showEvac}
         setShowEvac={setShowEvac}
+        showFirms={showFirms}
+        setShowFirms={setShowFirms}
         wind={wind}
         evacCount={evacFiltered?.features.length ?? 0}
+        firmsCount={firms?.features?.length ?? 0}
       />
     </div>
   );
@@ -467,16 +623,22 @@ function Legend({
   setShowWind,
   showEvac,
   setShowEvac,
+  showFirms,
+  setShowFirms,
   wind,
   evacCount,
+  firmsCount,
 }: {
   hasPerimeter: boolean;
   showWind: boolean;
   setShowWind: (b: boolean) => void;
   showEvac: boolean;
   setShowEvac: (b: boolean) => void;
+  showFirms: boolean;
+  setShowFirms: (b: boolean) => void;
   wind: WindGrid | undefined;
   evacCount: number;
+  firmsCount: number;
 }) {
   const center = wind?.vectors.length
     ? wind.vectors[Math.floor(wind.vectors.length / 2)]
@@ -533,8 +695,32 @@ function Legend({
         </div>
       )}
 
+      <label className="mt-2 flex cursor-pointer items-center gap-2">
+        <input
+          type="checkbox"
+          checked={showFirms}
+          onChange={(e) => setShowFirms(e.target.checked)}
+          className="h-3 w-3 accent-ember-500"
+        />
+        <span className="font-medium">
+          VIIRS hotspots ({firmsCount})
+        </span>
+      </label>
+      {showFirms && (
+        <div className="ml-5 mt-1 flex items-center gap-1.5 text-[10px] text-smoke-400">
+          <span
+            className="h-2 w-12 rounded-sm"
+            style={{
+              background:
+                "linear-gradient(to right, #fde68a, #fb923c, #dc2626, #7f1d1d)",
+            }}
+          />
+          <span>cooler → hotter (24h)</span>
+        </div>
+      )}
+
       <div className="mt-2 text-[10px] text-smoke-500">
-        Sources: NIFC · CalOES · Open-Meteo
+        Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS
       </div>
     </div>
   );
