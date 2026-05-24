@@ -134,6 +134,44 @@ function normalizeStatus(raw: unknown): string {
     .toUpperCase();
 }
 
+// Renders an emoji centered on a colored disc into a 64×64 canvas, returned
+// as an ImageBitmap-compatible source for `map.addImage`. Color matches the
+// layer's palette so the dot reads as the same brand even when the emoji
+// itself is greyscale (e.g. ⚡ on some fontstacks).
+function renderInfraIcon(
+  color: string,
+  emoji: string,
+): { width: number; height: number; data: Uint8ClampedArray } | null {
+  if (typeof document === "undefined") return null;
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const cx = size / 2;
+  const cy = size / 2;
+  // Dark backdrop ring — gives the disc a hard edge against bright satellite.
+  ctx.beginPath();
+  ctx.arc(cx, cy, size / 2 - 2, 0, Math.PI * 2);
+  ctx.fillStyle = "#0c0a09";
+  ctx.fill();
+  // Colored disc.
+  ctx.beginPath();
+  ctx.arc(cx, cy, size / 2 - 4, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  // Emoji centered. Apple Color Emoji / Segoe UI Emoji / Noto Color Emoji
+  // cover every OS the dashboard targets.
+  ctx.font =
+    '36px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji","Twemoji Mozilla",sans-serif';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(emoji, cx, cy + 2);
+  const imageData = ctx.getImageData(0, 0, size, size);
+  return { width: size, height: size, data: imageData.data };
+}
+
 type ConeImpact = {
   population_estimate?: number;
   residential_count?: number;
@@ -1722,6 +1760,21 @@ export function IncidentMap() {
     }
   }, [wind, showWind, mapLoaded, windLowZoom]);
 
+  // ---- Register custom infra icons ----
+  // Pre-render each layer's emoji onto a colored disc and load it as a
+  // map image so the symbol layer below can draw `icon-image: infra-icon-…`.
+  // Runs once after the map loads; idempotent via `map.hasImage`.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    for (const layer of INFRA_LAYERS) {
+      const imageId = `infra-icon-${layer.id}`;
+      if (map.hasImage(imageId)) continue;
+      const img = renderInfraIcon(layer.color, layer.icon);
+      if (img) map.addImage(imageId, img, { pixelRatio: 2 });
+    }
+  }, [mapLoaded]);
+
   // ---- Critical infrastructure overlays ----
   // One driver effect handles all INFRA_LAYERS. We tear down & re-add per
   // layer on every change to data/visibility/mapLoaded; idempotent per
@@ -1783,21 +1836,22 @@ export function IncidentMap() {
             source: sourceId,
             paint: {
               "circle-color": layer.color,
-              "circle-radius": 7,
-              "circle-blur": 0.6,
-              "circle-opacity": 0.4,
+              "circle-radius": 11,
+              "circle-blur": 0.7,
+              "circle-opacity": 0.35,
             },
           });
+          // Custom emoji-on-disc icon registered above. allow-overlap so
+          // adjacent infra points don't suppress each other.
           map.addLayer({
             id: pointLayerId,
-            type: "circle",
+            type: "symbol",
             source: sourceId,
-            paint: {
-              "circle-color": layer.color,
-              "circle-radius": 4,
-              "circle-stroke-color": "#0c0a09",
-              "circle-stroke-width": 1.5,
-              "circle-opacity": 0.95,
+            layout: {
+              "icon-image": `infra-icon-${layer.id}`,
+              "icon-size": 0.6,
+              "icon-allow-overlap": true,
+              "icon-ignore-placement": true,
             },
           });
 
@@ -2656,12 +2710,15 @@ function InfraGroup({
                 className="h-3 w-3 accent-ember-500"
               />
               <span
-                className="inline-block h-2 w-2 rounded-full border"
+                className="inline-flex h-4 w-4 items-center justify-center rounded-full border text-[10px] leading-none"
                 style={{
                   backgroundColor: `${l.color}cc`,
                   borderColor: l.color,
                 }}
-              />
+                aria-hidden
+              >
+                {l.icon}
+              </span>
               <span className="flex-1 text-smoke-200">{l.label}</span>
               {on && (
                 <span className="text-[10px] text-smoke-400">{count}</span>

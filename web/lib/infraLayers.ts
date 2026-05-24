@@ -45,6 +45,10 @@ export type InfraLayer = {
   defaultOn: boolean;
   /** Short tag shown on hover popups + Legend. */
   short: string;
+  /** Emoji rendered as the on-map icon and in the legend chip. Pick glyphs
+   *  whose meaning is immediately obvious to an IC under stress — fire truck
+   *  for fire stations, hospital cross for hospitals, etc. */
+  icon: string;
 };
 
 // --------------------------------------------------------------------------- //
@@ -148,6 +152,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#ef4444", // red-500
     defaultOn: true,
     short: "H",
+    icon: "🏥",
   },
   {
     id: "schools",
@@ -157,6 +162,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#a78bfa", // violet-400
     defaultOn: false,
     short: "S",
+    icon: "🏫",
   },
   {
     id: "eocs",
@@ -166,6 +172,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#f472b6", // pink-400
     defaultOn: false,
     short: "E",
+    icon: "🛡️",
   },
   // Response Assets — auto-on for fire stations
   {
@@ -176,6 +183,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#fb923c", // orange-400
     defaultOn: true,
     short: "F",
+    icon: "🚒",
   },
   {
     id: "airports",
@@ -185,6 +193,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#facc15", // yellow-400
     defaultOn: false,
     short: "A",
+    icon: "✈️",
   },
   // Infrastructure — heavy, lazy on
   {
@@ -195,6 +204,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#fde047", // yellow-300
     defaultOn: false,
     short: "T",
+    icon: "⚡",
   },
   {
     id: "commTowers",
@@ -204,6 +214,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#94a3b8", // slate-400
     defaultOn: false,
     short: "C",
+    icon: "📡",
   },
   {
     id: "water",
@@ -213,6 +224,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#38bdf8", // sky-400
     defaultOn: false,
     short: "W",
+    icon: "💧",
   },
 ];
 
