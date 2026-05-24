@@ -2,6 +2,8 @@
 
 import { create } from "zustand";
 
+import { INFRA_LAYERS } from "@/lib/infraLayers";
+
 export type Tab =
   | "Operations"
   | "Briefing"
@@ -148,6 +150,9 @@ export type Store = {
   currentMode: RunMode | null;
   chat: ChatMessage[];
   pendingUserQuery: string | null;
+  /** Per-infrastructure-layer visibility. Survives style swaps and incident
+   * switches; defaults live in INFRA_LAYERS.defaultOn. */
+  infraVisibility: Record<string, boolean>;
   setSelectedIncident: (id: string | null) => void;
   setSelectedThread: (id: string | null) => void;
   setActiveTab: (t: Tab) => void;
@@ -179,6 +184,8 @@ export type Store = {
   setPendingUserQuery: (q: string | null) => void;
   upsertInterrupt: (i: PendingInterrupt) => void;
   removeInterrupt: (id?: string) => void;
+  toggleInfra: (id: string) => void;
+  setInfra: (id: string, on: boolean) => void;
   acceptEvacZone: (zone: AcceptedEvacZone) => void;
   removeAcceptedEvacZone: (zoneId: string) => void;
   toggleEvacRefine: (interruptId: string, open: boolean) => void;
@@ -229,6 +236,9 @@ export const useStore = create<Store>((set) => ({
   currentMode: null,
   chat: [],
   pendingUserQuery: null,
+  infraVisibility: Object.fromEntries(
+    INFRA_LAYERS.map((l) => [l.id, l.defaultOn]),
+  ),
   restartCount: 0,
   setSelectedIncident: (id) => set({ selectedIncidentId: id }),
   setSelectedThread: (id) => set({ selectedThreadId: id }),
@@ -326,6 +336,17 @@ export const useStore = create<Store>((set) => ({
       );
       return { pendingInterrupts: [...without, i] };
     }),
+  toggleInfra: (id) =>
+    set((s) => ({
+      infraVisibility: {
+        ...s.infraVisibility,
+        [id]: !s.infraVisibility[id],
+      },
+    })),
+  setInfra: (id, on) =>
+    set((s) => ({
+      infraVisibility: { ...s.infraVisibility, [id]: on },
+    })),
   removeInterrupt: (id) =>
     set((s) => ({
       pendingInterrupts: s.pendingInterrupts.filter(

@@ -9,6 +9,12 @@ import {
   type Incident,
   type WindGrid,
 } from "@/lib/queries";
+import {
+  INFRA_GROUPS,
+  INFRA_LAYERS,
+  type InfraLayer,
+} from "@/lib/infraLayers";
+import { useInfraLayers } from "@/lib/infraQueries";
 import { useStore } from "@/lib/store";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import maplibregl from "maplibre-gl";
@@ -242,6 +248,17 @@ export function IncidentMap() {
       .filter((x): x is NonNullable<typeof x> => x !== null);
   }, [pendingInterrupts]);
 
+  // Critical-infrastructure overlays. Each entry's data is fetched only
+  // when its toggle in infraVisibility is on; toggles persist across
+  // basemap swaps and incident switches via the Zustand store.
+  const infraVisibility = useStore((s) => s.infraVisibility);
+  const toggleInfra = useStore((s) => s.toggleInfra);
+  const infraResults = useInfraLayers(
+    selectedIncident?.lat ?? null,
+    selectedIncident?.lon ?? null,
+    infraVisibility,
+  );
+
   // Init map
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -306,7 +323,7 @@ export function IncidentMap() {
   // source/layer), we install the satellite raster as an overlay layer
   // lazily — the first time the user actually clicks Satellite. The dark
   // vector style stays underneath untouched, so none of the data layers
-  // (perimeter, incidents, evac, cone, routes, wind) ever have to
+  // (perimeter, incidents, evac, cone, routes, infra, wind) ever have to
   // re-attach when the user flips the basemap.
   //
   // Lazy install matters: adding the raster source at map init (even
@@ -334,7 +351,7 @@ export function IncidentMap() {
           type: "raster",
           source: "satellite-overlay",
         });
-        for (const id of [
+        const liftList = [
           "evac-fill",
           "evac-outline",
           "suggested-evac-fill",
@@ -355,7 +372,18 @@ export function IncidentMap() {
           "routes-egress",
           "routes-ingress-casing",
           "routes-ingress",
-        ]) {
+        ];
+        // Also lift every infra overlay so points/lines from this PR sit
+        // above the satellite raster.
+        for (const l of INFRA_LAYERS) {
+          liftList.push(
+            `infra-${l.id}-halo`,
+            `infra-${l.id}-pt`,
+            `infra-${l.id}-line-casing`,
+            `infra-${l.id}-line`,
+          );
+        }
+        for (const id of liftList) {
           if (map.getLayer(id)) map.moveLayer(id);
         }
       } catch (err) {
@@ -1671,6 +1699,153 @@ export function IncidentMap() {
     }
   }, [wind, showWind, mapLoaded, windLowZoom]);
 
+  // ---- Critical infrastructure overlays ----
+  // One driver effect handles all INFRA_LAYERS. We tear down & re-add per
+  // layer on every change to data/visibility/mapLoaded; idempotent per
+  // layer via stable id-prefixed source/layer names.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    for (const { layer, data } of infraResults) {
+      const sourceId = `infra-${layer.id}`;
+      const pointLayerId = `infra-${layer.id}-pt`;
+      const haloLayerId = `infra-${layer.id}-halo`;
+      const lineLayerId = `infra-${layer.id}-line`;
+      const lineCasingId = `infra-${layer.id}-line-casing`;
+
+      try {
+        if (map.getLayer(pointLayerId)) map.removeLayer(pointLayerId);
+        if (map.getLayer(haloLayerId)) map.removeLayer(haloLayerId);
+        if (map.getLayer(lineLayerId)) map.removeLayer(lineLayerId);
+        if (map.getLayer(lineCasingId)) map.removeLayer(lineCasingId);
+        if (map.getSource(sourceId)) map.removeSource(sourceId);
+      } catch {
+        /* mid-rerender */
+      }
+
+      if (!infraVisibility[layer.id]) continue;
+      if (!data?.features?.length) continue;
+
+      try {
+        map.addSource(sourceId, { type: "geojson", data });
+        if (layer.geometry === "line") {
+          map.addLayer({
+            id: lineCasingId,
+            type: "line",
+            source: sourceId,
+            layout: { "line-cap": "round", "line-join": "round" },
+            paint: {
+              "line-color": "#0c0a09",
+              "line-width": 4,
+              "line-opacity": 0.6,
+            },
+          });
+          map.addLayer({
+            id: lineLayerId,
+            type: "line",
+            source: sourceId,
+            layout: { "line-cap": "round", "line-join": "round" },
+            paint: {
+              "line-color": layer.color,
+              "line-width": 1.8,
+              "line-opacity": 0.9,
+            },
+          });
+        } else {
+          // Halo for legibility on busy satellite imagery.
+          map.addLayer({
+            id: haloLayerId,
+            type: "circle",
+            source: sourceId,
+            paint: {
+              "circle-color": layer.color,
+              "circle-radius": 7,
+              "circle-blur": 0.6,
+              "circle-opacity": 0.4,
+            },
+          });
+          map.addLayer({
+            id: pointLayerId,
+            type: "circle",
+            source: sourceId,
+            paint: {
+              "circle-color": layer.color,
+              "circle-radius": 4,
+              "circle-stroke-color": "#0c0a09",
+              "circle-stroke-width": 1.5,
+              "circle-opacity": 0.95,
+            },
+          });
+
+          // Hover popup with whatever name the source carries.
+          const onMove = (
+            e: maplibregl.MapMouseEvent & {
+              features?: maplibregl.MapGeoJSONFeature[];
+            },
+          ) => {
+            if (!popupRef.current || !e.features?.length) return;
+            const p = e.features[0].properties as Record<string, unknown>;
+            const name =
+              (p?.NAME as string) ??
+              (p?.name as string) ??
+              (p?.Licensee as string) ??
+              (p?.operator as string) ??
+              layer.label;
+            const detailEntries: string[] = [];
+            const beds = p?.BEDS ?? p?.beds;
+            if (beds && Number(beds) > 0)
+              detailEntries.push(`${beds} beds`);
+            const enr = p?.ENROLLMENT ?? p?.enrollment;
+            if (enr && Number(enr) > 0)
+              detailEntries.push(`${enr} students`);
+            const city = p?.CITY ?? p?.city ?? p?.LocCity;
+            if (city) detailEntries.push(String(city));
+            const coords = (
+              e.features[0].geometry as GeoJSON.Point
+            ).coordinates as [number, number];
+            popupRef.current
+              .setLngLat(coords)
+              .setHTML(
+                `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid ${layer.color}66">
+                  <strong style="color:${layer.color}">${escapeHtml(String(name))}</strong>
+                  <br/><span style="color:#94a3b8">${layer.label}${detailEntries.length ? " · " + detailEntries.join(" · ") : ""}</span>
+                </div>`,
+              )
+              .addTo(map);
+            map.getCanvas().style.cursor = "pointer";
+          };
+          const onLeave = () => {
+            popupRef.current?.remove();
+            map.getCanvas().style.cursor = "";
+          };
+          map.on("mousemove", pointLayerId, onMove);
+          map.on("mouseleave", pointLayerId, onLeave);
+        }
+      } catch (err) {
+        console.warn(`infra layer ${layer.id} error:`, err);
+      }
+    }
+
+    // Keep operational layers (cone, perimeter, routes, incidents) above
+    // the infra dots so the fire-front context is never obscured.
+    const liftIfPresent = (id: string) => {
+      if (map.getLayer(id)) map.moveLayer(id);
+    };
+    liftIfPresent("cone-outline-glow");
+    liftIfPresent("cone-fill");
+    liftIfPresent("cone-outline");
+    liftIfPresent("routes-egress-casing");
+    liftIfPresent("routes-egress");
+    liftIfPresent("routes-ingress-casing");
+    liftIfPresent("routes-ingress");
+    liftIfPresent("staging-point");
+    liftIfPresent("perimeter-fill");
+    liftIfPresent("perimeter-outline");
+    liftIfPresent("incidents-glow");
+    liftIfPresent("incidents-circle");
+  }, [infraResults, infraVisibility, mapLoaded]);
+
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
@@ -1694,6 +1869,12 @@ export function IncidentMap() {
         firmsCount={firms?.features?.length ?? 0}
         ingressCount={routingOutput?.payload?.primary_routes?.length ?? 0}
         egressCount={routingOutput?.payload?.egress_routes?.length ?? 0}
+        infraVisibility={infraVisibility}
+        toggleInfra={toggleInfra}
+        infraCounts={Object.fromEntries(
+          infraResults.map((r) => [r.layer.id, r.data?.features?.length ?? 0]),
+        )}
+        infraEnabled={selectedIncident != null}
         collapsed={legendCollapsed}
         setCollapsed={setLegendCollapsed}
       />
@@ -2114,6 +2295,10 @@ function Legend({
   firmsCount,
   ingressCount,
   egressCount,
+  infraVisibility,
+  toggleInfra,
+  infraCounts,
+  infraEnabled,
   collapsed,
   setCollapsed,
 }: {
@@ -2136,6 +2321,10 @@ function Legend({
   firmsCount: number;
   ingressCount: number;
   egressCount: number;
+  infraVisibility: Record<string, boolean>;
+  toggleInfra: (id: string) => void;
+  infraCounts: Record<string, number>;
+  infraEnabled: boolean;
   collapsed: boolean;
   setCollapsed: (b: boolean) => void;
 }) {
@@ -2376,11 +2565,85 @@ function Legend({
         </div>
       )}
 
+      <div className="mt-3 border-t border-smoke-700 pt-2">
+        <div className="mb-1 font-semibold text-smoke-200">
+          Critical infrastructure
+        </div>
+        {!infraEnabled ? (
+          <div className="italic text-smoke-500">
+            Select an incident to load nearby facilities (25 km AOI).
+          </div>
+        ) : (
+          INFRA_GROUPS.map((g) => (
+            <InfraGroup
+              key={g.id}
+              label={g.label}
+              layers={INFRA_LAYERS.filter((l) => l.group === g.id)}
+              visibility={infraVisibility}
+              counts={infraCounts}
+              onToggle={toggleInfra}
+            />
+          ))
+        )}
+      </div>
+
       <div className="mt-2 text-[10px] text-smoke-500">
-        Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS · OSM/OSMnx
+        Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS · OSM/OSMnx · HIFLD · NCES · FEMA
       </div>
       </div>
       )}
+    </div>
+  );
+}
+
+function InfraGroup({
+  label,
+  layers,
+  visibility,
+  counts,
+  onToggle,
+}: {
+  label: string;
+  layers: InfraLayer[];
+  visibility: Record<string, boolean>;
+  counts: Record<string, number>;
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <div className="mt-1">
+      <div className="text-[9px] font-semibold uppercase tracking-widest text-smoke-400">
+        {label}
+      </div>
+      <div className="mt-0.5 space-y-0.5">
+        {layers.map((l) => {
+          const on = !!visibility[l.id];
+          const count = counts[l.id] ?? 0;
+          return (
+            <label
+              key={l.id}
+              className="flex cursor-pointer items-center gap-2 text-[11px]"
+            >
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={() => onToggle(l.id)}
+                className="h-3 w-3 accent-ember-500"
+              />
+              <span
+                className="inline-block h-2 w-2 rounded-full border"
+                style={{
+                  backgroundColor: `${l.color}cc`,
+                  borderColor: l.color,
+                }}
+              />
+              <span className="flex-1 text-smoke-200">{l.label}</span>
+              {on && (
+                <span className="text-[10px] text-smoke-400">{count}</span>
+              )}
+            </label>
+          );
+        })}
+      </div>
     </div>
   );
 }
