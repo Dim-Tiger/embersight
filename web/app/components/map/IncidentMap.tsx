@@ -18,6 +18,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const CARTO_DARK =
   "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
+// When a perimeter is loaded and the map is zoomed in past this level, hide
+// the redundant orange circle for that fire and let the perimeter speak for
+// itself.  Below this threshold the circle reappears automatically.
+const PERIMETER_HIDE_CIRCLE_ZOOM = 9;
+
 // Esri World Imagery — free satellite raster tiles. Inlined as a MapLibre
 // style so we can hot-swap basemaps without keeping a second style.json.
 const SATELLITE_STYLE: maplibregl.StyleSpecification = {
@@ -123,11 +128,29 @@ export function IncidentMap() {
   const [basemap, setBasemap] = useState<Basemap>("dark");
   const [showCone, setShowCone] = useState(true);
 
+  // Store selectors — placed before the derived state that depends on them.
   const { data: incidents } = useIncidents();
   const spread = useStore((s) => s.agentOutputs.spread_simulation);
   const viewport = useStore((s) => s.mapViewport);
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
+
+  // True while the map zoom is above PERIMETER_HIDE_CIRCLE_ZOOM.  We only
+  // flip this boolean (not store the raw zoom) so we avoid a re-render on
+  // every incremental scroll step.
+  const [abovePerimeterZoom, setAbovePerimeterZoom] = useState(
+    () => viewport.zoom >= PERIMETER_HIDE_CIRCLE_ZOOM,
+  );
+  // Tracks whether the perimeter "session" is active for the currently
+  // selected fire.  Set to true when a fire is selected; cleared to false the
+  // instant the user zooms out below the threshold.  Crucially it does NOT
+  // flip back to true when the user zooms in again — only an explicit
+  // re-selection does that.  This gives us the three-phase behaviour:
+  //   select → zoom in  → perimeter on  / circle off
+  //            zoom out → perimeter off / circle on   (dismissed)
+  //            zoom in  → perimeter still off          (stays dismissed)
+  //   re-select          → perimeter on  / circle off  (fresh session)
+  const [perimeterEnabled, setPerimeterEnabled] = useState(false);
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
   const irwinId = selectedIncidentId?.startsWith("wfigs:")
@@ -162,6 +185,15 @@ export function IncidentMap() {
       "top-right",
     );
     map.on("load", () => setMapLoaded(true));
+    // Flip the boolean state only when crossing the perimeter-visibility
+    // threshold so we don't trigger re-renders on every zoom tick.
+    map.on("zoom", () => {
+      const z = map.getZoom();
+      setAbovePerimeterZoom((prev) => {
+        const next = z >= PERIMETER_HIDE_CIRCLE_ZOOM;
+        return prev === next ? prev : next;
+      });
+    });
     mapRef.current = map;
 
     popupRef.current = new maplibregl.Popup({
@@ -223,6 +255,17 @@ export function IncidentMap() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIncidentId]);
+
+  // Enable the perimeter session whenever a fire is (re-)selected.
+  useEffect(() => {
+    setPerimeterEnabled(!!selectedIncidentId);
+  }, [selectedIncidentId]);
+
+  // Dismiss the perimeter the moment the user zooms back out below the
+  // threshold.  We do NOT re-enable it on zoom-in — only selection does that.
+  useEffect(() => {
+    if (!abovePerimeterZoom) setPerimeterEnabled(false);
+  }, [abovePerimeterZoom]);
 
   // Render incidents as native WebGL circle layers
   useEffect(() => {
@@ -315,7 +358,16 @@ export function IncidentMap() {
     map.on("click", "incidents-circle", (e) => {
       if (!e.features?.length) return;
       const id = e.features[0].properties.id as string;
+      const coords = (e.features[0].geometry as GeoJSON.Point).coordinates as [
+        number,
+        number,
+      ];
+      // Always fly in on click — this handles re-clicking an already-selected
+      // fire while zoomed out (setSelectedIncident would be a no-op for the
+      // same ID so the fly-to useEffect wouldn't re-run without this).
       setSelectedIncident(id);
+      setPerimeterEnabled(true); // restore perimeter session on every click
+      map.flyTo({ center: coords, zoom: 11, duration: 1400 });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incidents, mapLoaded]);
@@ -389,6 +441,41 @@ export function IncidentMap() {
     return impact;
   }, [spread]);
 
+  // ---- Synchronise circle visibility & perimeter visibility ----
+  // The two layers are always toggled together so the transition is atomic:
+  // circle hidden  ↔  perimeter visible   (when perimeterEnabled && zoomed in)
+  // circle visible ↔  perimeter hidden    (any other state)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const hasPerimeter = !!perimeter?.features?.length;
+    // Both conditions must hold: the session is active AND zoom is above the
+    // threshold AND perimeter data has actually arrived.
+    const perimeterOn = perimeterEnabled && abovePerimeterZoom && hasPerimeter;
+
+    // --- circle layers: exclude the selected fire when perimeter is on ---
+    const circleFilter: maplibregl.FilterSpecification | null = perimeterOn
+      ? (["!=", ["get", "id"], selectedIncidentId] as maplibregl.FilterSpecification)
+      : null;
+    try {
+      if (map.getLayer("incidents-glow")) map.setFilter("incidents-glow", circleFilter);
+      if (map.getLayer("incidents-circle")) map.setFilter("incidents-circle", circleFilter);
+    } catch (err) {
+      console.warn("circle filter error:", err);
+    }
+
+    // --- perimeter layers: show only while perimeterOn ---
+    const perimVis = perimeterOn ? "visible" : "none";
+    try {
+      if (map.getLayer("perimeter-fill")) map.setLayoutProperty("perimeter-fill", "visibility", perimVis);
+      if (map.getLayer("perimeter-outline")) map.setLayoutProperty("perimeter-outline", "visibility", perimVis);
+    } catch (err) {
+      console.warn("perimeter visibility error:", err);
+    }
+  }, [perimeterEnabled, abovePerimeterZoom, perimeter, selectedIncidentId, mapLoaded]);
+
+  // ---- Render spread prediction cone ----
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
@@ -1041,7 +1128,7 @@ export function IncidentMap() {
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
       <Legend
-        hasPerimeter={!!perimeter?.features?.length}
+        hasPerimeter={perimeterEnabled && abovePerimeterZoom && !!perimeter?.features?.length}
         showWind={showWind}
         setShowWind={setShowWind}
         showEvac={showEvac}
