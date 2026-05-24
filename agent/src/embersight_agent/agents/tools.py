@@ -31,6 +31,11 @@ except ImportError:  # pragma: no cover -- older fallback
 
 from ..hitl import request_human_decision
 from ..state import AgentOutput, AgentState
+
+try:  # langgraph 0.2+
+    from langgraph.errors import GraphBubbleUp
+except ImportError:  # pragma: no cover
+    GraphBubbleUp = ()  # type: ignore[assignment]
 from . import (
     evacuation_intelligence,
     resource_recommendation,
@@ -177,6 +182,18 @@ async def _consult_impl(
     module = _SPECIALISTS[agent_name]
     try:
         patch = await module.run(state)
+    except GraphBubbleUp:
+        # CRITICAL: GraphInterrupt (and any other GraphBubbleUp signal)
+        # MUST propagate up to LangGraph so the graph pauses and the
+        # interrupt envelope reaches the SSE stream as `interrupt_pending`.
+        # The previous version's blanket `except Exception` was
+        # converting the interrupt into a tool error string — the IC
+        # would then paraphrase "I fired an interrupt!" while in fact
+        # no checkpoint state was created, no interrupt_pending event
+        # reached the frontend, and the approval queue stayed empty.
+        # Symptom: human asks for a test proposal, IC narrates success,
+        # nothing visible in the UI.
+        raise
     except Exception as exc:  # noqa: BLE001 -- never propagate to the IC
         err = {
             "agent": agent_name,
