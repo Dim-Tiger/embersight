@@ -1127,24 +1127,25 @@ export function IncidentMap() {
             image: canvas.toDataURL(),
             bounds: wind.bounds,
             imageUnscale: [minV, maxV],
-            // Dense-enough particle field with narrow lines + long
-            // lifetime so each trail stretches ALONG the wind direction
-            // (the path the particle walks). Wider `width` would have
-            // stretched perpendicular to motion, which read as "fat
-            // dots" rather than direction-indicating streaks.
-            numParticles: 800,
-            maxAge: 240,
+            // Sparse jet-contrail look from the first wind change:
+            // 550 particles with a bright-white core contrail palette.
+            // width is kept narrow (1.5) so the particle's travel PATH
+            // (along wind direction) is the dominant visual axis — a wide
+            // width would stretch perpendicular to motion instead.
+            numParticles: 550,
+            maxAge: 220,
             speedFactor: 55,
             width: 1.5,
             speedRange: [0, 25],
-            // Contrail palette: faint tail → bright white core →
-            // yellow → orange → red as wind speed climbs.
+            // Contrail palette: faint slate tail → near-white → pure
+            // white core → yellow → orange → red at max speed.
             colorRamp: [
-              [0.0, [226, 232, 240, 180]], // slate-200 (faint tail)
-              [0.2, [248, 250, 252, 230]], // near-white core
-              [0.5, [253, 224, 71, 235]], // yellow-300
-              [0.75, [249, 115, 22, 240]], // orange-500
-              [1.0, [220, 38, 38, 250]], // red-600
+              [0.0, [203, 213, 225, 200]], // slate-300 (faint tail)
+              [0.15, [248, 250, 252, 245]], // near-white core
+              [0.4, [255, 255, 255, 255]], // pure white contrail
+              [0.6, [253, 224, 71, 250]], // yellow-300
+              [0.8, [249, 115, 22, 250]], // orange-500
+              [1.0, [220, 38, 38, 255]], // red-600
             ],
           }),
         ],
