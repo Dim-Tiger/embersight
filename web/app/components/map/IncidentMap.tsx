@@ -271,48 +271,71 @@ export function IncidentMap() {
   }, []);
 
   // Basemap swap: rather than calling setStyle (which wipes every user
-  // source/layer and forces every overlay effect to rebuild — both slow and
-  // lossy because some effects skip the rebuild when their deps haven't
-  // changed), we install the satellite raster as an overlay layer once at
-  // map load and just toggle its visibility here. The dark vector style
-  // stays underneath untouched, so none of the data layers (perimeter,
-  // incidents, evac, cone, routes, wind) ever have to re-attach when the
-  // user flips the basemap.
+  // source/layer), we install the satellite raster as an overlay layer
+  // lazily — the first time the user actually clicks Satellite. The dark
+  // vector style stays underneath untouched, so none of the data layers
+  // (perimeter, incidents, evac, cone, routes, wind) ever have to
+  // re-attach when the user flips the basemap.
+  //
+  // Lazy install matters: adding the raster source at map init (even
+  // hidden) makes MapLibre prefetch satellite tiles while the carto
+  // basemap is still loading, which competes for the browser's per-host
+  // connection slots and noticeably delays the initial dark render.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
-    if (!map.getLayer("satellite-overlay")) return;
-    map.setLayoutProperty(
-      "satellite-overlay",
-      "visibility",
-      basemap === "satellite" ? "visible" : "none",
-    );
-  }, [basemap, mapLoaded]);
-
-  // Install the satellite raster source/layer once. Added before any user
-  // data layers (incidents/perimeter/evac/...) come in, so naturally sits
-  // below them — toggling its visibility either covers the dark style
-  // (satellite mode) or reveals it (dark mode) without disturbing overlays.
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !mapLoaded) return;
-    if (map.getSource("satellite-overlay")) return;
-    try {
-      map.addSource(
-        "satellite-overlay",
-        SATELLITE_STYLE.sources["esri-world-imagery"],
-      );
-      map.addLayer({
-        id: "satellite-overlay",
-        type: "raster",
-        source: "satellite-overlay",
-        layout: { visibility: basemap === "satellite" ? "visible" : "none" },
-      });
-    } catch (err) {
-      console.warn("satellite overlay install error:", err);
+    if (basemap === "satellite" && !map.getLayer("satellite-overlay")) {
+      try {
+        map.addSource(
+          "satellite-overlay",
+          SATELLITE_STYLE.sources["esri-world-imagery"],
+        );
+        // Add at the bottom (just above the basemap's background) so every
+        // user data layer naturally sits on top.
+        const firstNonBg = map
+          .getStyle()
+          .layers.find((l) => l.id !== "background")?.id;
+        map.addLayer(
+          {
+            id: "satellite-overlay",
+            type: "raster",
+            source: "satellite-overlay",
+          },
+          firstNonBg,
+        );
+        // Push every user layer above the new raster so we don't cover them.
+        for (const id of [
+          "evac-fill",
+          "evac-outline",
+          "cone-outline-glow",
+          "cone-fill",
+          "cone-outline",
+          "perimeter-fill",
+          "perimeter-outline",
+          "staging-point",
+          "incidents-glow",
+          "incidents-circle",
+          "firms-heat",
+          "firms-points",
+          "routes-egress-casing",
+          "routes-egress",
+          "routes-ingress-casing",
+          "routes-ingress",
+        ]) {
+          if (map.getLayer(id)) map.moveLayer(id);
+        }
+      } catch (err) {
+        console.warn("satellite overlay install error:", err);
+      }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapLoaded]);
+    if (map.getLayer("satellite-overlay")) {
+      map.setLayoutProperty(
+        "satellite-overlay",
+        "visibility",
+        basemap === "satellite" ? "visible" : "none",
+      );
+    }
+  }, [basemap, mapLoaded]);
 
   // Fly to selected incident
   useEffect(() => {
