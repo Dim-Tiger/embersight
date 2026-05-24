@@ -185,9 +185,17 @@ export function IncidentMap() {
   }, []);
 
   // Basemap swap: setStyle wipes all sources/layers, so flip mapLoaded
-  // off until the new style fires its own `load` event. Every layer
-  // effect below already gates on mapLoaded, so they'll rebuild cleanly.
+  // off until the new style finishes. MapLibre's `load` event only fires
+  // once for the initial style — for subsequent setStyle calls we need
+  // `style.load`. Skip the very first render because the map is already
+  // being constructed with the right style and `load` will fire from the
+  // init effect.
+  const basemapInitialized = useRef(false);
   useEffect(() => {
+    if (!basemapInitialized.current) {
+      basemapInitialized.current = true;
+      return;
+    }
     const map = mapRef.current;
     if (!map) return;
     setMapLoaded(false);
@@ -201,13 +209,29 @@ export function IncidentMap() {
       }
       deckOverlayRef.current = null;
     }
+    // The cone label is a DOM marker — it survives setStyle but the
+    // re-run of the cone effect will re-create it, so detach now to
+    // avoid duplicates.
+    if (coneLabelRef.current) {
+      coneLabelRef.current.remove();
+      coneLabelRef.current = null;
+    }
     const nextStyle =
       basemap === "satellite" ? SATELLITE_STYLE : CARTO_DARK;
     map.setStyle(nextStyle as maplibregl.StyleSpecification | string);
-    const onLoad = () => setMapLoaded(true);
-    map.once("load", onLoad);
+    // MapLibre v4 does not refire `load` after setStyle; the only reliable
+    // signal that the new style is fully parsed and the GL layers are
+    // ready is `styledata` + `isStyleLoaded()`. styledata can fire
+    // multiple times during a single load, so keep polling until it
+    // returns true, then detach.
+    const onStyleData = () => {
+      if (!map.isStyleLoaded()) return;
+      map.off("styledata", onStyleData);
+      setMapLoaded(true);
+    };
+    map.on("styledata", onStyleData);
     return () => {
-      map.off("load", onLoad);
+      map.off("styledata", onStyleData);
     };
   }, [basemap]);
 
@@ -943,7 +967,15 @@ export function IncidentMap() {
         map.on("mouseleave", "staging-point", hideStagingPopup);
       }
 
-      // Re-stack so fire markers stay above routes.
+      // Re-stack: cone < perimeter < incidents on top of routes so the
+      // spread cone, fire perimeter, and incident markers all stay
+      // legible whether the basemap is the dark vector style or the
+      // satellite imagery.
+      if (map.getLayer("cone-outline-glow")) map.moveLayer("cone-outline-glow");
+      if (map.getLayer("cone-fill")) map.moveLayer("cone-fill");
+      if (map.getLayer("cone-outline")) map.moveLayer("cone-outline");
+      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
       if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
       if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
     } catch (err) {
