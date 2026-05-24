@@ -39,8 +39,27 @@ type RoutingPayload = {
     length_km?: number;
     est_drive_minutes?: number;
     wind_relation?: "upwind" | "crosswind" | "downwind" | "unknown";
+    destination?: {
+      name?: string;
+      rally_type?: string;
+      source?: string;
+      capacity?: number | null;
+      score?: number;
+    };
   }>;
   road_density_km_per_km2?: number;
+  rally_points?: Array<{
+    name?: string;
+    rally_type?: string;
+    source?: string;
+    capacity?: number | null;
+    score?: number;
+    wind_relation?: "upwind" | "crosswind" | "downwind" | "unknown";
+    score_raw?: { distance_km?: number | null };
+  }>;
+  rally_counts?: { osm?: number; hifld?: number; calfire?: number; total_raw?: number; after_dedup_ranked?: number };
+  rally_source_failures?: string[];
+  egress_strategy?: "rally_points" | "bearings_fallback";
 };
 
 type ResourcePayload = {
@@ -68,7 +87,9 @@ export function ResourcesTab() {
 
   const candidates = (rp.candidates ?? []).slice(0, 5);
   const counts = rp.counts ?? {};
-  const egressRoutes = (rp.egress_routes ?? []).slice(0, 5);
+  const egressRoutes = (rp.egress_routes ?? []).slice(0, 6);
+  const rallyPoints = (rp.rally_points ?? []).slice(0, 8);
+  const rallyCounts = rp.rally_counts ?? {};
 
   const routingMetrics: { label: string; value: string | number }[] = [];
   for (const k of Object.keys(counts)) {
@@ -155,40 +176,107 @@ export function ResourcesTab() {
           )}
           {egressRoutes.length > 0 && (
             <div>
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-smoke-400">
-                Egress routes (wind-ranked)
+              <div className="mb-1 flex items-baseline justify-between">
+                <div className="text-[10px] font-semibold uppercase tracking-widest text-smoke-400">
+                  Egress routes (wind-ranked)
+                </div>
+                <div className="text-[9px] text-smoke-500">
+                  {rp.egress_strategy === "bearings_fallback"
+                    ? "bearing fallback (no rally points reached)"
+                    : "→ defined rally points"}
+                </div>
               </div>
               <ul className="space-y-0.5">
-                {egressRoutes.map((r, i) => (
+                {egressRoutes.map((r, i) => {
+                  const dest = r.destination;
+                  const label = dest?.name ?? `bearing ${r.bearing ?? "?"}`;
+                  return (
+                    <li
+                      key={i}
+                      className="flex items-baseline justify-between gap-2 rounded bg-smoke-900/60 px-2.5 py-1 text-[11px]"
+                    >
+                      <span className="flex min-w-0 items-baseline gap-1.5">
+                        <span
+                          className="inline-block h-2 w-2 shrink-0 rounded-sm"
+                          style={{
+                            backgroundColor: windRelationColor(r.wind_relation),
+                          }}
+                        />
+                        <span className="truncate font-medium text-ember-200">
+                          {label}
+                        </span>
+                        {dest?.rally_type && (
+                          <span className="shrink-0 text-[9px] uppercase tracking-wider text-smoke-500">
+                            {dest.rally_type.replace(/_/g, " ")}
+                          </span>
+                        )}
+                      </span>
+                      <span className="shrink-0 text-smoke-400">
+                        {r.length_km != null
+                          ? `${r.length_km.toFixed(1)} km`
+                          : ""}
+                        {r.est_drive_minutes != null
+                          ? ` · ${Math.round(r.est_drive_minutes)} min`
+                          : ""}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+          {rallyPoints.length > 0 && (
+            <div>
+              <div className="mb-1 flex items-baseline justify-between">
+                <div className="text-[10px] font-semibold uppercase tracking-widest text-smoke-400">
+                  Rally points
+                </div>
+                <div className="text-[9px] text-smoke-500">
+                  osm {rallyCounts.osm ?? 0} · hifld {rallyCounts.hifld ?? 0}
+                  {rallyCounts.calfire
+                    ? ` · cal fire ${rallyCounts.calfire}`
+                    : ""}
+                </div>
+              </div>
+              <ul className="space-y-0.5">
+                {rallyPoints.map((p, i) => (
                   <li
                     key={i}
                     className="flex items-baseline justify-between gap-2 rounded bg-smoke-900/60 px-2.5 py-1 text-[11px]"
                   >
-                    <span className="flex items-baseline gap-1.5">
+                    <span className="flex min-w-0 items-baseline gap-1.5">
                       <span
-                        className="inline-block h-2 w-2 rounded-sm"
+                        className="inline-block h-2 w-2 shrink-0 rounded-full"
                         style={{
-                          backgroundColor: windRelationColor(r.wind_relation),
+                          backgroundColor: windRelationColor(p.wind_relation),
                         }}
                       />
-                      <span className="font-medium text-ember-200">
-                        {r.bearing ?? "?"}
+                      <span className="truncate font-medium text-ember-200">
+                        {p.name ?? "rally point"}
                       </span>
-                      <span className="text-smoke-500">
-                        {r.wind_relation ?? "unknown"}
+                      <span className="shrink-0 text-[9px] uppercase tracking-wider text-smoke-500">
+                        {(p.rally_type ?? "?").replace(/_/g, " ")}
                       </span>
                     </span>
-                    <span className="text-smoke-400">
-                      {r.length_km != null
-                        ? `${r.length_km.toFixed(1)} km`
+                    <span className="shrink-0 text-smoke-400">
+                      {p.score_raw?.distance_km != null
+                        ? `${Number(p.score_raw.distance_km).toFixed(1)} km`
                         : ""}
-                      {r.est_drive_minutes != null
-                        ? ` · ${Math.round(r.est_drive_minutes)} min`
+                      {p.capacity != null && Number(p.capacity) > 0
+                        ? ` · ~${Number(p.capacity).toLocaleString()}`
+                        : ""}
+                      {p.score != null
+                        ? ` · ${Number(p.score).toFixed(2)}`
                         : ""}
                     </span>
                   </li>
                 ))}
               </ul>
+              {rp.rally_source_failures && rp.rally_source_failures.length > 0 && (
+                <div className="mt-1 text-[9px] italic text-smoke-500">
+                  source failures: {rp.rally_source_failures.join(", ")}
+                </div>
+              )}
             </div>
           )}
           {candidates.length > 0 && (
