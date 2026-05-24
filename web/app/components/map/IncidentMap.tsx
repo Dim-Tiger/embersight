@@ -23,6 +23,10 @@ const CARTO_DARK =
 // itself.  Below this threshold the circle reappears automatically.
 const PERIMETER_HIDE_CIRCLE_ZOOM = 9;
 
+// Below this zoom the 66km wind grid covers only a tiny patch of the screen,
+// so we widen particles and bump density so streams stay readable.
+const WIND_LOW_ZOOM_THRESHOLD = 8;
+
 // Esri World Imagery — free satellite raster tiles. Inlined as a MapLibre
 // style so we can hot-swap basemaps without keeping a second style.json.
 const SATELLITE_STYLE: maplibregl.StyleSpecification = {
@@ -127,6 +131,10 @@ export function IncidentMap() {
   const [showRoutes, setShowRoutes] = useState(true);
   const [basemap, setBasemap] = useState<Basemap>("dark");
   const [showCone, setShowCone] = useState(true);
+  const [legendCollapsed, setLegendCollapsed] = useState(false);
+  const [windLowZoom, setWindLowZoom] = useState(
+    () => useStore.getState().mapViewport.zoom < WIND_LOW_ZOOM_THRESHOLD,
+  );
 
   // Store selectors — placed before the derived state that depends on them.
   const { data: incidents } = useIncidents();
@@ -191,6 +199,10 @@ export function IncidentMap() {
       const z = map.getZoom();
       setAbovePerimeterZoom((prev) => {
         const next = z >= PERIMETER_HIDE_CIRCLE_ZOOM;
+        return prev === next ? prev : next;
+      });
+      setWindLowZoom((prev) => {
+        const next = z < WIND_LOW_ZOOM_THRESHOLD;
         return prev === next ? prev : next;
       });
     });
@@ -1121,12 +1133,25 @@ export function IncidentMap() {
         ...v,
         direction: (v.direction + 180) % 360,
       }));
+      // When zoomed out the 66km sample box collapses to a few pixels, so we
+      // pad the rendered bounds outward. The IDW texture extrapolates the same
+      // 7x7 sample to the wider extent — fine for visualization since wind at
+      // this synoptic scale is smooth.
+      const [w0, s0, e0, n0] = wind.bounds;
+      const padX = (e0 - w0) * (windLowZoom ? 1.0 : 0.0);
+      const padY = (n0 - s0) * (windLowZoom ? 1.0 : 0.0);
+      const renderBounds: [number, number, number, number] = [
+        w0 - padX,
+        s0 - padY,
+        e0 + padX,
+        n0 + padY,
+      ];
       const { canvas, uMin, uMax, vMin, vMax } = generateWindTexture(
         vectorsTo,
         {
           width: 128,
           height: 128,
-          bounds: wind.bounds,
+          bounds: renderBounds,
         },
       );
       const minV = Math.min(uMin, vMin);
@@ -1138,7 +1163,7 @@ export function IncidentMap() {
           new WindParticleLayer({
             id: "embersight-wind",
             image: canvas.toDataURL(),
-            bounds: wind.bounds,
+            bounds: renderBounds,
             imageUnscale: [minV, maxV],
             // Few, long, thin particles read as cohesive wind streams.
             // Total trail length = maxAge * per-tick stride, where stride
@@ -1146,10 +1171,12 @@ export function IncidentMap() {
             // min/max are advisory deck.gl validators (not runtime caps),
             // so we push maxAge well past 255 for longer trails while
             // keeping speedFactor low for slow, languid motion.
-            numParticles: 180,
+            // At low zoom we widen particles and thicken trails so the wind
+            // is still legible when the sample box shrinks on screen.
+            numParticles: windLowZoom ? 360 : 240,
             maxAge: 700,
             speedFactor: 280,
-            width: 1.6,
+            width: windLowZoom ? 3.2 : 2.4,
             speedRange: [0, 22],
             // Streamline palette: faint slate tail → bright white core →
             // amber → orange → red as wind speed climbs. Kept narrow on
@@ -1171,7 +1198,7 @@ export function IncidentMap() {
     } catch (err) {
       console.warn("wind layer error:", err);
     }
-  }, [wind, showWind, mapLoaded]);
+  }, [wind, showWind, mapLoaded, windLowZoom]);
 
   return (
     <div className="relative h-full w-full">
@@ -1196,6 +1223,8 @@ export function IncidentMap() {
         firmsCount={firms?.features?.length ?? 0}
         ingressCount={routingOutput?.payload?.primary_routes?.length ?? 0}
         egressCount={routingOutput?.payload?.egress_routes?.length ?? 0}
+        collapsed={legendCollapsed}
+        setCollapsed={setLegendCollapsed}
       />
     </div>
   );
@@ -1457,6 +1486,8 @@ function Legend({
   firmsCount,
   ingressCount,
   egressCount,
+  collapsed,
+  setCollapsed,
 }: {
   hasPerimeter: boolean;
   showWind: boolean;
@@ -1477,12 +1508,35 @@ function Legend({
   firmsCount: number;
   ingressCount: number;
   egressCount: number;
+  collapsed: boolean;
+  setCollapsed: (b: boolean) => void;
 }) {
   const center = wind?.vectors.length
     ? wind.vectors[Math.floor(wind.vectors.length / 2)]
     : null;
   return (
-    <div className="absolute bottom-3 left-3 max-w-[260px] rounded-md bg-smoke-800/90 p-3 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
+    <div className="absolute bottom-3 left-3 z-20 max-w-[260px] rounded-md bg-smoke-800/90 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
+      <button
+        type="button"
+        onClick={() => setCollapsed(!collapsed)}
+        className="flex w-full items-center justify-between gap-2 rounded-t-md px-3 py-2 text-left text-smoke-200 hover:bg-smoke-700/60"
+        aria-expanded={!collapsed}
+      >
+        <span className="font-semibold">Legend</span>
+        <span
+          className="text-smoke-400"
+          aria-hidden
+          style={{
+            transform: collapsed ? "rotate(0deg)" : "rotate(180deg)",
+            transition: "transform 120ms",
+            display: "inline-block",
+          }}
+        >
+          ▾
+        </span>
+      </button>
+      {collapsed ? null : (
+      <div className="px-3 pb-3">
       <div className="mb-1 font-semibold text-smoke-200">Basemap</div>
       <div className="mb-2 inline-flex overflow-hidden rounded border border-smoke-700">
         <button
@@ -1681,6 +1735,8 @@ function Legend({
       <div className="mt-2 text-[10px] text-smoke-500">
         Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS · OSM/OSMnx
       </div>
+      </div>
+      )}
     </div>
   );
 }
