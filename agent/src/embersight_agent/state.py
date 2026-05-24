@@ -11,6 +11,8 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, Literal
 
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 # --------------------------------------------------------------------------- #
@@ -90,24 +92,38 @@ def _merge_outputs(
     return {**left, **right}
 
 
+RunMode = Literal["briefing", "chat"]
+
+
 class AgentState(BaseModel):
-    """LangGraph state object.
+    """LangGraph state object shared across briefing + chat modes.
 
     Annotated reducers let parallel `Send`-fanned subagents merge results
-    without stomping on each other.
+    without stomping on each other. The same thread_id sees both a one-shot
+    briefing run AND subsequent chat turns; `outputs` persists across turns.
     """
+
+    model_config = {"arbitrary_types_allowed": True}
 
     # Inputs
     incident: Incident | None = None
     operational_period: int = 1
-    user_query: str = ""
+    mode: RunMode = "briefing"
+    user_query: str = ""  # legacy; chat turns use `messages` instead
 
-    # Per-subagent outputs, keyed by agent name
+    # Conversational history (chat mode). LangGraph add_messages appends
+    # incoming HumanMessage / AIMessage / ToolMessage rather than replacing.
+    messages: Annotated[list[AnyMessage], add_messages] = Field(
+        default_factory=list
+    )
+
+    # Per-subagent outputs, keyed by agent name. Survives across chat turns;
+    # a tool re-invocation overwrites only the affected agent.
     outputs: Annotated[dict[str, AgentOutput], _merge_outputs] = Field(
         default_factory=dict
     )
 
-    # Master IC synthesis
+    # Master IC synthesis (briefing mode)
     iap_draft: dict[str, Any] | None = None
     dissent_log: Annotated[list[dict[str, Any]], operator.add] = Field(
         default_factory=list

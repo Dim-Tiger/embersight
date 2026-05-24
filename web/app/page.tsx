@@ -39,12 +39,14 @@ export default function Page() {
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const restartCount = useStore((s) => s.restartCount);
   const { data: incidents } = useIncidents();
-  const { start } = useAgentStream();
+  const { startBriefing } = useAgentStream();
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
 
-  // Single authoritative place that starts the agent — fires once per incident
-  // change, or when the user explicitly requests a restart (restartCount).
+  // Single authoritative place that fires the INITIAL BRIEFING — runs the
+  // full fan-out once per incident change (or explicit restart). Subsequent
+  // user messages take the chat path through sendMessage() and do NOT
+  // re-trigger this effect.
   const lastStartedRef = useRef<{ id: string; count: number } | null>(null);
   useEffect(() => {
     if (!selectedIncidentId || !incidents) return;
@@ -55,8 +57,8 @@ export default function Page() {
     const inc = incidents.find((i) => i.id === selectedIncidentId);
     if (!inc) return;
     lastStartedRef.current = { id: selectedIncidentId, count: restartCount };
-    start(inc);
-  }, [selectedIncidentId, restartCount, incidents, start]);
+    startBriefing(inc);
+  }, [selectedIncidentId, restartCount, incidents, startBriefing]);
 
   const handleIncidentChange = (id: string) => {
     setSelectedIncident(id || null);
@@ -181,15 +183,15 @@ function NoIncidentState() {
 
 function OperationsTab() {
   return (
-    <div className="grid h-full grid-cols-[1fr_360px] gap-px bg-smoke-700">
-      <div className="bg-smoke-900">
+    <div className="grid h-full min-h-0 grid-cols-[1fr_360px] grid-rows-[minmax(0,1fr)] gap-px bg-smoke-700">
+      <div className="min-h-0 bg-smoke-900">
         <IncidentMap />
       </div>
-      <aside className="flex flex-col gap-px bg-smoke-700">
-        <div className="flex-1 overflow-hidden bg-smoke-900">
+      <aside className="grid min-h-0 grid-rows-[minmax(0,1fr)_minmax(0,40%)] gap-px bg-smoke-700">
+        <div className="min-h-0 overflow-hidden bg-smoke-900">
           <AgentFeed />
         </div>
-        <div className="h-[40%] overflow-hidden bg-smoke-900">
+        <div className="min-h-0 overflow-hidden bg-smoke-900">
           <ApprovalQueue />
         </div>
       </aside>

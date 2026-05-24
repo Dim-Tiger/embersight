@@ -6,17 +6,22 @@ import { useStore } from "@/lib/store";
 import { useCallback, useRef } from "react";
 
 /**
- * SSE bridge that POSTs to /api/agent/stream and parses event-stream chunks
- * into the Zustand store via `consumeAgentSse`. The native EventSource API
- * only does GET, so we POST + read the body ourselves.
+ * Two-mode SSE bridge:
+ *
+ * - `startBriefing(incident)` runs the initial full-fan-out briefing once per
+ *   incident. Populates every tab from the seven specialists in parallel.
+ *
+ * - `sendMessage(incident, text)` runs a single conversational turn against
+ *   the same checkpointed thread. Only the Master IC runs; the IC decides
+ *   whether to call any specialist tools.
  */
 export function useAgentStream() {
   const operationalPeriod = useStore((s) => s.operationalPeriod);
   const setSelectedThread = useStore((s) => s.setSelectedThread);
   const abortRef = useRef<AbortController | null>(null);
 
-  const start = useCallback(
-    async (incident: Incident, opts?: { userQuery?: string }) => {
+  const startBriefing = useCallback(
+    async (incident: Incident) => {
       abortRef.current?.abort();
       const store = useStore.getState();
       store.clearRun();
@@ -28,19 +33,8 @@ export function useAgentStream() {
           : String(Date.now());
       setSelectedThread(threadId);
 
-      const userQuery = (opts?.userQuery ?? "").trim();
-      if (userQuery) {
-        store.appendChat({
-          id: `u-${Date.now()}`,
-          role: "user",
-          text: userQuery,
-          ts: Date.now(),
-        });
-      }
-
       const ctrl = new AbortController();
       abortRef.current = ctrl;
-
       useStore.getState().setConnectionStatus("posting");
 
       try {
@@ -49,8 +43,8 @@ export function useAgentStream() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             incident,
+            mode: "briefing",
             operational_period: operationalPeriod,
-            user_query: userQuery,
             thread_id: threadId,
           }),
           signal: ctrl.signal,
@@ -59,7 +53,9 @@ export function useAgentStream() {
 
         if (!res.ok || !res.body) {
           const body = await res.text().catch(() => res.statusText);
-          useStore.getState().setError(`stream ${res.status}: ${body.slice(0, 200)}`);
+          useStore
+            .getState()
+            .setError(`stream ${res.status}: ${body.slice(0, 200)}`);
           useStore.getState().setStreaming(false);
           return;
         }
@@ -80,7 +76,72 @@ export function useAgentStream() {
     [operationalPeriod, setSelectedThread],
   );
 
-  return { start };
+  const sendMessage = useCallback(
+    async (incident: Incident, text: string) => {
+      const message = text.trim();
+      if (!message) return;
+      const store = useStore.getState();
+      const threadId = store.selectedThreadId;
+      if (!threadId) {
+        store.setError(
+          "No active thread — pick an incident first to brief the IC.",
+        );
+        return;
+      }
+
+      // Record the user turn immediately.
+      store.appendChat({
+        id: `u-${Date.now()}`,
+        role: "user",
+        text: message,
+        ts: Date.now(),
+      });
+      store.setStreaming(true);
+      store.setDone(false);
+      store.setError(null);
+      useStore.getState().setConnectionStatus("posting");
+
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+
+      try {
+        const res = await fetch("/api/agent/stream", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            incident,
+            mode: "chat",
+            message,
+            operational_period: useStore.getState().operationalPeriod,
+            thread_id: threadId,
+          }),
+          signal: ctrl.signal,
+        });
+        useStore.getState().setConnectionStatus("responded");
+
+        if (!res.ok || !res.body) {
+          const body = await res.text().catch(() => res.statusText);
+          useStore
+            .getState()
+            .setError(`chat ${res.status}: ${body.slice(0, 200)}`);
+          useStore.getState().setStreaming(false);
+          return;
+        }
+
+        await consumeAgentSse(res.body, threadId);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        useStore
+          .getState()
+          .setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        useStore.getState().setStreaming(false);
+      }
+    },
+    [],
+  );
+
+  return { startBriefing, sendMessage };
 }
 
 /** Mirror of sse.ts isAbortLike — kept local to avoid a shared-module import. */

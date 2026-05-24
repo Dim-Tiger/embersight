@@ -197,18 +197,12 @@ export function AgentFeed() {
               <div className="space-y-2 border-t border-smoke-700 px-3 py-2">
                 {chat.length === 0 ? (
                   <div className="px-1 py-3 text-[11px] italic text-smoke-500">
-                    Agent narratives will appear here as each subagent
-                    completes.
+                    The AI Master IC will brief you here once the team
+                    completes the initial run. After that, type a question
+                    below — the IC will delegate to specialists as needed.
                   </div>
                 ) : (
-                  chat.map((m) => (
-                    <ChatBubble
-                      key={m.id}
-                      role={m.role}
-                      agentName={m.agentName}
-                      text={m.text}
-                    />
-                  ))
+                  chat.map((m) => <ChatBubble key={m.id} message={m} />)
                 )}
               </div>
             </div>
@@ -222,15 +216,28 @@ export function AgentFeed() {
 }
 
 function ChatBubble({
-  role,
-  agentName,
-  text,
+  message,
 }: {
-  role: "user" | "agent";
-  agentName?: string;
-  text: string;
+  message: import("@/lib/store").ChatMessage;
 }) {
+  const { role, agentName, text, streaming, toolCalls } = message;
   const isUser = role === "user";
+  const isSystem = role === "system";
+
+  if (isSystem) {
+    // System ticker line (briefing-mode subagent narrative)
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[90%] rounded border border-smoke-800 bg-smoke-900/40 px-2.5 py-1 text-[10px] leading-snug text-smoke-400">
+          <span className="font-semibold uppercase tracking-widest text-smoke-500">
+            {agentName ?? "team"}
+          </span>{" "}
+          · {text}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
@@ -245,7 +252,57 @@ function ChatBubble({
             {agentName}
           </div>
         )}
-        <div className="whitespace-pre-wrap">{text}</div>
+
+        {/* Tool-call delegation pills — render above the IC's reply text */}
+        {toolCalls && toolCalls.length > 0 && (
+          <ul className="mb-1.5 space-y-1">
+            {toolCalls.map((tc) => (
+              <li
+                key={tc.id}
+                className="flex items-start gap-1.5 rounded border border-smoke-700 bg-smoke-900/60 px-1.5 py-1 text-[10px]"
+              >
+                <span
+                  className={`mt-0.5 h-1.5 w-1.5 flex-shrink-0 rounded-full ${
+                    tc.status === "done"
+                      ? "bg-ember-400"
+                      : "animate-pulse bg-ember-300"
+                  }`}
+                />
+                <div className="min-w-0">
+                  <div className="font-medium text-ember-200">
+                    Consulting {tc.agentLabel}
+                    {tc.args && (tc.args as any).must_refresh
+                      ? " (refresh)"
+                      : ""}
+                    {tc.status === "running" ? "…" : ""}
+                  </div>
+                  {tc.summary && typeof tc.summary === "object" && (
+                    <div className="text-smoke-400">
+                      {(tc.summary as any).confidence != null
+                        ? `conf ${Math.round(
+                            ((tc.summary as any).confidence as number) * 100,
+                          )}%`
+                        : ""}
+                      {(tc.summary as any).status === "no_output"
+                        ? " · no cached output"
+                        : ""}
+                      {(tc.summary as any).status === "error"
+                        ? ` · ${(tc.summary as any).error}`
+                        : ""}
+                    </div>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="whitespace-pre-wrap">
+          {text}
+          {streaming && (
+            <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-ember-300 align-middle" />
+          )}
+        </div>
       </div>
     </div>
   );
