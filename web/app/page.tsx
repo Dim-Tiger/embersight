@@ -2,6 +2,7 @@
 
 import { useIncidents } from "@/lib/queries";
 import { AGENT_ORDER, type AgentStatus, useStore } from "@/lib/store";
+import { useTheme } from "@/lib/theme";
 import {
   AlertTriangle,
   ChevronDown,
@@ -9,8 +10,10 @@ import {
   FileText,
   Flame,
   LayoutGrid,
+  Moon,
   Package,
   Route,
+  Sun,
   Wind,
   X,
 } from "lucide-react";
@@ -55,6 +58,8 @@ export default function Page() {
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const restartCount = useStore((s) => s.restartCount);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const theme = useTheme((s) => s.theme);
+  const toggleTheme = useTheme((s) => s.toggle);
   const { data: incidents } = useIncidents();
   const { startBriefing } = useAgentStream();
 
@@ -100,6 +105,15 @@ export default function Page() {
             src="/brand/logo.png"
             alt="EmberSight"
             className="h-7 w-7 flex-shrink-0 object-contain"
+            // The source logo has a BLACK eye outline (designed for light
+            // backgrounds). In dark mode, invert + hue-rotate flips the
+            // outline to white while bringing the orange/red flame colors
+            // back to their originals.
+            style={
+              theme === "dark"
+                ? { filter: "invert(1) hue-rotate(180deg)" }
+                : undefined
+            }
           />
           {!sidebarCollapsed && (
             <span className="flex-1 truncate font-semibold tracking-wide text-smoke-200">
@@ -194,11 +208,38 @@ export default function Page() {
         </div>
 
         {/* Footer */}
-        {!sidebarCollapsed && (
-          <div className="border-t border-smoke-700 px-3 py-2">
-            <div className="text-center text-[9px] text-smoke-500">
+        {!sidebarCollapsed ? (
+          <div className="flex items-center justify-between border-t border-smoke-700 px-3 py-2">
+            <span className="text-[9px] text-smoke-500">
               DRAFT · never dispatches
-            </div>
+            </span>
+            <button
+              onClick={toggleTheme}
+              className="flex h-6 w-6 items-center justify-center rounded text-smoke-400 transition-colors hover:bg-smoke-700 hover:text-smoke-200"
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            >
+              {theme === "dark" ? (
+                <Sun className="h-3.5 w-3.5" />
+              ) : (
+                <Moon className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </div>
+        ) : (
+          <div className="flex justify-center border-t border-smoke-700 py-2">
+            <button
+              onClick={toggleTheme}
+              className="flex h-6 w-6 items-center justify-center rounded text-smoke-400 transition-colors hover:bg-smoke-700 hover:text-smoke-200"
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            >
+              {theme === "dark" ? (
+                <Sun className="h-3.5 w-3.5" />
+              ) : (
+                <Moon className="h-3.5 w-3.5" />
+              )}
+            </button>
           </div>
         )}
       </nav>

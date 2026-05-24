@@ -717,25 +717,24 @@ export function IncidentMap() {
             image: canvas.toDataURL(),
             bounds: wind.bounds,
             imageUnscale: [minV, maxV],
-            // Few, long, thin particles read as cohesive wind streams —
-            // long trails (high maxAge) with narrow line width (~1.5)
-            // beats many fat particles for a streamline feel.
-            numParticles: 280,
-            maxAge: 360,
-            speedFactor: 70,
-            width: 1.6,
-            speedRange: [0, 22],
-            // Streamline palette: faint slate tail → bright white core →
-            // amber → orange → red as wind speed climbs. Kept narrow on
-            // the white-core band so most streams read as cohesive white
-            // lines, with warm colors reserved for genuinely strong wind.
+            // Dense-enough particle field with narrow lines + long
+            // lifetime so each trail stretches ALONG the wind direction
+            // (the path the particle walks). Wider `width` would have
+            // stretched perpendicular to motion, which read as "fat
+            // dots" rather than direction-indicating streaks.
+            numParticles: 800,
+            maxAge: 240,
+            speedFactor: 55,
+            width: 1.5,
+            speedRange: [0, 25],
+            // Contrail palette: faint tail → bright white core →
+            // yellow → orange → red as wind speed climbs.
             colorRamp: [
-              [0.0, [148, 163, 184, 160]], // slate-400 (ghost tail)
-              [0.12, [226, 232, 240, 220]], // slate-200
-              [0.3, [255, 255, 255, 250]], // pure white core
-              [0.6, [253, 224, 71, 250]], // yellow-300
-              [0.8, [249, 115, 22, 252]], // orange-500
-              [1.0, [220, 38, 38, 255]], // red-600
+              [0.0, [226, 232, 240, 180]], // slate-200 (faint tail)
+              [0.2, [248, 250, 252, 230]], // near-white core
+              [0.5, [253, 224, 71, 235]], // yellow-300
+              [0.75, [249, 115, 22, 240]], // orange-500
+              [1.0, [220, 38, 38, 250]], // red-600
             ],
           }),
         ],
