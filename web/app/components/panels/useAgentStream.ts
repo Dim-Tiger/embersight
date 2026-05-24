@@ -66,7 +66,10 @@ export function useAgentStream() {
 
         await consumeAgentSse(res.body, threadId);
       } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
+        // Ignore intentional aborts and network-closure errors that browsers
+        // may surface as TypeError instead of AbortError when the stream is
+        // already being consumed (sse.ts already handled state for real errors).
+        if (isAbortLike(err)) return;
         useStore
           .getState()
           .setError(err instanceof Error ? err.message : String(err));
@@ -78,4 +81,17 @@ export function useAgentStream() {
   );
 
   return { start };
+}
+
+/** Mirror of sse.ts isAbortLike — kept local to avoid a shared-module import. */
+function isAbortLike(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (
+    err instanceof TypeError &&
+    /network error|Failed to fetch|BodyStreamBuffer was aborted/i.test(
+      err.message,
+    )
+  )
+    return true;
+  return false;
 }
