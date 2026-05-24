@@ -20,3 +20,14 @@ body {
 * {
   box-sizing: border-box;
 }
+
+/* Strip the default white MapLibre popup chrome — our tooltips supply their own styling */
+.maplibregl-popup-content {
+  background: transparent !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+.maplibregl-popup-tip {
+  display: none !important;
+}
