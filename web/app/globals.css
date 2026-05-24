@@ -7,12 +7,12 @@
 :root {
   /* Dark-theme defaults. Each value is an `R G B` triple so it can be
      consumed by Tailwind's `rgb(var(--smoke-N) / <alpha-value>)` pattern. */
-  --smoke-50: 230 237 243;
-  --smoke-100: 198 208 220;
-  --smoke-200: 163 175 193;
-  --smoke-300: 124 139 160;
-  --smoke-400: 91 102 119;
-  --smoke-500: 58 68 84;
+  --smoke-50: 248 250 252;
+  --smoke-100: 241 245 249;
+  --smoke-200: 226 232 240;
+  --smoke-300: 203 213 225;
+  --smoke-400: 148 163 184;
+  --smoke-500: 100 116 139;
   --smoke-600: 38 48 63;
   --smoke-700: 26 34 48;
   --smoke-800: 17 23 34;
@@ -26,13 +26,13 @@ html.light {
      becomes near-black, borders and muted text scale accordingly. */
   --smoke-50: 11 15 20;
   --smoke-100: 17 23 34;
-  --smoke-200: 31 41 55;
-  --smoke-300: 75 85 99;
-  --smoke-400: 107 114 128;
-  --smoke-500: 156 163 175;
-  --smoke-600: 209 213 219;
-  --smoke-700: 229 231 235;
-  --smoke-800: 245 246 248;
+  --smoke-200: 26 34 48;
+  --smoke-300: 38 48 63;
+  --smoke-400: 100 116 139;
+  --smoke-500: 148 163 184;
+  --smoke-600: 203 213 225;
+  --smoke-700: 226 232 240;
+  --smoke-800: 241 245 249;
   --smoke-900: 255 255 255;
   color-scheme: light;
 }
@@ -40,6 +40,8 @@ html.light {
 html,
 body {
   height: 100%;
+  background: rgb(var(--smoke-900));
+  color: rgb(var(--smoke-200));
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
 }
