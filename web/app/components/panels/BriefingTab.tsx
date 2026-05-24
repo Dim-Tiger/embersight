@@ -27,6 +27,7 @@ import {
   Wind,
 } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
+import { Markdown, stripMarkdown } from "@/app/components/Markdown";
 import { MessageInput } from "./MessageInput";
 
 type AgentAccent = {
@@ -401,7 +402,7 @@ function RosterCard({
   const errored = status === "error";
 
   const headline = narrative
-    ? stripPrefix(narrative).split(/[.;]\s/)[0].slice(0, 140)
+    ? stripMarkdown(stripPrefix(narrative)).split(/[.;]\s/)[0].slice(0, 140)
     : null;
 
   const borderTone = running
@@ -698,8 +699,8 @@ function AgentBubble({ message }: { message: ChatMessage }) {
           }`}
         >
           {text ? (
-            <div className="whitespace-pre-wrap">
-              {text}
+            <div>
+              <Markdown>{text}</Markdown>
               {streaming && (
                 <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-ember-300 align-middle" />
               )}
@@ -800,7 +801,7 @@ function SystemNarrative({ message }: { message: ChatMessage }) {
           </span>
         </div>
         <div className="rounded-xl rounded-tl-md bg-smoke-800/60 px-3 py-1.5 text-[11.5px] leading-relaxed text-smoke-300 ring-1 ring-smoke-700/70">
-          {message.text}
+          <Markdown>{message.text}</Markdown>
         </div>
       </div>
     </div>

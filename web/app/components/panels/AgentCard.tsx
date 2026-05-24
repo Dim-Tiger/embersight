@@ -3,6 +3,7 @@
 import { type AgentOutput, type AgentStatus, useStore } from "@/lib/store";
 import { AlertTriangle, CheckCircle2, CircleDashed, Loader2 } from "lucide-react";
 import { type ReactNode } from "react";
+import { Markdown } from "@/app/components/Markdown";
 
 export function AgentCard({
   title,
@@ -79,9 +80,9 @@ export function AgentCard({
         {output && (
           <>
             {output.narrative && (
-              <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-smoke-200">
+              <Markdown className="text-[12px] leading-relaxed text-smoke-200">
                 {stripPrefix(output.narrative)}
-              </p>
+              </Markdown>
             )}
             {output.confidence_driver && (
               <p className="text-[10px] text-smoke-500">
@@ -164,7 +165,7 @@ export function KeyFindings({ items }: { items: string[] }) {
         {items.map((f, i) => (
           <li key={i} className="flex gap-1.5">
             <span className="text-ember-400">▸</span>
-            <span>{f}</span>
+            <Markdown inline>{f}</Markdown>
           </li>
         ))}
       </ul>

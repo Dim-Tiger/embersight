@@ -4,6 +4,7 @@ import { postResume } from "@/lib/queries";
 import { useStore } from "@/lib/store";
 import { FileText } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Markdown } from "@/app/components/Markdown";
 import { AgentActivityBanner } from "./AgentActivityBanner";
 
 type Draft = {
@@ -191,7 +192,9 @@ function FormView({ draft }: { draft: Draft }) {
           </h4>
           <ol className="list-decimal space-y-1 pl-5 text-[12px] text-smoke-200">
             {draft.objectives.map((o, i) => (
-              <li key={i}>{o}</li>
+              <li key={i}>
+                <Markdown inline>{o}</Markdown>
+              </li>
             ))}
           </ol>
         </section>
@@ -202,9 +205,9 @@ function FormView({ draft }: { draft: Draft }) {
           <h4 className="text-[10px] font-semibold uppercase tracking-widest text-amber-300">
             Safety message
           </h4>
-          <p className="mt-0.5 text-[12px] text-amber-100">
+          <Markdown className="mt-0.5 text-[12px] text-amber-100">
             {draft.safety_message}
-          </p>
+          </Markdown>
         </section>
       )}
 
@@ -215,9 +218,11 @@ function FormView({ draft }: { draft: Draft }) {
               <h4 className="mb-0.5 text-[11px] font-semibold uppercase tracking-widest text-smoke-400">
                 {s.title}
               </h4>
-              <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-smoke-200">
-                {s.body}
-              </p>
+              {s.body && (
+                <Markdown className="text-[12px] leading-relaxed text-smoke-200">
+                  {s.body}
+                </Markdown>
+              )}
             </div>
           ))}
         </section>
@@ -238,17 +243,21 @@ function FormView({ draft }: { draft: Draft }) {
                 {a.resources && a.resources.length > 0 && (
                   <ul className="mt-1 list-disc space-y-0.5 pl-5 text-smoke-300">
                     {a.resources.map((r, j) => (
-                      <li key={j}>{r}</li>
+                      <li key={j}>
+                        <Markdown inline>{r}</Markdown>
+                      </li>
                     ))}
                   </ul>
                 )}
                 {a.work_assignment && (
-                  <p className="mt-1 text-smoke-300">{a.work_assignment}</p>
+                  <Markdown className="mt-1 text-smoke-300">
+                    {a.work_assignment}
+                  </Markdown>
                 )}
                 {a.special_instructions && (
-                  <p className="mt-1 text-[11px] italic text-smoke-500">
+                  <Markdown className="mt-1 text-[11px] italic text-smoke-500">
                     {a.special_instructions}
-                  </p>
+                  </Markdown>
                 )}
               </div>
             ))}
@@ -263,7 +272,9 @@ function FormView({ draft }: { draft: Draft }) {
           </h4>
           <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-smoke-300">
             {draft.key_findings.map((f, i) => (
-              <li key={i}>{f}</li>
+              <li key={i}>
+                <Markdown inline>{f}</Markdown>
+              </li>
             ))}
           </ul>
         </section>
@@ -281,9 +292,11 @@ function FormView({ draft }: { draft: Draft }) {
                   {d.kind ?? "concern"} ·{" "}
                   {d.agents?.join(", ") || d.agent || "—"}
                 </span>
-                <div className="text-smoke-300">{d.concern}</div>
+                {d.concern && (
+                  <Markdown className="text-smoke-300">{d.concern}</Markdown>
+                )}
                 {d.rationale && (
-                  <div className="text-smoke-500">{d.rationale}</div>
+                  <Markdown className="text-smoke-500">{d.rationale}</Markdown>
                 )}
               </li>
             ))}

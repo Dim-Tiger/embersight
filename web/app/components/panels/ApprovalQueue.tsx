@@ -8,6 +8,7 @@ import {
 } from "@/lib/store";
 import { useState } from "react";
 import { useIncidents } from "@/lib/queries";
+import { Markdown } from "@/app/components/Markdown";
 
 const TYPE_LABEL: Record<string, string> = {
   iap_approval: "IAP draft — IC approval required",
@@ -432,13 +433,21 @@ function RefineThread({
             className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
           >
             <div
-              className={`max-w-[88%] rounded px-2 py-1 text-[11px] leading-snug whitespace-pre-wrap ${
+              className={`max-w-[88%] rounded px-2 py-1 text-[11px] leading-snug ${
                 m.role === "user"
                   ? "bg-ember-600/80 text-white"
                   : "bg-smoke-800 text-smoke-200 ring-1 ring-smoke-700"
               }`}
             >
-              {m.text || (m.streaming ? "…" : "")}
+              {m.role === "user" ? (
+                <span className="whitespace-pre-wrap">
+                  {m.text || (m.streaming ? "…" : "")}
+                </span>
+              ) : m.text ? (
+                <Markdown>{m.text}</Markdown>
+              ) : m.streaming ? (
+                <span>…</span>
+              ) : null}
               {m.streaming && (
                 <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-ember-300 align-middle" />
               )}
