@@ -24,9 +24,6 @@ export function ApprovalQueue() {
     <section className="flex h-full flex-col">
       <header className="flex items-center justify-between border-b border-smoke-700 bg-smoke-800/60 px-4 py-2">
         <h2 className="text-sm font-semibold text-smoke-200">Approval queue</h2>
-        <span className="rounded bg-ember-900/60 px-2 py-0.5 text-[10px] uppercase tracking-widest text-ember-200">
-          human-in-the-loop
-        </span>
       </header>
       <div className="flex-1 overflow-y-auto">
         {pending.length === 0 && (
