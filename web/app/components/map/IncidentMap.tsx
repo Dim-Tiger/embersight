@@ -1681,22 +1681,13 @@ export function IncidentMap() {
     if (!showWind || !wind?.vectors?.length) return;
 
     try {
-      // Open-Meteo's `wind_direction_10m` is the meteorological FROM bearing
-      // (compass degrees the wind originates from). maplibre-gl-wind's
-      // generateWindTexture takes the TO heading — u = speed·sin(dir),
-      // v = speed·cos(dir) means `direction: 0` yields v=+speed (northward
-      // flow), which is the TO convention. Flip FROM → TO by adding 180°
-      // before handing the vectors off. Previously the flipped array was
-      // computed but discarded — the raw FROM was passed instead, so
-      // particles drifted straight upwind.
-      const vectorsTo = wind.vectors.map((v) => ({
-        ...v,
-        direction: (v.direction + 180) % 360,
-      }));
-      // When zoomed out the 66km sample box collapses to a few pixels, so we
-      // pad the rendered bounds outward. The IDW texture extrapolates the same
-      // 7x7 sample to the wider extent — fine for visualization since wind at
-      // this synoptic scale is smooth.
+      // Wind direction: empirically, passing Open-Meteo's raw FROM bearing
+      // to generateWindTexture yields particle drift that matches the
+      // ground-truth compass arrow at the incident. The texture's UV.y
+      // sampling in maplibre-gl-wind's shader inverts the v axis relative
+      // to canvas coordinates, which cancels the FROM→TO flip the
+      // u=sin/v=cos formula would otherwise require. Adding +180° here
+      // sends particles upwind — leave the direction raw.
       const [w0, s0, e0, n0] = wind.bounds;
       const padX = (e0 - w0) * (windLowZoom ? 1.0 : 0.0);
       const padY = (n0 - s0) * (windLowZoom ? 1.0 : 0.0);
@@ -1708,7 +1699,7 @@ export function IncidentMap() {
       ];
 
       const { canvas, uMin, uMax, vMin, vMax } = generateWindTexture(
-        vectorsTo,
+        wind.vectors,
         {
           width: 128,
           height: 128,
