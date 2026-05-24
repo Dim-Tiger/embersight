@@ -131,20 +131,6 @@ export const INFRA_SOURCES: Record<string, InfraSource> = {
     revalidate: 86400,
     geometry: "point",
   },
-  hydrants: {
-    id: "hydrants",
-    kind: "overpass",
-    endpoint: "https://overpass-api.de/api/interpreter",
-    overpassFilters: [
-      {
-        key: "emergency",
-        values: ["fire_hydrant"],
-        elementTypes: ["node"],
-      },
-    ],
-    revalidate: 86400,
-    geometry: "point",
-  },
 };
 
 // --------------------------------------------------------------------------- //
@@ -181,7 +167,7 @@ export const INFRA_LAYERS: InfraLayer[] = [
     defaultOn: false,
     short: "E",
   },
-  // Response Assets — auto-on for fire stations + hydrants
+  // Response Assets — auto-on for fire stations
   {
     id: "fireStations",
     label: "Fire stations",
@@ -190,15 +176,6 @@ export const INFRA_LAYERS: InfraLayer[] = [
     color: "#fb923c", // orange-400
     defaultOn: true,
     short: "F",
-  },
-  {
-    id: "hydrants",
-    label: "Fire hydrants",
-    group: "response",
-    geometry: "point",
-    color: "#22d3ee", // cyan-400
-    defaultOn: false,
-    short: "h",
   },
   {
     id: "airports",
