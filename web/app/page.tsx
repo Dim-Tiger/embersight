@@ -2,17 +2,22 @@
 
 import { useIncidents } from "@/lib/queries";
 import { AGENT_ORDER, type AgentStatus, useStore } from "@/lib/store";
+import { useTheme } from "@/lib/theme";
 import {
   AlertTriangle,
   ChevronDown,
+  ChevronRight,
   FileText,
   Flame,
   LayoutGrid,
+  Moon,
   Package,
   Route,
+  Sun,
   Wind,
+  X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalQueue } from "./components/panels/ApprovalQueue";
 import { ChatPanel } from "./components/panels/ChatPanel";
 import { EvacuationTab } from "./components/panels/EvacuationTab";
@@ -52,8 +57,18 @@ export default function Page() {
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const restartCount = useStore((s) => s.restartCount);
-  const { data: incidents } = useIncidents();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const theme = useTheme((s) => s.theme);
+  const toggleTheme = useTheme((s) => s.toggle);
+  const {
+    data: incidents,
+    isLoading: incidentsLoading,
+    isError: incidentsError,
+    error: incidentsErrorObj,
+  } = useIncidents();
   const { startBriefing } = useAgentStream();
+  const incidentsEmpty =
+    !incidentsLoading && !incidentsError && incidents?.length === 0;
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
 
@@ -81,57 +96,130 @@ export default function Page() {
   return (
     <div className="flex h-screen overflow-hidden bg-smoke-900">
       {/* Left Sidebar */}
-      <nav className="flex w-56 flex-shrink-0 flex-col border-r border-smoke-700 bg-smoke-800">
-        {/* Logo */}
-        <div className="flex items-center gap-2 border-b border-smoke-700 px-4 py-4">
-          <div className="h-2.5 w-2.5 flex-shrink-0 rounded-full bg-ember-500 shadow-[0_0_12px_#f97316]" />
-          <span className="font-semibold tracking-wide text-smoke-200">
-            EmberSight
-          </span>
+      <nav
+        className={`flex flex-shrink-0 flex-col border-r border-smoke-700 bg-smoke-800 transition-[width] duration-200 ease-out ${
+          sidebarCollapsed ? "w-14" : "w-56"
+        }`}
+      >
+        {/* Header: logo + EmberSight name + collapse/expand toggle */}
+        <div
+          className={`flex items-center border-b border-smoke-700 ${
+            sidebarCollapsed ? "flex-col gap-2 px-2 py-3" : "gap-2 px-3 py-3.5"
+          }`}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/brand/logo.png"
+            alt="EmberSight"
+            className="h-7 w-7 flex-shrink-0 object-contain"
+            // The source logo has a BLACK eye outline (designed for light
+            // backgrounds). In dark mode, invert + hue-rotate flips the
+            // outline to white while bringing the orange/red flame colors
+            // back to their originals.
+            style={
+              theme === "dark"
+                ? { filter: "invert(1) hue-rotate(180deg)" }
+                : undefined
+            }
+          />
+          {!sidebarCollapsed && (
+            <span className="flex-1 truncate font-semibold tracking-wide text-smoke-200">
+              EmberSight
+            </span>
+          )}
+          <button
+            onClick={() => setSidebarCollapsed((v) => !v)}
+            className="flex h-6 w-6 items-center justify-center rounded text-smoke-400 transition-colors hover:bg-smoke-700 hover:text-smoke-200"
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {sidebarCollapsed ? (
+              <ChevronRight className="h-3.5 w-3.5" />
+            ) : (
+              <X className="h-3.5 w-3.5" />
+            )}
+          </button>
         </div>
 
-        {/* Incident Selector */}
-        <div className="border-b border-smoke-700 px-3 py-4">
-          <label className="mb-1.5 block text-[10px] font-medium uppercase tracking-widest text-smoke-400">
-            Active Incident
-          </label>
-          <div className="relative">
-            <select
-              value={selectedIncidentId ?? ""}
-              onChange={(e) => handleIncidentChange(e.target.value)}
-              className="w-full cursor-pointer appearance-none rounded bg-smoke-700 px-2.5 py-1.5 pr-7 text-xs text-smoke-200 focus:outline-none focus:ring-1 focus:ring-ember-500"
+        {/* Vertical brand wordmark — keeps "EmberSight" visible when collapsed */}
+        {sidebarCollapsed && (
+          <div className="flex justify-center border-b border-smoke-700 py-3">
+            <span
+              className="select-none text-[10px] font-semibold uppercase tracking-[0.32em] text-smoke-300"
+              style={{ writingMode: "vertical-rl" }}
             >
-              <option value="">— choose incident —</option>
-              {incidents?.map((inc) => (
-                <option key={inc.id} value={inc.id}>
-                  {inc.name}
-                  {inc.acres ? ` (${Math.round(inc.acres).toLocaleString()} ac)` : ""}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-smoke-400" />
+              EmberSight
+            </span>
           </div>
-          {selectedIncident && (
-            <div className="mt-2 space-y-0.5 text-[10px] leading-relaxed">
-              {selectedIncident.contained_pct != null && (
-                <div className="text-ember-300">
-                  {Math.round(selectedIncident.contained_pct * 100)}% contained
-                </div>
-              )}
-              {selectedIncident.acres != null && (
-                <div className="text-smoke-400">
-                  {Math.round(selectedIncident.acres).toLocaleString()} acres
-                </div>
-              )}
-              {selectedIncident.started_at && (
-                <div className="text-smoke-500">
-                  Started{" "}
-                  {new Date(selectedIncident.started_at).toLocaleDateString()}
-                </div>
-              )}
+        )}
+
+        {/* Incident Selector — hidden when collapsed */}
+        {!sidebarCollapsed && (
+          <div className="border-b border-smoke-700 px-3 py-4">
+            <label className="mb-1.5 block text-[10px] font-medium uppercase tracking-widest text-smoke-400">
+              Active Incident
+            </label>
+            <div className="relative">
+              <select
+                value={selectedIncidentId ?? ""}
+                onChange={(e) => handleIncidentChange(e.target.value)}
+                className="w-full cursor-pointer appearance-none rounded bg-smoke-700 px-2.5 py-1.5 pr-7 text-xs text-smoke-200 focus:outline-none focus:ring-1 focus:ring-ember-500"
+              >
+                <option value="">— choose incident —</option>
+                {incidents?.map((inc) => (
+                  <option key={inc.id} value={inc.id}>
+                    {inc.name}
+                    {inc.acres ? ` (${Math.round(inc.acres).toLocaleString()} ac)` : ""}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-smoke-400" />
             </div>
-          )}
-        </div>
+            {incidentsLoading && (
+              <div className="mt-2 text-[10px] text-smoke-400">
+                Loading incidents…
+              </div>
+            )}
+            {incidentsError && (
+              <div className="mt-2 text-[10px] leading-relaxed text-red-300">
+                Couldn&apos;t load incidents.
+                <div className="text-[10px] text-red-400/80">
+                  {incidentsErrorObj instanceof Error
+                    ? incidentsErrorObj.message
+                    : "Check upstream CAL FIRE / WFIGS connectivity."}
+                </div>
+              </div>
+            )}
+            {incidentsEmpty && (
+              <div className="mt-2 text-[10px] leading-relaxed text-smoke-400">
+                No active CA incidents reported.
+                <div className="text-[10px] text-smoke-500">
+                  Upstream feeds returned zero results.
+                </div>
+              </div>
+            )}
+            {selectedIncident && (
+              <div className="mt-2 space-y-0.5 text-[10px] leading-relaxed">
+                {selectedIncident.contained_pct != null && (
+                  <div className="text-ember-300">
+                    {Math.round(selectedIncident.contained_pct * 100)}% contained
+                  </div>
+                )}
+                {selectedIncident.acres != null && (
+                  <div className="text-smoke-400">
+                    {Math.round(selectedIncident.acres).toLocaleString()} acres
+                  </div>
+                )}
+                {selectedIncident.started_at && (
+                  <div className="text-smoke-500">
+                    Started{" "}
+                    {new Date(selectedIncident.started_at).toLocaleDateString()}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Nav Items */}
         <div className="flex-1 py-2">
@@ -143,23 +231,57 @@ export default function Page() {
               Icon={Icon}
               active={activeTab === tab}
               enabled={!!selectedIncidentId}
+              collapsed={sidebarCollapsed}
               onClick={() => setActiveTab(tab)}
             />
           ))}
         </div>
 
         {/* Footer */}
-        <div className="border-t border-smoke-700 px-3 py-2">
-          <div className="text-center text-[9px] text-smoke-500">
-            DRAFT · never dispatches
+        {!sidebarCollapsed ? (
+          <div className="flex items-center justify-between border-t border-smoke-700 px-3 py-2">
+            <span className="text-[9px] text-smoke-500">
+              DRAFT · never dispatches
+            </span>
+            <button
+              onClick={toggleTheme}
+              className="flex h-6 w-6 items-center justify-center rounded text-smoke-400 transition-colors hover:bg-smoke-700 hover:text-smoke-200"
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            >
+              {theme === "dark" ? (
+                <Sun className="h-3.5 w-3.5" />
+              ) : (
+                <Moon className="h-3.5 w-3.5" />
+              )}
+            </button>
           </div>
-        </div>
+        ) : (
+          <div className="flex justify-center border-t border-smoke-700 py-2">
+            <button
+              onClick={toggleTheme}
+              className="flex h-6 w-6 items-center justify-center rounded text-smoke-400 transition-colors hover:bg-smoke-700 hover:text-smoke-200"
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            >
+              {theme === "dark" ? (
+                <Sun className="h-3.5 w-3.5" />
+              ) : (
+                <Moon className="h-3.5 w-3.5" />
+              )}
+            </button>
+          </div>
+        )}
       </nav>
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
         {!selectedIncidentId ? (
-          <NoIncidentState />
+          <NoIncidentState
+            loading={incidentsLoading}
+            error={incidentsError ? incidentsErrorObj : null}
+            empty={incidentsEmpty}
+          />
         ) : (
           <>
             {activeTab === "Operations" && <OperationsTab />}
@@ -181,6 +303,7 @@ function NavItem({
   Icon,
   active,
   enabled,
+  collapsed,
   onClick,
 }: {
   tab: string;
@@ -188,6 +311,7 @@ function NavItem({
   Icon: typeof LayoutGrid;
   active: boolean;
   enabled: boolean;
+  collapsed: boolean;
   onClick: () => void;
 }) {
   const statuses = useStore((s) => s.agentStatuses);
@@ -214,7 +338,10 @@ function NavItem({
     <button
       onClick={onClick}
       disabled={!enabled}
-      className={`flex w-full items-center gap-2.5 px-4 py-2.5 text-sm transition-colors ${
+      title={collapsed ? label : undefined}
+      className={`flex w-full items-center text-sm transition-colors ${
+        collapsed ? "justify-center px-2 py-2.5" : "gap-2.5 px-4 py-2.5"
+      } ${
         active && enabled
           ? "border-r-2 border-ember-500 bg-ember-900/40 text-ember-200"
           : enabled
@@ -222,22 +349,40 @@ function NavItem({
             : "cursor-not-allowed text-smoke-600"
       }`}
     >
-      <Icon className="h-4 w-4 flex-shrink-0" />
-      <span className="flex-1 text-left">{label}</span>
-      {enabled && <NavDot status={combined} />}
-      {enabled && combined === "running" && runningCount > 0 && (
-        <span className="font-mono text-[9px] text-ember-400">
-          {runningCount}
-        </span>
-      )}
-      {enabled &&
-        combined === "done" &&
-        agents.length > 0 &&
-        doneCount === agents.length && (
-          <span className="font-mono text-[9px] text-emerald-400/70">
-            {doneCount}
-          </span>
+      <span className="relative flex flex-shrink-0 items-center justify-center">
+        <Icon className="h-4 w-4" />
+        {/* When collapsed, overlay a tiny status dot on the icon itself */}
+        {collapsed && enabled && combined !== "pending" && (
+          <span
+            className={`absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full ${
+              combined === "running"
+                ? "bg-ember-400"
+                : combined === "done"
+                  ? "bg-emerald-400/80"
+                  : "bg-red-500"
+            }`}
+          />
         )}
+      </span>
+      {!collapsed && (
+        <>
+          <span className="flex-1 text-left">{label}</span>
+          {enabled && <NavDot status={combined} />}
+          {enabled && combined === "running" && runningCount > 0 && (
+            <span className="font-mono text-[9px] text-ember-400">
+              {runningCount}
+            </span>
+          )}
+          {enabled &&
+            combined === "done" &&
+            agents.length > 0 &&
+            doneCount === agents.length && (
+              <span className="font-mono text-[9px] text-emerald-400/70">
+                {doneCount}
+              </span>
+            )}
+        </>
+      )}
     </button>
   );
 }
@@ -264,20 +409,75 @@ function NavDot({ status }: { status: AgentStatus }) {
   );
 }
 
-function NoIncidentState() {
+function NoIncidentState({
+  loading,
+  error,
+  empty,
+}: {
+  loading: boolean;
+  error: unknown;
+  empty: boolean;
+}) {
   // Render the statewide map immediately so users can click a fire to
   // select it on first open — the sidebar dropdown is not the only way in.
+  // The overlay pill reflects the upstream-feed state so the user knows why
+  // the dropdown might be empty or stale.
+  let headline = (
+    <>
+      Click an{" "}
+      <span className="font-semibold text-ember-300">active fire</span> on the
+      map, or choose one from the left panel, to begin.
+    </>
+  );
+  let detail: string | null = null;
+  let tone: "default" | "warn" | "error" = "default";
+
+  if (loading) {
+    headline = <>Loading incidents…</>;
+    detail = "Fetching the latest active fires from CAL FIRE and WFIGS.";
+  } else if (error) {
+    headline = <>Couldn&apos;t load incidents</>;
+    detail =
+      error instanceof Error
+        ? error.message
+        : "The upstream incident feeds (CAL FIRE / WFIGS) are unreachable.";
+    tone = "error";
+  } else if (empty) {
+    headline = <>No active CA incidents right now</>;
+    detail =
+      "Both CAL FIRE and WFIGS returned zero current incidents in California. The dashboard will populate when a new fire is reported.";
+    tone = "warn";
+  }
+
+  const pillBorder =
+    tone === "error"
+      ? "border-red-500/50"
+      : tone === "warn"
+        ? "border-amber-500/40"
+        : "border-ember-500/40";
+  const iconColor =
+    tone === "error"
+      ? "text-red-400"
+      : tone === "warn"
+        ? "text-amber-300"
+        : "text-ember-400";
+
   return (
     <div className="relative h-full w-full">
       <IncidentMap />
       <div className="pointer-events-none absolute left-1/2 top-6 z-10 -translate-x-1/2">
-        <div className="flex items-center gap-2 rounded-full border border-ember-500/40 bg-smoke-800/90 px-4 py-2 text-xs text-smoke-200 shadow-lg backdrop-blur">
-          <Flame className="h-3.5 w-3.5 text-ember-400" />
-          <span>
-            Click an{" "}
-            <span className="font-semibold text-ember-300">active fire</span>{" "}
-            on the map, or choose one from the left panel, to begin.
-          </span>
+        <div
+          className={`flex max-w-md flex-col gap-1 rounded-2xl border ${pillBorder} bg-smoke-800/90 px-4 py-2 text-xs text-smoke-200 shadow-lg backdrop-blur`}
+        >
+          <div className="flex items-center gap-2">
+            <Flame className={`h-3.5 w-3.5 ${iconColor}`} />
+            <span>{headline}</span>
+          </div>
+          {detail && (
+            <p className="pl-5 text-[10px] leading-relaxed text-smoke-400">
+              {detail}
+            </p>
+          )}
         </div>
       </div>
     </div>

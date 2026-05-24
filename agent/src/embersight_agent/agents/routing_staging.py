@@ -33,7 +33,11 @@ from ..tools.overpass import (
     get_water_features,
     query_osm,
 )
-from ..tools.routing import find_routes, get_road_network, score_staging_candidate
+from ..tools.routing import (
+    find_routes,
+    get_road_network,
+    score_staging_candidate,
+)
 
 AGENT_NAME = "routing_staging"
 MODEL_NAME = "claude-haiku-4-5"
@@ -133,6 +137,106 @@ def _pick_candidate_locations(
 
 
 # --------------------------------------------------------------------------- #
+# Egress route computation
+# --------------------------------------------------------------------------- #
+
+
+_EGRESS_BEARINGS = {
+    "N": (1.0, 0.0),
+    "E": (0.0, 1.0),
+    "S": (-1.0, 0.0),
+    "W": (0.0, -1.0),
+}
+# Minimum standoff from the incident before we'll accept a road node as a
+# valid egress endpoint (km). Anything closer is still inside the immediate
+# fire-front and not actually "egress".
+_EGRESS_MIN_KM = 5.0
+_EGRESS_MAX_KM = AOI_RADIUS_KM
+
+
+def _find_egress_endpoint(
+    graph: Any,
+    incident_latlon: tuple[float, float],
+    direction: tuple[float, float],
+) -> tuple[float, float] | None:
+    """Pick a major-road node in the given bearing as an egress target.
+
+    We score nodes that sit on motorway / trunk / primary edges by
+    alignment with the requested bearing (dot product) and distance from
+    the incident, preferring nodes between _EGRESS_MIN_KM and
+    _EGRESS_MAX_KM. Returns ``(lat, lon)`` of the best node or ``None``.
+    """
+    inc_lat, inc_lon = incident_latlon
+    cos_lat = math.cos(math.radians(inc_lat))
+    major_tags = {"motorway", "trunk", "primary"}
+
+    major_node_ids: set[Any] = set()
+    for u, v, data in graph.edges(data=True):
+        highway = data.get("highway")
+        if isinstance(highway, list):
+            highway = highway[0] if highway else None
+        if highway in major_tags:
+            major_node_ids.add(u)
+            major_node_ids.add(v)
+    if not major_node_ids:
+        return None
+
+    best_score = -math.inf
+    best_loc: tuple[float, float] | None = None
+    dy_dir, dx_dir = direction
+    for nid in major_node_ids:
+        data = graph.nodes[nid]
+        node_lat = data.get("y")
+        node_lon = data.get("x")
+        if node_lat is None or node_lon is None:
+            continue
+        dy = node_lat - inc_lat
+        dx = (node_lon - inc_lon) * cos_lat
+        dist_km = math.hypot(dy, dx) * 111.0
+        if dist_km < _EGRESS_MIN_KM or dist_km > _EGRESS_MAX_KM:
+            continue
+        norm = math.hypot(dy, dx) or 1e-9
+        # Dot of unit vectors → -1..1; bias toward the requested heading.
+        alignment = (dy * dy_dir + dx * dx_dir) / norm
+        if alignment < 0.3:
+            continue
+        # Prefer ~8 km out; closer or farther costs.
+        dist_penalty = abs(dist_km - 8.0) / _EGRESS_MAX_KM
+        score = alignment - 0.4 * dist_penalty
+        if score > best_score:
+            best_score = score
+            best_loc = (node_lat, node_lon)
+    return best_loc
+
+
+def _compute_egress_routes(
+    graph: Any,
+    incident_latlon: tuple[float, float],
+) -> list[dict[str, Any]]:
+    """Return up to 4 outward egress routes (N / E / S / W).
+
+    Each route mirrors :func:`find_routes`' shape with an extra
+    ``bearing`` field so the UI can label them.
+    """
+    if graph is None:
+        return []
+    routes: list[dict[str, Any]] = []
+    for label, direction in _EGRESS_BEARINGS.items():
+        endpoint = _find_egress_endpoint(graph, incident_latlon, direction)
+        if endpoint is None:
+            continue
+        try:
+            candidates = find_routes(graph, incident_latlon, endpoint, k=1)
+        except Exception:
+            continue
+        if not candidates:
+            continue
+        r = candidates[0]
+        routes.append({**r, "bearing": label, "endpoint": list(endpoint)})
+    return routes
+
+
+# --------------------------------------------------------------------------- #
 # LLM synthesis (optional)
 # --------------------------------------------------------------------------- #
 
@@ -170,17 +274,13 @@ async def _llm_narrative(payload: dict[str, Any]) -> str | None:
         "Never use directive verbs like 'dispatch', 'order', 'send', 'publish'."
     )
     try:
+        from ..tools.llm_stream import stream_text
         llm = ChatAnthropic(model=MODEL_NAME, max_tokens=400, temperature=0.2)
-        result = await llm.ainvoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=user)]
+        content = await stream_text(
+            llm,
+            [SystemMessage(content=system_prompt), HumanMessage(content=user)],
         )
-        content = getattr(result, "content", None)
-        if isinstance(content, list):
-            content = " ".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in content
-            )
-        return str(content).strip() if content else None
+        return content.strip() if content else None
     except Exception:
         return None
 
@@ -303,6 +403,18 @@ async def run(state: AgentState) -> dict:
     enriched.sort(key=lambda c: c["score"], reverse=True)
     top = enriched[0] if enriched else None
     primary_routes = top["routes"] if top else []
+
+    # Outward egress routes (incident → nearest major-road node in N/E/S/W).
+    # Independent of staging-area selection — these are what civilian and
+    # firefighter egress would actually take if pushed out by spread.
+    egress_routes: list[dict[str, Any]] = []
+    if road_graph is not None:
+        try:
+            egress_routes = await asyncio.to_thread(
+                _compute_egress_routes, road_graph, incident_latlon
+            )
+        except Exception:
+            egress_routes = []
     nearest_water_name = None
     if top:
         best_w_km = math.inf
@@ -370,6 +482,7 @@ async def run(state: AgentState) -> dict:
         },
         "candidates": enriched,
         "primary_routes": primary_routes,
+        "egress_routes": egress_routes,
         "graph_error": graph_error,
         "osm_failures": osm_failures,
     }

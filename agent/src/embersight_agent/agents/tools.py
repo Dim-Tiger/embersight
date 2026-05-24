@@ -64,6 +64,8 @@ _HEADLINE_KEYS = [
     "zones_advisory",
     "zones_order",
     "key_findings",
+    "primary_routes",
+    "egress_routes",
 ]
 
 

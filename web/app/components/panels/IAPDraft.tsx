@@ -36,6 +36,7 @@ export function IAPDraft() {
   const pending = useStore((s) => s.pendingInterrupts);
   const masterOut = useStore((s) => s.agentOutputs.master_ic);
   const remove = useStore((s) => s.removeInterrupt);
+  const streamError = useStore((s) => s.errorMessage);
 
   const view = useMemo(() => {
     const fromInterrupt = pending.find(
@@ -135,7 +136,19 @@ export function IAPDraft() {
           </div>
         )}
 
-        {!draft ? (
+        {!draft && streamError ? (
+          <div className="rounded border border-red-800/60 bg-red-900/20 px-3 py-5 text-xs text-red-200">
+            <div className="mb-1 font-medium">Agent service unavailable</div>
+            <div className="break-words text-[11px] text-red-300/90">
+              {streamError}
+            </div>
+            <div className="mt-2 text-[11px] text-red-300/70">
+              The IAP draft is produced by the Master IC after the seven
+              subagents finish. Restart the stream from the Agent activity panel
+              once the service is back.
+            </div>
+          </div>
+        ) : !draft ? (
           <div className="rounded border border-dashed border-smoke-700 px-3 py-6 text-center text-xs text-smoke-400">
             No IAP draft yet. Start an agent run by selecting an incident — the
             Master IC drafts the form after the seven subagents finish.
