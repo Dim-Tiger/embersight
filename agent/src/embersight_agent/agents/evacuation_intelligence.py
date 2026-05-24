@@ -37,6 +37,7 @@ from typing import Any
 from ..hitl import audit_entry, request_human_decision
 from ..state import AgentOutput, AgentState, CitationBundle, Dataset, Model
 from ..tools import evac as evac_tools
+from ..tools import zone_catalog
 
 log = logging.getLogger(__name__)
 
@@ -445,16 +446,61 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
     primary_cone_geom = _coerce_geom(primary_cone_obj)
     cone_radius = _cone_radius_deg(primary_cone_geom, incident)
 
-    # ---- Cal OES zone fetch ------------------------------------------- #
+    # ---- Static zone catalog + live status overlay -------------------- #
+    #
+    # We need two things:
+    #   1. The *static* universe of evac zones in the AOI — i.e. every
+    #      zone defined by the local county, regardless of whether it's
+    #      currently active. ``zone_catalog`` aggregates this from the
+    #      Genasys WFS endpoints counties publish on ArcGIS Hub plus a
+    #      handful of county-hosted Feature Services.
+    #   2. A *live overlay* of which of those zones currently have an
+    #      open WARNING or ORDER. Cal OES's aggregation layer is the
+    #      canonical source (updated every 10 min) and is consulted via
+    #      ``evac_tools.get_active_status_overlay``.
+    #
+    # The agent then overlays (2) onto (1) so ``zone.current_status`` is
+    # ground truth before we ask the LLM/rule to propose any change.
     bbox = _bbox_around_incident(incident)
     zones: list[dict] = []
     if bbox is not None:
         try:
-            zones = await evac_tools.get_calevacs_zones(bbox)
+            zones = await zone_catalog.fetch_static_zones_in_bbox(bbox)
         except Exception as exc:  # noqa: BLE001
-            log.warning("get_calevacs_zones raised: %s", exc)
+            log.warning("zone_catalog.fetch_static_zones_in_bbox raised: %s", exc)
             fetch_errors += 1
             zones = []
+
+        # If the static catalog has nothing for this AOI (e.g. the
+        # incident is on an offshore island or in a county that hasn't
+        # published its Zonehaven authkey yet), fall back to the legacy
+        # Cal OES active-only fetch so the agent has *something* to
+        # reason about rather than going silent.
+        if not zones:
+            try:
+                zones = await evac_tools.get_calevacs_zones(bbox)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "get_calevacs_zones fallback raised: %s", exc
+                )
+                fetch_errors += 1
+                zones = []
+
+        # Live status overlay — overrides static `current_status` (always
+        # NORMAL coming out of the catalog) with the real active status
+        # for any zone Cal OES considers in warning/order right now.
+        if zones:
+            try:
+                overlay = await evac_tools.get_active_status_overlay(bbox)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("get_active_status_overlay raised: %s", exc)
+                overlay = {}
+            if overlay:
+                for z in zones:
+                    k_id, k_name = evac_tools.overlay_key_for_zone(z)
+                    live = overlay.get(k_id) or overlay.get(k_name)
+                    if live:
+                        z["current_status"] = live
 
     # ---- Per-zone analysis + interrupts ------------------------------- #
     zone_changes: list[dict] = []

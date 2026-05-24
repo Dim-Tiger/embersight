@@ -16,6 +16,7 @@ import {
 } from "@/lib/infraLayers";
 import { useInfraLayers } from "@/lib/infraQueries";
 import { useStore } from "@/lib/store";
+import { useTestMode } from "@/lib/testMode";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import maplibregl from "maplibre-gl";
 import { WindParticleLayer, generateWindTexture } from "maplibre-gl-wind";
@@ -318,6 +319,41 @@ export function IncidentMap() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Test-mode placement: when the dev panel toggles "Click map to place fire",
+  // a single click on empty map drops a synthetic ignition at the click point
+  // and selects it. We read the latest store values via getState() inside the
+  // handler so the listener doesn't need to be re-attached every toggle.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    const handler = (e: maplibregl.MapMouseEvent) => {
+      const t = useTestMode.getState();
+      if (!t.placementMode) return;
+      // Skip clicks landing on the incident layer — that path is owned by the
+      // incident-circle handler.
+      const hit = map.queryRenderedFeatures(e.point, {
+        layers: ["incidents-circle"].filter((id) => map.getLayer(id)),
+      });
+      if (hit.length > 0) return;
+      if (!t.enabled) t.setEnabled(true);
+      const inc = t.addIncident(e.lngLat.lat, e.lngLat.lng);
+      t.setPlacementMode(false);
+      useStore.getState().setSelectedIncident(inc.id);
+    };
+    map.on("click", handler);
+    return () => {
+      map.off("click", handler);
+    };
+  }, [mapLoaded]);
+
+  // Crosshair cursor while placement is armed.
+  const testPlacementMode = useTestMode((s) => s.placementMode);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.getCanvas().style.cursor = testPlacementMode ? "crosshair" : "";
+  }, [testPlacementMode]);
 
   // Basemap swap: rather than calling setStyle (which wipes every user
   // source/layer), we install the satellite raster as an overlay layer

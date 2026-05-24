@@ -3,6 +3,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { consumeAgentSse } from "@/lib/sse";
 import { useStore } from "@/lib/store";
+import {
+  buildSyntheticAlerts,
+  buildSyntheticWindGrid,
+  useTestMode,
+} from "@/lib/testMode";
 
 export type Incident = {
   id: string;
@@ -17,7 +22,10 @@ export type Incident = {
 };
 
 export function useIncidents() {
-  return useQuery({
+  const testEnabled = useTestMode((s) => s.enabled);
+  const synthetic = useTestMode((s) => s.syntheticIncidents);
+
+  const query = useQuery({
     queryKey: ["incidents"],
     queryFn: async (): Promise<Incident[]> => {
       const r = await fetch("/api/incidents");
@@ -25,7 +33,26 @@ export function useIncidents() {
       return r.json();
     },
     refetchInterval: 5 * 60_000,
+    // In test mode we still let the underlying fetch run — the user may want
+    // to compare synthetic against real. We just prepend synthetic on top.
   });
+
+  if (!testEnabled || synthetic.length === 0) return query;
+
+  const overlay: Incident[] = synthetic.map((s) => ({
+    id: s.id,
+    name: s.name,
+    lat: s.lat,
+    lon: s.lon,
+    acres: s.acres,
+    contained_pct: s.contained_pct,
+    started_at: s.started_at,
+    source: "synthetic" as const,
+  }));
+  const merged = [...overlay, ...(query.data ?? [])];
+  // Return a shallow-cloned query object so consumers see the merged data
+  // without losing isLoading/isError state.
+  return { ...query, data: merged } as typeof query;
 }
 
 export function useEvacZones() {
@@ -41,15 +68,29 @@ export function useEvacZones() {
 }
 
 export function useWeather(lat: number | null, lon: number | null) {
-  return useQuery({
+  const testEnabled = useTestMode((s) => s.enabled);
+  const alertPreset = useTestMode((s) => s.alertPreset);
+
+  const query = useQuery({
     queryKey: ["weather", lat, lon],
-    enabled: lat != null && lon != null,
+    enabled: lat != null && lon != null && !testEnabled,
     queryFn: async () => {
       const r = await fetch(`/api/weather/${lat}/${lon}`);
       if (!r.ok) throw new Error(`weather ${r.status}`);
       return r.json();
     },
   });
+
+  if (testEnabled) {
+    return {
+      ...query,
+      data: buildSyntheticAlerts(alertPreset),
+      isLoading: false,
+      isError: false,
+      error: null,
+    } as typeof query;
+  }
+  return query;
 }
 
 export type WindVector = {
@@ -68,9 +109,12 @@ export type WindGrid = {
 };
 
 export function useWind(lat: number | null, lon: number | null) {
-  return useQuery({
+  const testEnabled = useTestMode((s) => s.enabled);
+  const wind = useTestMode((s) => s.wind);
+
+  const query = useQuery({
     queryKey: ["wind", lat, lon],
-    enabled: lat != null && lon != null,
+    enabled: lat != null && lon != null && !testEnabled,
     queryFn: async (): Promise<WindGrid> => {
       const r = await fetch(`/api/wind/${lat}/${lon}`);
       if (!r.ok) throw new Error(`wind ${r.status}`);
@@ -78,6 +122,17 @@ export function useWind(lat: number | null, lon: number | null) {
     },
     refetchInterval: 5 * 60_000,
   });
+
+  if (testEnabled && lat != null && lon != null) {
+    return {
+      ...query,
+      data: buildSyntheticWindGrid(lat, lon, wind) as WindGrid,
+      isLoading: false,
+      isError: false,
+      error: null,
+    } as typeof query;
+  }
+  return query;
 }
 
 export function useFirms(days = 1) {

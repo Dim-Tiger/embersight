@@ -2,10 +2,16 @@ import { NextResponse } from "next/server";
 
 export const revalidate = 300;
 
+// WFIGS (NIFC interagency) is the national source of truth for active US wildfires.
+// It already includes CAL FIRE-managed incidents; we still hit CALFIRE separately
+// because the Umbraco feed carries some CA-specific fields (cooperator counts,
+// incident URLs) that aren't in WFIGS. The merge below dedupes by name + location.
 const CALFIRE =
   "https://incidents.fire.ca.gov/umbraco/api/IncidentApi/List?inactive=false";
+// IncidentTypeCategory='WF' filters out RX (prescribed burns), which are ~40%
+// of the national WFIGS list and not what an IMT-facing map wants to see.
 const WFIGS_POINTS =
-  "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query?where=POOState%3D%27US-CA%27&outFields=*&f=geojson";
+  "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query?where=IncidentTypeCategory%3D%27WF%27&outFields=*&f=geojson";
 
 type Out = {
   id: string;
@@ -85,12 +91,20 @@ export async function GET() {
       // Also skip exact ID duplicate
       if (merged.some((m) => m.id === id)) continue;
 
+      // Acres fallback chain: DailyAcres is only populated on IMT-managed
+      // incidents (most large CA fires). Smaller/newer fires elsewhere carry
+      // size in IncidentSize or DiscoveryAcres. Take the first that's a
+      // positive number so initial-attack fires don't render as 0 ac.
+      const acresRaw =
+        [p?.DailyAcres, p?.IncidentSize, p?.DiscoveryAcres].find(
+          (v) => typeof v === "number" && v > 0,
+        ) ?? null;
       merged.push({
         id,
         name,
         lat,
         lon,
-        acres: typeof p?.DailyAcres === "number" ? p.DailyAcres : null,
+        acres: typeof acresRaw === "number" ? acresRaw : null,
         contained_pct:
           typeof p?.PercentContained === "number"
             ? p.PercentContained / 100

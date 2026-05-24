@@ -35,7 +35,10 @@ log = logging.getLogger(__name__)
 # ArcGIS Online host + FeatureServer layer for the Cal OES hosted view of
 # CA_EVACUATIONS. The org id "BLN4oKB0N1YSgvY8" is Cal OES's.
 CALEVACS_ENDPOINT = (
-    "https://services1.arcgis.com/BLN4oKB0N1YSgvY8/arcgis/rest/services/"
+    # NOTE: host is services.arcgis.com (no "1"). The earlier services1
+    # subdomain returns 400 "Invalid URL" for this org_id — Cal OES's
+    # AGOL tenant lives on the canonical services.arcgis.com host.
+    "https://services.arcgis.com/BLN4oKB0N1YSgvY8/arcgis/rest/services/"
     "CA_EVACUATIONS_CalOESHosted_view/FeatureServer/0/query"
 )
 CALEVACS_VERSION = "CalOES Hosted View / FeatureServer layer 0"
@@ -198,10 +201,13 @@ async def get_calevacs_zones(
     Failures are logged and swallowed — the agent treats an empty list as
     a freshness-degraded signal rather than a hard error.
     """
+    import json as _json  # noqa: PLC0415
+
     params = {
         "where": "1=1",
         "outFields": "*",
-        "geometry": str(_bbox_envelope(bbox)).replace("'", '"'),
+        # See get_active_status_overlay for the compact-JSON rationale.
+        "geometry": _json.dumps(_bbox_envelope(bbox), separators=(",", ":")),
         "geometryType": "esriGeometryEnvelope",
         "inSR": "4326",
         "outSR": "4326",
@@ -226,6 +232,104 @@ async def get_calevacs_zones(
         if z is not None:
             zones.append(z)
     return zones
+
+
+# --------------------------------------------------------------------------- #
+# Live status overlay
+# --------------------------------------------------------------------------- #
+#
+# The Cal OES aggregation only carries currently-active zones (warning /
+# order). When the catalog (``tools.zone_catalog``) hands us the static
+# universe of zones for an AOI, we apply this overlay so:
+#
+#   1. The agent sees the *real* ``current_status`` for any zone with an
+#      open warning/order — it won't propose WARNING for a zone already
+#      under ORDER, for example.
+#   2. The "adjacent to an ORDER zone" nudge in evacuation_intelligence
+#      fires off real ground-truth, not against zones the agent itself
+#      proposed earlier.
+#
+# Match keys: prefer ZONE_ID (matches Genasys catalog `zone_id`); fall
+# back to a normalised (county, zone_name) tuple for county-hosted
+# Feature Services whose IDs disagree with Genasys.
+
+
+async def get_active_status_overlay(
+    bbox: tuple[float, float, float, float],
+    *,
+    timeout: float = 15.0,
+) -> dict[str, str]:
+    """Fetch the Cal OES *active* aggregation in ``bbox`` and return a
+    dict of overrides::
+
+        {
+            "<ZONE_ID>": "ORDER",
+            "<county>|<normalised name>": "WARNING",
+            ...
+        }
+
+    ``evacuation_intelligence`` overlays this on top of static catalog
+    zones so it has correct ground truth before proposing changes.
+
+    Empty dict on fetch failure (degrade gracefully — the agent simply
+    treats every static zone as NORMAL).
+    """
+    import json as _json  # noqa: PLC0415
+
+    params = {
+        "where": "1=1",
+        "outFields": "ZONE_ID,ZONE_NAME,COUNTY,CITY,STATUS,EVENT_TYPE",
+        # ArcGIS rejects the geometry param if it has whitespace, so we
+        # serialise with json.dumps(..., separators=(",", ":")) to keep
+        # it compact. The older `str(dict).replace("'", '"')` form works
+        # *only* when Python doesn't add a space after the colon.
+        "geometry": _json.dumps(_bbox_envelope(bbox), separators=(",", ":")),
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": "4326",
+        "outSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "returnGeometry": "false",
+        "f": "json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(CALEVACS_ENDPOINT, params=params)
+            r.raise_for_status()
+            data = r.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("active-status overlay fetch failed: %s", exc)
+        return {}
+
+    overlay: dict[str, str] = {}
+    for feat in data.get("features", []):
+        attrs = feat.get("attributes") or {}
+        status = _normalise_status(attrs.get("STATUS"))
+        if status == "NORMAL":
+            continue
+        zid = attrs.get("ZONE_ID")
+        if zid:
+            overlay[str(zid)] = status
+        # Also key by (county, name) for catalogs whose ZONE_ID schema
+        # disagrees with Cal OES's.
+        county = attrs.get("COUNTY") or ""
+        name = attrs.get("ZONE_NAME") or ""
+        if county and name:
+            overlay[f"{county.strip().lower()}|{name.strip().lower()}"] = status
+    return overlay
+
+
+def overlay_key_for_zone(zone: dict) -> tuple[str, str]:
+    """Build the two possible lookup keys for a catalog zone against the
+    overlay returned by ``get_active_status_overlay``: the bare zone_id,
+    and the (county, name) composite. The caller checks both and takes
+    the first hit."""
+    zid = str(zone.get("zone_id") or "")
+    county = str(zone.get("jurisdiction") or "").strip().lower()
+    # Strip " County" suffix to match Cal OES's bare county names.
+    if county.endswith(" county"):
+        county = county[: -len(" county")]
+    name = str(zone.get("name") or "").strip().lower()
+    return zid, f"{county}|{name}"
 
 
 # --------------------------------------------------------------------------- #

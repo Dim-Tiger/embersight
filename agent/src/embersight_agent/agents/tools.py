@@ -13,7 +13,10 @@ calls these directly.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Annotated, Any
+
+log = logging.getLogger("embersight.consult_tools")
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
@@ -117,6 +120,18 @@ async def _consult_impl(
     state: AgentState,
     tool_call_id: str,
 ) -> Command:
+    # Visibility into what the consult tool actually sees. If this logs
+    # "cached_outputs=[]" while the briefing clearly populated outputs,
+    # InjectedState isn't delivering the merged checkpoint state to the
+    # tool — a known footgun on some langgraph versions.
+    log.info(
+        "consult_%s: incident=%s cached_outputs=%s must_refresh=%s",
+        agent_name,
+        state.incident.id if state.incident else None,
+        sorted(state.outputs.keys()),
+        must_refresh,
+    )
+
     cached = state.outputs.get(agent_name)
     if cached is not None and not must_refresh:
         summary = _summarize(cached, agent_name)

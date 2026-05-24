@@ -2,6 +2,7 @@
 
 import { useIncidents } from "@/lib/queries";
 import { AGENT_ORDER, type AgentStatus, useStore } from "@/lib/store";
+import { useTestMode } from "@/lib/testMode";
 import { useTheme } from "@/lib/theme";
 import {
   AlertTriangle,
@@ -19,6 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { DevPanel } from "./components/DevPanel";
 import { ApprovalQueue } from "./components/panels/ApprovalQueue";
 import { BriefingTab } from "./components/panels/BriefingTab";
 import { ChatPanel } from "./components/panels/ChatPanel";
@@ -99,6 +101,8 @@ export default function Page() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-smoke-900">
+      <TestModeBanner />
+      <DevPanel />
       {/* Left Sidebar */}
       <nav
         className={`flex flex-shrink-0 flex-col border-r border-smoke-700 bg-smoke-800 transition-[width] duration-200 ease-out ${
@@ -421,6 +425,25 @@ function NavDot({ status }: { status: AgentStatus }) {
   }
   return (
     <span className="h-2 w-2 flex-shrink-0 rounded-full bg-smoke-600 ring-1 ring-smoke-700" />
+  );
+}
+
+function TestModeBanner() {
+  const enabled = useTestMode((s) => s.enabled);
+  const placement = useTestMode((s) => s.placementMode);
+  if (!enabled) return null;
+  return (
+    <div className="pointer-events-none fixed inset-x-0 top-0 z-30 flex justify-center">
+      <div className="pointer-events-auto mt-2 flex items-center gap-2 rounded-full border border-amber-500/60 bg-amber-500/15 px-3 py-1 text-[11px] font-medium text-amber-200 shadow-lg backdrop-blur">
+        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-300" />
+        TEST MODE — using synthetic data
+        {placement && (
+          <span className="ml-1 rounded bg-amber-500/30 px-1.5 py-px text-[10px] text-amber-100">
+            click map to place fire
+          </span>
+        )}
+      </div>
+    </div>
   );
 }
 

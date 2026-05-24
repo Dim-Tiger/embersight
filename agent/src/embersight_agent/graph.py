@@ -10,15 +10,17 @@ Briefing topology (one-shot, ~30-60s):
   orchestrator
       |
    (fan-out)
-   /  |  |
-  W   T  V              # weather, terrain, values - parallel
-   \\ / \\ /
-    R                    # routing depends on weather (wind) + terrain (DEM/slope)
-   spread               # depends on Weather + Terrain
-   /    \\
-  RR    EI              # resource rec + evac intel - parallel, depend on Spread + Values
-   \\   /
-   master_ic            # synthesizes IAP + interrupts for IC approval
+   /     \\
+  W       T              # weather, terrain - parallel
+   \\     /
+    R    spread          # routing depends on W+T; spread depends on W+T
+         |
+         V               # values_at_risk waits for spread so it can use the
+         |               # swept 24h cone (matches map + spread's own impact)
+        / \\
+       RR  EI            # resource rec + evac intel - parallel, depend on V
+        \\ /
+        master_ic        # synthesizes IAP + interrupts for IC approval
 
 Chat topology (per user message, ~3-15s):
 
@@ -85,10 +87,10 @@ def build_briefing_graph() -> StateGraph:
 
     g.add_edge(START, "orchestrator")
 
-    # weather/terrain/values fan out from the orchestrator; routing waits on
+    # weather/terrain fan out from the orchestrator; routing waits on
     # weather (wind direction → upwind-favoured staging + egress reranking)
     # AND terrain (real AOI mean elevation + slope feed the scoring axes).
-    for n in ("weather_wind", "terrain_fuel", "values_at_risk"):
+    for n in ("weather_wind", "terrain_fuel"):
         g.add_edge("orchestrator", n)
     g.add_edge("weather_wind", "routing_staging")
     g.add_edge("terrain_fuel", "routing_staging")
@@ -96,9 +98,12 @@ def build_briefing_graph() -> StateGraph:
     g.add_edge("weather_wind", "spread_simulation")
     g.add_edge("terrain_fuel", "spread_simulation")
 
-    g.add_edge("spread_simulation", "resource_recommendation")
+    # values_at_risk runs after spread_simulation so it can intersect the
+    # swept 24h cone (same polygon painted on the map). Without spread output
+    # VAR falls back to a small radius — workable, but not the analysis we want.
+    g.add_edge("spread_simulation", "values_at_risk")
+
     g.add_edge("values_at_risk", "resource_recommendation")
-    g.add_edge("spread_simulation", "evacuation_intelligence")
     g.add_edge("values_at_risk", "evacuation_intelligence")
 
     g.add_edge("resource_recommendation", "master_ic")

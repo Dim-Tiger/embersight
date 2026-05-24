@@ -2,8 +2,10 @@
 
 Pass-2: spatial-join MS Building Footprints + USA Structures + CMS
 hospitals + NCES schools + EIA transmission lines against the predicted
-spread cone (24h bucket from spread_simulation, or a 10 km default
-radius around the incident when spread output is not present yet).
+spread cone (24h bucket from spread_simulation — prefers the swept cone
+over the WFIGS perimeter so VAR matches the map render exactly, with the
+raw p50 cone as second choice, and a 2 km default radius around the
+incident only when no spread output is present yet).
 
 The LLM (Haiku 4.5) is given a fused tally and the prompt at
 ``prompts/values_at_risk.md`` and must produce a single narrative plus a
@@ -45,7 +47,7 @@ PROMPT_PATH = (
     Path(__file__).resolve().parent.parent / "prompts" / "values_at_risk.md"
 )
 
-DEFAULT_RADIUS_KM = 10.0
+DEFAULT_RADIUS_KM = 2.0
 LLM_MODEL_ID = "claude-haiku-4-5"
 
 
@@ -107,10 +109,23 @@ def _cone_to_wkt(cone: Any, incident: Incident | None) -> str:
 
 
 def _spread_cone(state: AgentState) -> tuple[Any, str]:
-    """Return (cone_payload, source_label)."""
+    """Return (cone_payload, source_label).
+
+    Preference order:
+      1. ``swept_cone_24h`` — the 24h p50 cone Minkowski-swept over the WFIGS
+         perimeter. This is the polygon painted on the map and the same one
+         spread_simulation runs its own ``cone_impact`` against, so VAR stays
+         consistent with the visual + the spread agent's numbers.
+      2. ``cones.24h`` — raw 24h p50 ensemble cone (no perimeter sweep).
+      3. None → caller falls back to a small radius around the incident.
+    """
     spread = state.outputs.get("spread_simulation")
     if spread is not None:
-        cones = (spread.payload or {}).get("cones") or {}
+        payload = spread.payload or {}
+        swept = payload.get("swept_cone_24h")
+        if swept:
+            return swept, "spread_simulation.swept_cone_24h"
+        cones = payload.get("cones") or {}
         cone_24h = cones.get("24h")
         if cone_24h:
             return cone_24h, "spread_simulation.24h"
