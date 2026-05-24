@@ -18,6 +18,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const CARTO_DARK =
   "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
+// When a perimeter is loaded and the map is zoomed in past this level, hide
+// the redundant orange circle for that fire and let the perimeter speak for
+// itself.  Below this threshold the circle reappears automatically.
+const PERIMETER_HIDE_CIRCLE_ZOOM = 9;
+
 // Esri World Imagery — free satellite raster tiles. Inlined as a MapLibre
 // style so we can hot-swap basemaps without keeping a second style.json.
 const SATELLITE_STYLE: maplibregl.StyleSpecification = {
@@ -137,11 +142,29 @@ export function IncidentMap() {
   const [basemap, setBasemap] = useState<Basemap>("dark");
   const [showCone, setShowCone] = useState(true);
 
+  // Store selectors — placed before the derived state that depends on them.
   const { data: incidents } = useIncidents();
   const spread = useStore((s) => s.agentOutputs.spread_simulation);
   const viewport = useStore((s) => s.mapViewport);
   const setSelectedIncident = useStore((s) => s.setSelectedIncident);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
+
+  // True while the map zoom is above PERIMETER_HIDE_CIRCLE_ZOOM.  We only
+  // flip this boolean (not store the raw zoom) so we avoid a re-render on
+  // every incremental scroll step.
+  const [abovePerimeterZoom, setAbovePerimeterZoom] = useState(
+    () => viewport.zoom >= PERIMETER_HIDE_CIRCLE_ZOOM,
+  );
+  // Tracks whether the perimeter "session" is active for the currently
+  // selected fire.  Set to true when a fire is selected; cleared to false the
+  // instant the user zooms out below the threshold.  Crucially it does NOT
+  // flip back to true when the user zooms in again — only an explicit
+  // re-selection does that.  This gives us the three-phase behaviour:
+  //   select → zoom in  → perimeter on  / circle off
+  //            zoom out → perimeter off / circle on   (dismissed)
+  //            zoom in  → perimeter still off          (stays dismissed)
+  //   re-select          → perimeter on  / circle off  (fresh session)
+  const [perimeterEnabled, setPerimeterEnabled] = useState(false);
 
   const selectedIncident = incidents?.find((i) => i.id === selectedIncidentId);
   const irwinId = selectedIncidentId?.startsWith("wfigs:")
@@ -176,6 +199,15 @@ export function IncidentMap() {
       "top-right",
     );
     map.on("load", () => setMapLoaded(true));
+    // Flip the boolean state only when crossing the perimeter-visibility
+    // threshold so we don't trigger re-renders on every zoom tick.
+    map.on("zoom", () => {
+      const z = map.getZoom();
+      setAbovePerimeterZoom((prev) => {
+        const next = z >= PERIMETER_HIDE_CIRCLE_ZOOM;
+        return prev === next ? prev : next;
+      });
+    });
     mapRef.current = map;
 
     popupRef.current = new maplibregl.Popup({
@@ -200,9 +232,21 @@ export function IncidentMap() {
   }, []);
 
   // Basemap swap: setStyle wipes all sources/layers, so flip mapLoaded
-  // off until the new style fires its own `load` event. Every layer
-  // effect below already gates on mapLoaded, so they'll rebuild cleanly.
+  // off until the new style finishes loading. Every layer effect below
+  // already gates on mapLoaded, so they'll rebuild cleanly.
+  //
+  // Why `styledata` (not `load`): MapLibre's `load` event only fires
+  // once per Map instance at initial creation. After setStyle, only
+  // `styledata` / `style.load` fire — so listening for `load` here
+  // leaves mapLoaded stuck at false and every overlay vanishes.
+  // Skip the very first render: the map is already being constructed
+  // with the right style by the init effect above.
+  const basemapInitialized = useRef(false);
   useEffect(() => {
+    if (!basemapInitialized.current) {
+      basemapInitialized.current = true;
+      return;
+    }
     const map = mapRef.current;
     if (!map) return;
     setMapLoaded(false);
@@ -216,13 +260,38 @@ export function IncidentMap() {
       }
       deckOverlayRef.current = null;
     }
+    // The cone label is a DOM marker — it survives setStyle but the
+    // re-run of the cone effect will re-create it, so detach now to
+    // avoid duplicates.
+    if (coneLabelRef.current) {
+      coneLabelRef.current.remove();
+      coneLabelRef.current = null;
+    }
     const nextStyle =
       basemap === "satellite" ? SATELLITE_STYLE : CARTO_DARK;
-    map.setStyle(nextStyle as maplibregl.StyleSpecification | string);
-    const onLoad = () => setMapLoaded(true);
-    map.once("load", onLoad);
+    // Mechanics, all the way down:
+    //   - MapLibre's `load` event only fires once per Map instance; it
+    //     does NOT re-fire after setStyle. The first `styledata` is our
+    //     "spec parsed, safe to re-add sources" signal.
+    //   - We can't gate on `isStyleLoaded()` either — for raster
+    //     basemaps it stays false indefinitely as tiles keep streaming
+    //     in on pan/zoom.
+    //   - `diff: false` forces a full reset. The default `diff: true`
+    //     KEEPS user-added sources alive across the swap but still
+    //     drops their layers. The per-layer effects below then take
+    //     the `if (existing) { setData; return }` short-circuit and
+    //     never re-add their layer on top of the new basemap — which
+    //     is why satellite came up blank.
+    const onStyleData = () => {
+      map.off("styledata", onStyleData);
+      setMapLoaded(true);
+    };
+    map.once("styledata", onStyleData);
+    map.setStyle(nextStyle as maplibregl.StyleSpecification | string, {
+      diff: false,
+    });
     return () => {
-      map.off("load", onLoad);
+      map.off("styledata", onStyleData);
     };
   }, [basemap]);
 
@@ -237,6 +306,17 @@ export function IncidentMap() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIncidentId]);
+
+  // Enable the perimeter session whenever a fire is (re-)selected.
+  useEffect(() => {
+    setPerimeterEnabled(!!selectedIncidentId);
+  }, [selectedIncidentId]);
+
+  // Dismiss the perimeter the moment the user zooms back out below the
+  // threshold.  We do NOT re-enable it on zoom-in — only selection does that.
+  useEffect(() => {
+    if (!abovePerimeterZoom) setPerimeterEnabled(false);
+  }, [abovePerimeterZoom]);
 
   // Render incidents as native WebGL circle layers
   useEffect(() => {
@@ -329,7 +409,16 @@ export function IncidentMap() {
     map.on("click", "incidents-circle", (e) => {
       if (!e.features?.length) return;
       const id = e.features[0].properties.id as string;
+      const coords = (e.features[0].geometry as GeoJSON.Point).coordinates as [
+        number,
+        number,
+      ];
+      // Always fly in on click — this handles re-clicking an already-selected
+      // fire while zoomed out (setSelectedIncident would be a no-op for the
+      // same ID so the fly-to useEffect wouldn't re-run without this).
       setSelectedIncident(id);
+      setPerimeterEnabled(true); // restore perimeter session on every click
+      map.flyTo({ center: coords, zoom: 11, duration: 1400 });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incidents, mapLoaded]);
@@ -403,6 +492,41 @@ export function IncidentMap() {
     return impact;
   }, [spread]);
 
+  // ---- Synchronise circle visibility & perimeter visibility ----
+  // The two layers are always toggled together so the transition is atomic:
+  // circle hidden  ↔  perimeter visible   (when perimeterEnabled && zoomed in)
+  // circle visible ↔  perimeter hidden    (any other state)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    const hasPerimeter = !!perimeter?.features?.length;
+    // Both conditions must hold: the session is active AND zoom is above the
+    // threshold AND perimeter data has actually arrived.
+    const perimeterOn = perimeterEnabled && abovePerimeterZoom && hasPerimeter;
+
+    // --- circle layers: exclude the selected fire when perimeter is on ---
+    const circleFilter: maplibregl.FilterSpecification | null = perimeterOn
+      ? (["!=", ["get", "id"], selectedIncidentId] as maplibregl.FilterSpecification)
+      : null;
+    try {
+      if (map.getLayer("incidents-glow")) map.setFilter("incidents-glow", circleFilter);
+      if (map.getLayer("incidents-circle")) map.setFilter("incidents-circle", circleFilter);
+    } catch (err) {
+      console.warn("circle filter error:", err);
+    }
+
+    // --- perimeter layers: show only while perimeterOn ---
+    const perimVis = perimeterOn ? "visible" : "none";
+    try {
+      if (map.getLayer("perimeter-fill")) map.setLayoutProperty("perimeter-fill", "visibility", perimVis);
+      if (map.getLayer("perimeter-outline")) map.setLayoutProperty("perimeter-outline", "visibility", perimVis);
+    } catch (err) {
+      console.warn("perimeter visibility error:", err);
+    }
+  }, [perimeterEnabled, abovePerimeterZoom, perimeter, selectedIncidentId, mapLoaded]);
+
+  // ---- Render spread prediction cone ----
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
@@ -1009,7 +1133,15 @@ export function IncidentMap() {
         map.on("mouseleave", "routes-egress", hideEgressPopup);
       }
 
-      // Re-stack so fire markers stay above routes.
+      // Re-stack: cone < perimeter < incidents on top of routes so the
+      // spread cone, fire perimeter, and incident markers all stay
+      // legible whether the basemap is the dark vector style or the
+      // satellite imagery.
+      if (map.getLayer("cone-outline-glow")) map.moveLayer("cone-outline-glow");
+      if (map.getLayer("cone-fill")) map.moveLayer("cone-fill");
+      if (map.getLayer("cone-outline")) map.moveLayer("cone-outline");
+      if (map.getLayer("perimeter-fill")) map.moveLayer("perimeter-fill");
+      if (map.getLayer("perimeter-outline")) map.moveLayer("perimeter-outline");
       if (map.getLayer("incidents-glow")) map.moveLayer("incidents-glow");
       if (map.getLayer("incidents-circle")) map.moveLayer("incidents-circle");
     } catch (err) {
@@ -1064,24 +1196,28 @@ export function IncidentMap() {
             image: canvas.toDataURL(),
             bounds: wind.bounds,
             imageUnscale: [minV, maxV],
-            // Dense-enough particle field with narrow lines + long
-            // lifetime so each trail stretches ALONG the wind direction
-            // (the path the particle walks). Wider `width` would have
-            // stretched perpendicular to motion, which read as "fat
-            // dots" rather than direction-indicating streaks.
-            numParticles: 800,
-            maxAge: 240,
-            speedFactor: 55,
-            width: 1.5,
-            speedRange: [0, 25],
-            // Contrail palette: faint tail → bright white core →
-            // yellow → orange → red as wind speed climbs.
+            // Few, long, thin particles read as cohesive wind streams.
+            // Total trail length = maxAge * per-tick stride, where stride
+            // is (speedFactor * 0.01) / 2^zoom. The lib's prop-type
+            // min/max are advisory deck.gl validators (not runtime caps),
+            // so we push maxAge well past 255 for longer trails while
+            // keeping speedFactor low for slow, languid motion.
+            numParticles: 180,
+            maxAge: 700,
+            speedFactor: 280,
+            width: 1.6,
+            speedRange: [0, 22],
+            // Streamline palette: faint slate tail → bright white core →
+            // amber → orange → red as wind speed climbs. Kept narrow on
+            // the white-core band so most streams read as cohesive white
+            // lines, with warm colors reserved for genuinely strong wind.
             colorRamp: [
-              [0.0, [226, 232, 240, 180]], // slate-200 (faint tail)
-              [0.2, [248, 250, 252, 230]], // near-white core
-              [0.5, [253, 224, 71, 235]], // yellow-300
-              [0.75, [249, 115, 22, 240]], // orange-500
-              [1.0, [220, 38, 38, 250]], // red-600
+              [0.0, [203, 213, 225, 200]], // slate-300 (faint tail)
+              [0.15, [248, 250, 252, 245]], // near-white core
+              [0.4, [255, 255, 255, 255]], // pure white contrail
+              [0.6, [253, 224, 71, 250]], // yellow-300
+              [0.8, [249, 115, 22, 250]], // orange-500
+              [1.0, [220, 38, 38, 255]], // red-600
             ],
           }),
         ],
@@ -1097,7 +1233,7 @@ export function IncidentMap() {
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
       <Legend
-        hasPerimeter={!!perimeter?.features?.length}
+        hasPerimeter={perimeterEnabled && abovePerimeterZoom && !!perimeter?.features?.length}
         showWind={showWind}
         setShowWind={setShowWind}
         showEvac={showEvac}

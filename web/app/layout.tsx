@@ -10,19 +10,9 @@ export const metadata: Metadata = {
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },
-      // System-theme-aware PNG favicons (browsers that honor `media` swap).
-      {
-        url: "/brand/favicon-32.png",
-        type: "image/png",
-        sizes: "32x32",
-        media: "(prefers-color-scheme: light)",
-      },
-      {
-        url: "/brand/favicon-32-dark.png",
-        type: "image/png",
-        sizes: "32x32",
-        media: "(prefers-color-scheme: dark)",
-      },
+      // Single 32×32 PNG; ThemeApplier swaps its href at runtime
+      // when the user toggles dark ↔ light mode in-app.
+      { url: "/brand/favicon-32-dark.png", type: "image/png", sizes: "32x32" },
       { url: "/brand/icon-192.png", type: "image/png", sizes: "192x192" },
       { url: "/brand/icon-512.png", type: "image/png", sizes: "512x512" },
     ],
