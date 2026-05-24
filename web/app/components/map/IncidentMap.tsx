@@ -317,13 +317,20 @@ export function IncidentMap() {
 
     if (!showCone || !cone24h) return;
 
-    // The spread agent's cone is a single ellipse with a rear vertex at the
-    // incident point. We want the painted region to emanate from the ENTIRE
-    // downwind perimeter outline — not from one point. Take the convex hull
-    // of (perimeter vertices ∪ cone vertices). The hull wraps the fire's
-    // current outline at the rear and tapers out to the cone's tip, which is
-    // the tornado-warning-cone shape the user asked for.
-    const hullCone = buildPerimeterCone(cone24h, perimeter ?? null);
+    // Build the swept-spread region as the Minkowski-sum hull of
+    // (perimeter ⊕ cone): for every vertex on the current fire perimeter,
+    // translate a copy of the cone so its rear vertex sits on that perimeter
+    // point, then hull the union. This carries the perimeter's shape forward
+    // through the cone — the rear matches the fire's footprint, the front
+    // extends in the spread direction, and the width grows with the cone's
+    // uncertainty. Falls back to just the cone if no perimeter is loaded or
+    // the incident point is unknown.
+    const hullCone = buildPerimeterCone(
+      cone24h,
+      perimeter ?? null,
+      selectedIncident?.lon ?? null,
+      selectedIncident?.lat ?? null,
+    );
 
     const features: GeoJSON.Feature[] = [
       { type: "Feature", geometry: hullCone, properties: { kind: "cone" } },
@@ -863,22 +870,71 @@ function convexHull(points: Array<[number, number]>): Array<[number, number]> {
   return hull;
 }
 
+// Cap how many perimeter vertices feed the Minkowski sum so we don't blow up
+// (perimeter * cone vertices) for high-resolution WFIGS polygons.
+const MAX_PERIM_VERTICES = 96;
+
 function buildPerimeterCone(
   cone: GeoJSON.Polygon | GeoJSON.MultiPolygon,
   perimeter: GeoJSON.FeatureCollection | null,
+  incidentLon: number | null,
+  incidentLat: number | null,
 ): GeoJSON.Polygon {
-  const verts: Array<[number, number]> = [];
-  collectVertices(cone, verts);
+  const coneVerts: Array<[number, number]> = [];
+  collectVertices(cone, coneVerts);
+
+  const perimVerts: Array<[number, number]> = [];
   if (perimeter?.features?.length) {
     for (const f of perimeter.features) {
       const g = f.geometry;
       if (g?.type === "Polygon" || g?.type === "MultiPolygon") {
-        collectVertices(g, verts);
+        collectVertices(g, perimVerts);
       }
     }
   }
-  const ring = convexHull(verts);
-  return { type: "Polygon", coordinates: [ring] };
+
+  // Without a perimeter (or an incident anchor) we can't do the Minkowski
+  // sweep, so fall back to the bare cone hull.
+  if (
+    perimVerts.length === 0 ||
+    incidentLon == null ||
+    incidentLat == null
+  ) {
+    return { type: "Polygon", coordinates: [convexHull(coneVerts)] };
+  }
+
+  // The agent builds the cone with its rear vertex at the incident point.
+  // Cone-offsets relative to that anchor are what we sweep around the
+  // perimeter (Minkowski kernel).
+  const coneOffsets: Array<[number, number]> = coneVerts.map(([lo, la]) => [
+    lo - incidentLon,
+    la - incidentLat,
+  ]);
+
+  // Subsample dense perimeters so vertex-pair count stays bounded.
+  const stride = Math.max(
+    1,
+    Math.floor(perimVerts.length / MAX_PERIM_VERTICES),
+  );
+  const sampled: Array<[number, number]> = [];
+  for (let i = 0; i < perimVerts.length; i += stride) sampled.push(perimVerts[i]);
+
+  // Minkowski-sum vertex set: every cone offset translated to every
+  // sampled perimeter vertex. Convex-hulling this gives a shape whose rear
+  // matches the perimeter's downwind footprint and whose forward extent is
+  // the perimeter shape swept along the cone — i.e., the perimeter
+  // physically extended in the spread direction.
+  const swept: Array<[number, number]> = [];
+  for (const [px, py] of sampled) {
+    for (const [dx, dy] of coneOffsets) {
+      swept.push([px + dx, py + dy]);
+    }
+  }
+  // Keep the original perimeter vertices so the rear edge clings to the
+  // current fire outline even when the cone has degenerate zero-area bands.
+  for (const v of perimVerts) swept.push(v);
+
+  return { type: "Polygon", coordinates: [convexHull(swept)] };
 }
 
 function fmtInt(n: number | undefined | null): string {
