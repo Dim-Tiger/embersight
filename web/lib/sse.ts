@@ -4,6 +4,7 @@ import {
   AGENT_LABELS,
   AGENT_ORDER,
   type AgentOutput,
+  type DialogueMessage,
   useStore,
 } from "@/lib/store";
 
@@ -113,10 +114,40 @@ function handleFrame(frame: string, c: StoreCtx) {
     return;
   }
 
+  if (event === "dialogue" && parsed && typeof parsed === "object") {
+    const d = parsed as Record<string, unknown>;
+    const from = String(d.from ?? "");
+    const to = String(d.to ?? "");
+    const text = String(d.text ?? "");
+    const kind = (d.kind as DialogueMessage["kind"]) ?? "response";
+    if (!from || !text) return;
+    s.appendDialogue({
+      id: `d-${from}-${to}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      from,
+      to,
+      text,
+      ts: Date.now(),
+      kind,
+      confidence:
+        typeof d.confidence === "number" ? (d.confidence as number) : null,
+      confidenceDriver:
+        typeof d.confidence_driver === "string"
+          ? (d.confidence_driver as string)
+          : null,
+    });
+    // When the agent responds, the in-flight thinking buffer is no longer
+    // useful — the final narrative is now visible above it.
+    if (kind === "response" && AGENT_SET.has(from)) {
+      s.clearThinking(from);
+    }
+    return;
+  }
+
   if (event === "agent-event" && parsed && typeof parsed === "object") {
     const inner = parsed as Record<string, unknown>;
     const kind = inner.kind as string | undefined;
     const name = inner.name as string | undefined;
+    const langgraphNode = inner.langgraph_node as string | undefined;
 
     s.appendEvent({
       ts: Date.now(),
@@ -124,6 +155,22 @@ function handleFrame(frame: string, c: StoreCtx) {
       name: name ?? null,
       data: parsed,
     });
+
+    // Live thinking: when an LLM streams tokens, append them to the
+    // buffer for whichever agent owns the call. Use `langgraph_node`
+    // from the event's metadata (the node currently executing), since
+    // `name` is the model name for stream events, not the agent.
+    if (
+      kind === "on_chat_model_stream" &&
+      langgraphNode &&
+      AGENT_SET.has(langgraphNode)
+    ) {
+      const data = inner.data as Record<string, unknown> | undefined;
+      const chunk = data?.chunk as Record<string, unknown> | undefined;
+      const content = chunk?.content;
+      const text = coerceChunkText(content);
+      if (text) s.appendThinking(langgraphNode, text);
+    }
 
     if (!name) return;
     if (kind === "on_chain_start" && AGENT_SET.has(name)) {
@@ -155,6 +202,30 @@ function handleFrame(frame: string, c: StoreCtx) {
 
 function stripPrefix(s: string): string {
   return s.replace(/^\[[\w_]+\]\s*/, "").trim();
+}
+
+/**
+ * Anthropic LLM stream chunks can carry their `content` as either a plain
+ * string or an array of typed content blocks (`{type:"text",text:"..."}`,
+ * `{type:"thinking",thinking:"..."}`). Reduce them to a single string so
+ * we can append to the thinking buffer.
+ */
+function coerceChunkText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const out: string[] = [];
+    for (const block of content) {
+      if (typeof block === "string") out.push(block);
+      else if (block && typeof block === "object") {
+        const b = block as Record<string, unknown>;
+        if (b.type === "text" && typeof b.text === "string") out.push(b.text);
+        else if (b.type === "thinking" && typeof b.thinking === "string")
+          out.push(b.thinking);
+      }
+    }
+    return out.join("");
+  }
+  return "";
 }
 
 /**

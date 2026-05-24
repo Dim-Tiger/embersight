@@ -8,7 +8,9 @@ Exposes:
 
 Events emitted on /agent/stream follow the Vercel AI SDK "data part" shape:
   data: {"type":"agent-event", "value": {...}}\\n\\n
-Plus a few framing events: start, interrupt_pending, done, error.
+Plus framing events: start, interrupt_pending, done, error, and
+`dialogue` events that surface the synthesized orchestrator <-> subagent
+conversation alongside the raw LangGraph events.
 """
 
 from __future__ import annotations
@@ -79,6 +81,85 @@ def _sse(event: str, payload: Any) -> dict:
     return {"event": event, "data": json.dumps(payload, default=str)}
 
 
+# Short, human-readable task descriptions for each subagent. Surfaced as
+# synthesized "Orchestrator -> <agent>" dialogue messages when the
+# corresponding LangGraph node starts.
+AGENT_TASK_DESCRIPTIONS: dict[str, str] = {
+    "weather_wind": (
+        "Analyze 24h fire weather (HRRR + RTMA + RAWS + NWS alerts) and "
+        "compute a Red Flag flag plus critical window."
+    ),
+    "terrain_fuel": (
+        "Pull terrain (slope/aspect) and fuel beds (LANDFIRE FBFM40) "
+        "across the projected AOI."
+    ),
+    "values_at_risk": (
+        "Identify structures, schools, hospitals, and critical "
+        "infrastructure inside the projected spread cone."
+    ),
+    "routing_staging": (
+        "Find roads, staging candidates, and water sources within reach "
+        "of the incident."
+    ),
+    "spread_simulation": (
+        "Run a wind-and-fuel-driven spread model and produce 1/6/12/24h "
+        "spread cones."
+    ),
+    "resource_recommendation": (
+        "Recommend engines, hand crews, dozers, and aviation based on "
+        "spread + values. PROPOSE only — IC must approve."
+    ),
+    "evacuation_intelligence": (
+        "Propose evacuation phasing and route-status changes for zones "
+        "intersecting the spread cone. PROPOSE only."
+    ),
+    "master_ic": (
+        "Synthesize all subagent outputs into a draft ICS 201/202/204 "
+        "and pause for IC approval."
+    ),
+}
+
+
+def _dialogue_event(
+    from_: str,
+    to: str,
+    text: str,
+    *,
+    kind: str = "message",
+    extra: dict | None = None,
+) -> dict:
+    """Build a payload for the `dialogue` SSE event.
+
+    The frontend renders these as a chat-style transcript between the
+    orchestrator and each subagent. `kind` is "request" / "response" /
+    "thinking" so the UI can style them differently.
+    """
+    payload: dict = {"from": from_, "to": to, "text": text, "kind": kind}
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _extract_agent_output_from_chain_end(
+    name: str, data: Any
+) -> dict | None:
+    """Pull the AgentOutput dict for `name` from an on_chain_end event."""
+    if not isinstance(data, dict):
+        return None
+    output = data.get("output")
+    if not isinstance(output, dict):
+        return None
+    outputs = output.get("outputs")
+    if not isinstance(outputs, dict):
+        return None
+    ao = outputs.get(name)
+    if isinstance(ao, dict):
+        return ao
+    # Pydantic model — coerce via _safe
+    safe = _safe(ao)
+    return safe if isinstance(safe, dict) else None
+
+
 async def _run_and_stream(
     initial_state_or_command: AgentState | Command,
     thread_id: str,
@@ -86,6 +167,20 @@ async def _run_and_stream(
     config = {"configurable": {"thread_id": thread_id}}
     async with compiled_graph() as graph:
         yield _sse("start", {"thread_id": thread_id})
+        # Once-only "orchestrator kicks off the team" dialogue marker so the
+        # UI has a deterministic first message.
+        yield _sse(
+            "dialogue",
+            _dialogue_event(
+                from_="orchestrator",
+                to="team",
+                text=(
+                    "Kicking off analysis. Fanning out to the seven "
+                    "specialist subagents."
+                ),
+                kind="kickoff",
+            ),
+        )
         try:
             async for event in graph.astream_events(
                 initial_state_or_command, config=config, version="v2"
@@ -94,6 +189,10 @@ async def _run_and_stream(
                 # of low-level LLM-token events too; the UI consumes
                 # node-start/end + custom data emissions.
                 kind = event.get("event", "")
+                name = event.get("name")
+                metadata = event.get("metadata") or {}
+                langgraph_node = metadata.get("langgraph_node")
+
                 if kind in (
                     "on_chain_start",
                     "on_chain_end",
@@ -104,12 +203,55 @@ async def _run_and_stream(
                         "agent-event",
                         {
                             "kind": kind,
-                            "name": event.get("name"),
+                            "name": name,
                             "data": _safe(event.get("data")),
                             "run_id": event.get("run_id"),
                             "tags": event.get("tags", []),
+                            "langgraph_node": langgraph_node,
                         },
                     )
+
+                # ---- Synthesize dialogue at agent boundaries ---------------
+                if (
+                    kind == "on_chain_start"
+                    and isinstance(name, str)
+                    and name in AGENT_TASK_DESCRIPTIONS
+                ):
+                    yield _sse(
+                        "dialogue",
+                        _dialogue_event(
+                            from_="orchestrator",
+                            to=name,
+                            text=AGENT_TASK_DESCRIPTIONS[name],
+                            kind="request",
+                        ),
+                    )
+                elif (
+                    kind == "on_chain_end"
+                    and isinstance(name, str)
+                    and name in AGENT_TASK_DESCRIPTIONS
+                ):
+                    ao = _extract_agent_output_from_chain_end(
+                        name, event.get("data")
+                    )
+                    if ao:
+                        narrative = ao.get("narrative") or ""
+                        conf = ao.get("confidence")
+                        yield _sse(
+                            "dialogue",
+                            _dialogue_event(
+                                from_=name,
+                                to="orchestrator",
+                                text=narrative,
+                                kind="response",
+                                extra={
+                                    "confidence": conf,
+                                    "confidence_driver": ao.get(
+                                        "confidence_driver"
+                                    ),
+                                },
+                            ),
+                        )
 
             # After astream_events drains, check whether the graph paused
             # on an interrupt. If yes, surface it so the UI can present an

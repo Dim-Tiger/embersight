@@ -68,6 +68,24 @@ export type ChatMessage = {
   agentName?: string;
 };
 
+/**
+ * Inter-agent dialogue message. Distinct from `ChatMessage` (which is the
+ * user-facing narrative chat) — these surface the actual exchange between
+ * the orchestrator and each subagent: the request issued to the agent,
+ * any live "thinking" tokens streamed while it runs, and the final
+ * response with its narrative + confidence.
+ */
+export type DialogueMessage = {
+  id: string;
+  from: string; // "orchestrator" or an agent slug
+  to: string; // "orchestrator", "team", or an agent slug
+  text: string;
+  ts: number;
+  kind: "request" | "response" | "thinking" | "kickoff";
+  confidence?: number | null;
+  confidenceDriver?: string | null;
+};
+
 export type Store = {
   selectedIncidentId: string | null;
   selectedThreadId: string | null;
@@ -85,6 +103,10 @@ export type Store = {
   chunkCount: number;
   frameCount: number;
   chat: ChatMessage[];
+  dialogue: DialogueMessage[];
+  /** Live, in-flight LLM-token buffer keyed by langgraph_node name.
+   * Cleared when the agent's `response` dialogue message arrives. */
+  thinking: Record<string, string>;
   pendingUserQuery: string | null;
   setSelectedIncident: (id: string | null) => void;
   setSelectedThread: (id: string | null) => void;
@@ -102,6 +124,9 @@ export type Store = {
   incChunk: () => void;
   incFrame: () => void;
   appendChat: (m: ChatMessage) => void;
+  appendDialogue: (d: DialogueMessage) => void;
+  appendThinking: (agent: string, chunk: string) => void;
+  clearThinking: (agent: string) => void;
   setPendingUserQuery: (q: string | null) => void;
   upsertInterrupt: (i: PendingInterrupt) => void;
   removeInterrupt: (id?: string) => void;
@@ -132,6 +157,8 @@ export const useStore = create<Store>((set) => ({
   chunkCount: 0,
   frameCount: 0,
   chat: [],
+  dialogue: [],
+  thinking: {},
   pendingUserQuery: null,
   restartCount: 0,
   setSelectedIncident: (id) => set({ selectedIncidentId: id }),
@@ -154,6 +181,8 @@ export const useStore = create<Store>((set) => ({
       agentOutputs: {},
       agentStatuses: {},
       pendingInterrupts: [],
+      dialogue: [],
+      thinking: {},
       streaming: false,
       done: false,
       errorMessage: null,
@@ -168,6 +197,22 @@ export const useStore = create<Store>((set) => ({
   incChunk: () => set((s) => ({ chunkCount: s.chunkCount + 1 })),
   incFrame: () => set((s) => ({ frameCount: s.frameCount + 1 })),
   appendChat: (m) => set((s) => ({ chat: [...s.chat.slice(-199), m] })),
+  appendDialogue: (d) =>
+    set((s) => ({ dialogue: [...s.dialogue.slice(-299), d] })),
+  appendThinking: (agent, chunk) =>
+    set((s) => ({
+      thinking: {
+        ...s.thinking,
+        [agent]: (s.thinking[agent] ?? "") + chunk,
+      },
+    })),
+  clearThinking: (agent) =>
+    set((s) => {
+      if (!(agent in s.thinking)) return s;
+      const next = { ...s.thinking };
+      delete next[agent];
+      return { thinking: next };
+    }),
   setPendingUserQuery: (q) => set({ pendingUserQuery: q }),
   requestRestart: () => set((s) => ({ restartCount: s.restartCount + 1 })),
   upsertInterrupt: (i) =>

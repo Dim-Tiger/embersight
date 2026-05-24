@@ -284,17 +284,13 @@ async def _llm_narrative(
         "Use PROPOSE / RECOMMEND verbs only. No fabricated numbers."
     )
     try:
+        from ..tools.llm_stream import stream_text  # noqa: PLC0415
         llm = ChatAnthropic(model=LLM_MODEL_ID, max_tokens=400, temperature=0.2)
-        resp = await llm.ainvoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
+        text = await stream_text(
+            llm,
+            [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)],
         )
-        text = getattr(resp, "content", None)
-        if isinstance(text, list):  # multi-block response
-            text = " ".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in text
-            )
-        if isinstance(text, str) and text.strip():
+        if text and text.strip():
             return text.strip()
     except Exception:  # noqa: BLE001
         pass

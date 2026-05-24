@@ -1,7 +1,7 @@
 "use client";
 
-import { AGENT_LABELS, AGENT_ORDER, useStore } from "@/lib/store";
-import { RefreshCw } from "lucide-react";
+import { AGENT_LABELS, AGENT_ORDER, type DialogueMessage, useStore } from "@/lib/store";
+import { ArrowRight, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 import { MessageInput } from "./MessageInput";
 
@@ -10,6 +10,8 @@ export function AgentFeed() {
   const statuses = useStore((s) => s.agentStatuses);
   const events = useStore((s) => s.agentEvents);
   const chat = useStore((s) => s.chat);
+  const dialogue = useStore((s) => s.dialogue);
+  const thinking = useStore((s) => s.thinking);
   const streaming = useStore((s) => s.streaming);
   const done = useStore((s) => s.done);
   const errorMessage = useStore((s) => s.errorMessage);
@@ -52,6 +54,12 @@ export function AgentFeed() {
   }, [events]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Bytes of in-flight thinking are a decent proxy for "new content
+  // appended" — re-run the near-bottom check whenever it changes.
+  const thinkingBytes = useMemo(
+    () => Object.values(thinking).reduce((a, b) => a + b.length, 0),
+    [thinking],
+  );
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -62,7 +70,7 @@ export function AgentFeed() {
     if (nearBottom) {
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
-  }, [chat.length, doneCount]);
+  }, [chat.length, doneCount, dialogue.length, thinkingBytes]);
 
   return (
     <section className="flex h-full flex-col">
@@ -193,24 +201,22 @@ export function AgentFeed() {
                 )}
               </div>
 
-              {/* Chat trail */}
-              <div className="space-y-2 border-t border-smoke-700 px-3 py-2">
-                {chat.length === 0 ? (
-                  <div className="px-1 py-3 text-[11px] italic text-smoke-500">
-                    Agent narratives will appear here as each subagent
-                    completes.
-                  </div>
-                ) : (
-                  chat.map((m) => (
+              {/* Inter-agent dialogue + live thinking */}
+              <DialogueTranscript dialogue={dialogue} thinking={thinking} />
+
+              {/* User-facing chat trail (queries + final narratives) */}
+              {chat.length > 0 && (
+                <div className="space-y-2 border-t border-smoke-700 px-3 py-2">
+                  {chat.map((m) => (
                     <ChatBubble
                       key={m.id}
                       role={m.role}
                       agentName={m.agentName}
                       text={m.text}
                     />
-                  ))
-                )}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <MessageInput />
@@ -219,6 +225,135 @@ export function AgentFeed() {
       </div>
     </section>
   );
+}
+
+/**
+ * Renders the orchestrator <-> subagent transcript: each request from the
+ * orchestrator and the agent's response, with any live thinking tokens
+ * streamed in between. The text is short-form by design — full narratives
+ * still surface in the ChatBubble trail and in each tab's AgentCard.
+ */
+function DialogueTranscript({
+  dialogue,
+  thinking,
+}: {
+  dialogue: DialogueMessage[];
+  thinking: Record<string, string>;
+}) {
+  // Find each agent's most recent request so we can attach in-flight
+  // thinking tokens to it visually.
+  const lastRequestByAgent = useMemo(() => {
+    const out: Record<string, number> = {};
+    dialogue.forEach((d, i) => {
+      if (d.kind === "request") out[d.to] = i;
+    });
+    return out;
+  }, [dialogue]);
+
+  const hasAnyThinking = Object.keys(thinking).length > 0;
+
+  if (dialogue.length === 0 && !hasAnyThinking) {
+    return (
+      <div className="border-t border-smoke-700 px-3 py-3 text-[11px] italic text-smoke-500">
+        Inter-agent dialogue will appear here as the orchestrator dispatches
+        each subagent.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5 border-t border-smoke-700 px-3 py-2">
+      <div className="text-[9px] uppercase tracking-widest text-smoke-500">
+        Orchestrator transcript
+      </div>
+      {dialogue.map((d, i) => {
+        const showThinkingHere =
+          d.kind === "request" &&
+          lastRequestByAgent[d.to] === i &&
+          thinking[d.to];
+        return (
+          <div key={d.id}>
+            <DialogueLine d={d} />
+            {showThinkingHere && (
+              <ThinkingLine agent={d.to} text={thinking[d.to]} />
+            )}
+          </div>
+        );
+      })}
+      {/* Thinking buffers for agents whose request didn't land in this list
+          (rare, but happens when events arrive out of order). */}
+      {Object.entries(thinking)
+        .filter(([agent]) => lastRequestByAgent[agent] == null)
+        .map(([agent, text]) => (
+          <ThinkingLine key={agent} agent={agent} text={text} />
+        ))}
+    </div>
+  );
+}
+
+function DialogueLine({ d }: { d: DialogueMessage }) {
+  const fromLabel = labelFor(d.from);
+  const toLabel = labelFor(d.to);
+  const isOrchOut = d.from === "orchestrator";
+
+  if (d.kind === "kickoff") {
+    return (
+      <div className="rounded bg-smoke-800/60 px-2 py-1 text-[11px] italic text-smoke-400">
+        {d.text}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`rounded px-2 py-1.5 text-[11px] leading-snug ring-1 ${
+        isOrchOut
+          ? "bg-smoke-800/50 text-smoke-300 ring-smoke-700"
+          : "bg-ember-900/20 text-ember-100 ring-ember-800/40"
+      }`}
+    >
+      <div className="mb-0.5 flex items-center gap-1 text-[9px] font-semibold uppercase tracking-widest">
+        <span className={isOrchOut ? "text-smoke-400" : "text-ember-300"}>
+          {fromLabel}
+        </span>
+        <ArrowRight className="h-2.5 w-2.5 opacity-60" />
+        <span className={isOrchOut ? "text-smoke-500" : "text-ember-400"}>
+          {toLabel}
+        </span>
+        {d.kind === "response" && d.confidence != null && (
+          <span className="ml-auto rounded bg-ember-900/40 px-1.5 py-0 text-[9px] font-semibold text-ember-200">
+            {Math.round(d.confidence * 100)}% conf
+          </span>
+        )}
+      </div>
+      <div className="whitespace-pre-wrap">{d.text}</div>
+      {d.confidenceDriver && (
+        <div className="mt-0.5 text-[9px] italic text-smoke-500">
+          {d.confidenceDriver}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThinkingLine({ agent, text }: { agent: string; text: string }) {
+  return (
+    <div className="mt-0.5 ml-3 border-l border-smoke-700 px-2 py-1 text-[10px] leading-snug text-smoke-400">
+      <div className="text-[8px] font-semibold uppercase tracking-widest text-smoke-500">
+        {labelFor(agent)} · thinking
+      </div>
+      <div className="whitespace-pre-wrap italic">
+        {text}
+        <span className="ml-0.5 inline-block h-2 w-1 animate-pulse bg-smoke-500 align-middle" />
+      </div>
+    </div>
+  );
+}
+
+function labelFor(slug: string): string {
+  if (slug === "orchestrator") return "Orchestrator";
+  if (slug === "team") return "Team";
+  return AGENT_LABELS[slug] ?? slug;
 }
 
 function ChatBubble({
