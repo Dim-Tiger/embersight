@@ -10,14 +10,15 @@ Briefing topology (one-shot, ~30-60s):
   orchestrator
       |
    (fan-out)
-   /  |  |  \\
-  W   T  V   R       # weather, terrain, values, routing - parallel
-   \\ /    \\ /
-   spread            # depends on Weather + Terrain
+   /  |  |
+  W   T  V              # weather, terrain, values - parallel
+   \\ / \\ /
+    R                    # routing depends on weather (wind) + terrain (DEM/slope)
+   spread               # depends on Weather + Terrain
    /    \\
-  RR    EI           # resource rec + evac intel - parallel, depend on Spread + Values
+  RR    EI              # resource rec + evac intel - parallel, depend on Spread + Values
    \\   /
-   master_ic         # synthesizes IAP + interrupts for IC approval
+   master_ic            # synthesizes IAP + interrupts for IC approval
 
 Chat topology (per user message, ~3-15s):
 
@@ -84,8 +85,13 @@ def build_briefing_graph() -> StateGraph:
 
     g.add_edge(START, "orchestrator")
 
-    for n in ("weather_wind", "terrain_fuel", "values_at_risk", "routing_staging"):
+    # weather/terrain/values fan out from the orchestrator; routing waits on
+    # weather (wind direction → upwind-favoured staging + egress reranking)
+    # AND terrain (real AOI mean elevation + slope feed the scoring axes).
+    for n in ("weather_wind", "terrain_fuel", "values_at_risk"):
         g.add_edge("orchestrator", n)
+    g.add_edge("weather_wind", "routing_staging")
+    g.add_edge("terrain_fuel", "routing_staging")
 
     g.add_edge("weather_wind", "spread_simulation")
     g.add_edge("terrain_fuel", "spread_simulation")

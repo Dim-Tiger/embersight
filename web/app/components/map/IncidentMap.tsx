@@ -60,18 +60,32 @@ type RoutingPayload = {
     path?: Array<[number, number]>;
     length_km?: number;
     est_drive_minutes?: number;
+    avg_speed_kph?: number;
+    bearing_deg?: number;
   }>;
   egress_routes?: Array<{
     path?: Array<[number, number]>;
     length_km?: number;
     est_drive_minutes?: number;
     bearing?: string;
+    bearing_deg?: number;
+    wind_relation?: "upwind" | "crosswind" | "downwind" | "unknown";
   }>;
   candidates?: Array<{
     name?: string;
     loc?: [number, number];
     score?: number;
+    dist_incident_km?: number;
+    nearest_water_km?: number;
+    score_components?: Record<string, number>;
+    score_weights?: Record<string, number>;
+    score_raw?: Record<string, number | null>;
   }>;
+  wind?: {
+    from_deg?: number | null;
+    speed_mph?: number | null;
+    source?: string | null;
+  };
 };
 
 // Evac zone status → color. Keys are normalized (uppercase, trimmed).
@@ -964,8 +978,10 @@ export function IncidentMap() {
         toLineString(r.path, {
           kind: "egress",
           bearing: r.bearing ?? "?",
+          bearing_deg: r.bearing_deg ?? null,
           length_km: r.length_km ?? null,
           minutes: r.est_drive_minutes ?? null,
+          wind_relation: r.wind_relation ?? "unknown",
         }),
       )
       .filter((f): f is GeoJSON.Feature => f !== null);
@@ -993,7 +1009,20 @@ export function IncidentMap() {
           source: "routes-egress",
           layout: { "line-cap": "round", "line-join": "round" },
           paint: {
-            "line-color": "#dc2626",
+            // Color by wind relation: upwind (safe escape) = green,
+            // crosswind (flank) = amber, downwind (into fire-head) = red,
+            // unknown (no wind data) = neutral grey.
+            "line-color": [
+              "match",
+              ["get", "wind_relation"],
+              "upwind",
+              "#10b981",
+              "crosswind",
+              "#f59e0b",
+              "downwind",
+              "#dc2626",
+              "#94a3b8",
+            ],
             "line-width": 3.2,
             "line-opacity": 0.95,
           },
@@ -1066,20 +1095,14 @@ export function IncidentMap() {
           },
         });
 
-        const showStagingPopup = (e: maplibregl.MapMouseEvent) => {
+        const stagingPopupHtml = buildStagingPopupHtml(top, payload.wind);
+        const showStagingPopup = () => {
           if (!popupRef.current) return;
           popupRef.current
             .setLngLat([lon, lat])
-            .setHTML(
-              `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid #22c55e66">
-                <strong style="color:#22c55e">Proposed staging</strong><br/>
-                ${escapeHtml(String(top.name ?? "Staging"))}<br/>
-                <span style="color:#94a3b8">score ${top.score ?? "?"}</span>
-              </div>`,
-            )
+            .setHTML(stagingPopupHtml)
             .addTo(map);
           map.getCanvas().style.cursor = "pointer";
-          void e;
         };
         const hideStagingPopup = () => {
           popupRef.current?.remove();
@@ -1087,6 +1110,39 @@ export function IncidentMap() {
         };
         map.on("mouseenter", "staging-point", showStagingPopup);
         map.on("mouseleave", "staging-point", hideStagingPopup);
+      }
+
+      // Hover popups for egress routes — show bearing + wind relation +
+      // drive time. Useful for IC to see "the W route is upwind, 18 min".
+      if (egressFeatures.length) {
+        const showEgressPopup = (e: maplibregl.MapMouseEvent) => {
+          if (!popupRef.current) return;
+          const feature = (
+            e as unknown as { features?: GeoJSON.Feature[] }
+          ).features?.[0];
+          const props = feature?.properties as
+            | {
+                bearing?: string;
+                bearing_deg?: number;
+                length_km?: number;
+                minutes?: number;
+                wind_relation?: string;
+              }
+            | undefined;
+          if (!props) return;
+          popupRef.current
+            .setLngLat(e.lngLat)
+            .setHTML(buildEgressPopupHtml(props))
+            .addTo(map);
+          map.getCanvas().style.cursor = "pointer";
+        };
+        const hideEgressPopup = () => {
+          popupRef.current?.remove();
+          map.getCanvas().style.cursor = "";
+        };
+        map.on("mouseenter", "routes-egress", showEgressPopup);
+        map.on("mousemove", "routes-egress", showEgressPopup);
+        map.on("mouseleave", "routes-egress", hideEgressPopup);
       }
 
       // Re-stack: cone < perimeter < incidents on top of routes so the
@@ -1466,6 +1522,119 @@ function escapeHtml(s: string): string {
   });
 }
 
+// Component-score row in the staging popup. Renders a small 0..1 bar so the
+// IC can see at a glance which axis is dragging the composite up or down.
+function componentRow(label: string, value: number | undefined): string {
+  const v = typeof value === "number" ? Math.max(0, Math.min(1, value)) : 0;
+  const pct = (v * 100).toFixed(0);
+  const color =
+    v >= 0.7 ? "#10b981" : v >= 0.4 ? "#f59e0b" : "#dc2626";
+  return `
+    <div style="display:flex;align-items:center;gap:6px;margin:2px 0">
+      <span style="width:54px;color:#94a3b8;font-size:10px">${escapeHtml(label)}</span>
+      <span style="flex:1;height:5px;background:#0f172a;border-radius:2px;overflow:hidden">
+        <span style="display:block;height:100%;width:${pct}%;background:${color}"></span>
+      </span>
+      <span style="width:30px;text-align:right;font-variant-numeric:tabular-nums;font-size:10px;color:#cbd5e1">${v.toFixed(2)}</span>
+    </div>`;
+}
+
+function buildStagingPopupHtml(
+  top: {
+    name?: string;
+    score?: number;
+    dist_incident_km?: number;
+    nearest_water_km?: number;
+    score_components?: Record<string, number>;
+    score_raw?: Record<string, number | null>;
+  },
+  wind?: { from_deg?: number | null; speed_mph?: number | null } | null,
+): string {
+  const components = top.score_components ?? {};
+  const raw = top.score_raw ?? {};
+  const compRows = [
+    componentRow("incident", components.incident),
+    componentRow("water", components.water),
+    componentRow("station", components.station),
+    componentRow("paved", components.paved),
+    componentRow("elevation", components.elevation),
+    componentRow("slope", components.slope),
+    componentRow("wind", components.wind),
+  ].join("");
+  const distLine =
+    top.dist_incident_km != null
+      ? `${top.dist_incident_km.toFixed(1)} km from fire`
+      : "";
+  const waterLine =
+    top.nearest_water_km != null
+      ? ` · water ${top.nearest_water_km.toFixed(2)} km`
+      : "";
+  const slopeLine =
+    raw.slope_pct != null ? ` · slope ${Number(raw.slope_pct).toFixed(1)}%` : "";
+  const elevLine =
+    raw.elevation_m != null
+      ? ` · ${Number(raw.elevation_m).toFixed(0)} m`
+      : "";
+  const windLine =
+    wind && wind.from_deg != null
+      ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">wind from ${Number(wind.from_deg).toFixed(0)}°${wind.speed_mph != null ? ` @ ${Number(wind.speed_mph).toFixed(0)} mph` : ""}</div>`
+      : "";
+  return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:8px 10px;border-radius:6px;border:1px solid #22c55e66;min-width:220px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
+      <strong style="color:#22c55e">Proposed staging</strong>
+      <span style="font-variant-numeric:tabular-nums;color:#cbd5e1">${
+        top.score != null ? Number(top.score).toFixed(2) : "?"
+      }</span>
+    </div>
+    <div style="color:#e2e8f0;margin-top:2px">${escapeHtml(String(top.name ?? "Staging"))}</div>
+    <div style="color:#94a3b8;font-size:10px">${escapeHtml(distLine + waterLine + slopeLine + elevLine)}</div>
+    ${windLine}
+    <div style="border-top:1px solid #334155;margin:6px 0 2px 0"></div>
+    ${compRows}
+  </div>`;
+}
+
+function buildEgressPopupHtml(props: {
+  bearing?: string;
+  bearing_deg?: number;
+  length_km?: number;
+  minutes?: number;
+  wind_relation?: string;
+}): string {
+  const rel = (props.wind_relation ?? "unknown").toLowerCase();
+  const relColor =
+    rel === "upwind"
+      ? "#10b981"
+      : rel === "crosswind"
+        ? "#f59e0b"
+        : rel === "downwind"
+          ? "#dc2626"
+          : "#94a3b8";
+  const relText =
+    rel === "upwind"
+      ? "upwind · safe escape"
+      : rel === "crosswind"
+        ? "crosswind · flank"
+        : rel === "downwind"
+          ? "downwind · AVOID (into fire-head)"
+          : "wind relation unknown";
+  const lenLine =
+    props.length_km != null
+      ? `${Number(props.length_km).toFixed(1)} km`
+      : "—";
+  const minLine =
+    props.minutes != null ? `${Number(props.minutes).toFixed(0)} min` : "—";
+  const bearingLine = `bearing ${escapeHtml(String(props.bearing ?? "?"))}${
+    props.bearing_deg != null ? ` (${Number(props.bearing_deg).toFixed(0)}°)` : ""
+  }`;
+  return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid ${relColor}66;min-width:170px">
+    <strong style="color:${relColor}">Egress · ${escapeHtml(String(props.bearing ?? "?"))}</strong><br/>
+    <span style="color:#cbd5e1">${escapeHtml(bearingLine)}</span><br/>
+    <span style="color:#cbd5e1">${escapeHtml(lenLine + " · " + minLine)}</span><br/>
+    <span style="color:${relColor};font-size:10px">${escapeHtml(relText)}</span>
+  </div>`;
+}
+
 function Legend({
   hasPerimeter,
   showWind,
@@ -1707,11 +1876,23 @@ function Legend({
           <div className="flex items-center gap-1.5">
             <span
               className="inline-block h-0.5 w-5"
-              style={{
-                borderTop: "2px solid #dc2626",
-              }}
+              style={{ borderTop: "2px solid #10b981" }}
             />
-            <span>Egress (incident → highway)</span>
+            <span>Egress · upwind (safe)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-5"
+              style={{ borderTop: "2px solid #f59e0b" }}
+            />
+            <span>Egress · crosswind</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-0.5 w-5"
+              style={{ borderTop: "2px solid #dc2626" }}
+            />
+            <span>Egress · downwind (avoid)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span
