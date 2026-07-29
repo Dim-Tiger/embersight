@@ -24,6 +24,16 @@ the agent architecture. Quick layout:
   only thing guaranteed to survive a context reset or a new chat session.
 - Update the "Current work" section below before ending a session whenever
   there's unfinished work, so the next session doesn't have to guess state.
+- **Feature work is committed, pushed, and turned into a PR by the user, not
+  by Claude.** Commits made from a Claude session are authored as
+  `Claude <noreply@anthropic.com>` regardless of who types the git command —
+  only a commit made on the user's own machine, with their own git identity,
+  credits them on GitHub. So for actual site/feature changes: describe the
+  exact edit precisely enough for the user to apply it locally themselves,
+  then remind them to commit/push/open the PR once it's verified working.
+  Repo-wide scaffolding/docs (like this file) are fine for Claude to commit
+  directly, since they're infrastructure, not a feature the user wants credit
+  for.
 
 ## Current work: EmberSight.ai landing page
 
