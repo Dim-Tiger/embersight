@@ -387,6 +387,14 @@ img { display: block; max-width: 100%; }
 }
 .footer img { width: 18px; height: 18px; }
 .footer__brand { display: flex; align-items: center; gap: 8px; }
+.footer__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.footer__contact { color: var(--muted); }
+.footer__contact:hover { color: var(--ember-red); }
 
 /* ---------- responsive tweaks ---------- */
 @media (max-width: 720px) {
