@@ -482,9 +482,33 @@ async def run(state: AgentState) -> dict[str, Any]:
         reasoning_trace_id=str(uuid.uuid4()),
     )
 
-    envelope, decision = submit_resource_recommendation(
-        state, recommendation, confidence, citations
-    )
+    # Briefing-mode contract: emit the drafted recommendation as the agent
+    # output WITHOUT pausing on interrupt(). Otherwise the initial fan-out
+    # stalls at this node, master_ic never runs, the briefing never
+    # completes, and the Resources tab stays empty until the IC manually
+    # approves — which they often haven't done yet because the briefing
+    # isn't visible. The IC still owns the recommendation: chat-mode calls
+    # (consult_resource_recommendation) still go through the interrupt
+    # path because the user is actively engaged at that point.
+    if state.mode == "briefing":
+        envelope = {
+            "type": "resource_recommendation",
+            "recommendation": recommendation.model_dump(),
+            "urgency": recommendation.urgency,
+            "expires_at": recommendation.expires_at,
+            "confidence": confidence,
+            "citations": citations.model_dump(),
+            "incident": state.incident.model_dump() if state.incident else None,
+        }
+        decision = {
+            "decision": "approved",
+            "actor": "briefing_auto",
+            "reason": "auto-drafted during initial briefing — pending IC review",
+        }
+    else:
+        envelope, decision = submit_resource_recommendation(
+            state, recommendation, confidence, citations
+        )
 
     decision = decision or {}
     decision_kind = decision.get("decision", "approved")
