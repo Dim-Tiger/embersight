@@ -1,0 +1,647 @@
+{
+ "type": "FeatureCollection",
+ "name": "single_access_points",
+ "note": "Approximate. Stars from Camarillo Safety Element Fig. 11-14, georeferenced by this script (control-point RMS about 25 m).",
+ "features": [
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.104428,
+     34.224943
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-01",
+    "pixel_x": 195,
+    "pixel_y": 571,
+    "match_score": 0.59,
+    "found_by": "template",
+    "confidence": "medium",
+    "nearest_osm_street": "Central Avenue",
+    "nearest_osm_street_m": 40
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.09064,
+     34.229472
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-02",
+    "pixel_x": 328,
+    "pixel_y": 520,
+    "match_score": 0.52,
+    "found_by": "template",
+    "confidence": "medium",
+    "nearest_osm_street": "Corte Riviera",
+    "nearest_osm_street_m": 4
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.089504,
+     34.231042
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-03",
+    "pixel_x": 339,
+    "pixel_y": 502,
+    "match_score": 0.7,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Calle Tierra Vista",
+    "nearest_osm_street_m": 47
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.087683,
+     34.243371
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-04",
+    "pixel_x": 357,
+    "pixel_y": 360,
+    "match_score": 0.6,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Avenida de Autlan",
+    "nearest_osm_street_m": 51
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.061602,
+     34.236112
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-05",
+    "pixel_x": 608,
+    "pixel_y": 446,
+    "match_score": 0.64,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Calle Higuera",
+    "nearest_osm_street_m": 14
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.050105,
+     34.215296
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-06",
+    "pixel_x": 718,
+    "pixel_y": 687,
+    "match_score": 0.67,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "South Carmen Drive",
+    "nearest_osm_street_m": 4
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.01996,
+     34.2314
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-07",
+    "pixel_x": 1009,
+    "pixel_y": 504,
+    "match_score": 0.55,
+    "found_by": "template",
+    "confidence": "medium",
+    "nearest_osm_street": "Gracia Street",
+    "nearest_osm_street_m": 5
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.008608,
+     34.221338
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-08",
+    "pixel_x": 1118,
+    "pixel_y": 621,
+    "match_score": 0.62,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Adolfo Road",
+    "nearest_osm_street_m": 16
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.003274,
+     34.238032
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-09",
+    "pixel_x": 1170,
+    "pixel_y": 429,
+    "match_score": 0.75,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Upland Road",
+    "nearest_osm_street_m": 6
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -119.002196,
+     34.227372
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-10",
+    "pixel_x": 1180,
+    "pixel_y": 552,
+    "match_score": 0.7,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "North Creekside Road",
+    "nearest_osm_street_m": 21
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.999885,
+     34.220277
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-11",
+    "pixel_x": 1202,
+    "pixel_y": 634,
+    "match_score": 0.69,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Avenida Encanto",
+    "nearest_osm_street_m": 0
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.998222,
+     34.219596
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-12",
+    "pixel_x": 1218,
+    "pixel_y": 642,
+    "match_score": 0.74,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Leisure Village Drive",
+    "nearest_osm_street_m": 1
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.996666,
+     34.219868
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-13",
+    "pixel_x": 1233,
+    "pixel_y": 639,
+    "match_score": 0.67,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Leisure Village Drive",
+    "nearest_osm_street_m": 4
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.994281,
+     34.22058
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-14",
+    "pixel_x": 1256,
+    "pixel_y": 631,
+    "match_score": 0.69,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Leisure Village Drive",
+    "nearest_osm_street_m": 6
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.993338,
+     34.218072
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-15",
+    "pixel_x": 1265,
+    "pixel_y": 660,
+    "match_score": 0.63,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Mountain View Drive",
+    "nearest_osm_street_m": 15
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.991796,
+     34.222161
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-16",
+    "pixel_x": 1280,
+    "pixel_y": 613,
+    "match_score": 0.6,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Leisure Village Drive",
+    "nearest_osm_street_m": 9
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.989931,
+     34.222956
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-17",
+    "pixel_x": 1298,
+    "pixel_y": 604,
+    "match_score": 0.7,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Leisure Village Drive",
+    "nearest_osm_street_m": 5
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.989807,
+     34.217665
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-18",
+    "pixel_x": 1299,
+    "pixel_y": 665,
+    "match_score": 0.66,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Mountain View Drive",
+    "nearest_osm_street_m": 0
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.987544,
+     34.223147
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-19",
+    "pixel_x": 1321,
+    "pixel_y": 602,
+    "match_score": 0.73,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 6
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.987116,
+     34.219681
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-20",
+    "pixel_x": 1325,
+    "pixel_y": 642,
+    "match_score": 0.69,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Mountain View Drive",
+    "nearest_osm_street_m": 15
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.985987,
+     34.223246
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-21",
+    "pixel_x": 1336,
+    "pixel_y": 601,
+    "match_score": 0.72,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 8
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.985667,
+     34.22082
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-22",
+    "pixel_x": 1339,
+    "pixel_y": 629,
+    "match_score": 0.69,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Mountain View Drive",
+    "nearest_osm_street_m": 16
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.983912,
+     34.223435
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-23",
+    "pixel_x": 1356,
+    "pixel_y": 599,
+    "match_score": 0.68,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 4
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.983305,
+     34.227517
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-24",
+    "pixel_x": 1362,
+    "pixel_y": 552,
+    "match_score": 0.62,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "Santa Rosa Road",
+    "nearest_osm_street_m": 4
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.982565,
+     34.223966
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-25",
+    "pixel_x": 1369,
+    "pixel_y": 593,
+    "match_score": 0.58,
+    "found_by": "template",
+    "confidence": "medium",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 10
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.981529,
+     34.224581
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-26",
+    "pixel_x": 1379,
+    "pixel_y": 586,
+    "match_score": 0.56,
+    "found_by": "template",
+    "confidence": "medium",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 15
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.980495,
+     34.22563
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-27",
+    "pixel_x": 1389,
+    "pixel_y": 574,
+    "match_score": 0.62,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 24
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.979461,
+     34.226765
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-28",
+    "pixel_x": 1399,
+    "pixel_y": 561,
+    "match_score": null,
+    "found_by": "manual",
+    "confidence": "medium (overlapping stars, placed by eye)",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 7
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.978947,
+     34.227897
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-29",
+    "pixel_x": 1404,
+    "pixel_y": 548,
+    "match_score": null,
+    "found_by": "manual",
+    "confidence": "medium (overlapping stars, placed by eye)",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 30
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.978119,
+     34.228597
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-30",
+    "pixel_x": 1412,
+    "pixel_y": 540,
+    "match_score": null,
+    "found_by": "manual",
+    "confidence": "medium (overlapping stars, placed by eye)",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 19
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.976978,
+     34.228953
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-31",
+    "pixel_x": 1423,
+    "pixel_y": 536,
+    "match_score": 0.61,
+    "found_by": "template",
+    "confidence": "high",
+    "nearest_osm_street": "East Leisure Village Drive",
+    "nearest_osm_street_m": 0
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -118.975013,
+     34.230789
+    ]
+   },
+   "properties": {
+    "id": "CAM-SA-32",
+    "pixel_x": 1442,
+    "pixel_y": 515,
+    "match_score": 0.58,
+    "found_by": "template",
+    "confidence": "medium",
+    "nearest_osm_street": "Village 41",
+    "nearest_osm_street_m": 20
+   }
+  }
+ ]
+}
