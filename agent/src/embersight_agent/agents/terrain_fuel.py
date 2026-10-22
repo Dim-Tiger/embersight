@@ -79,7 +79,9 @@ def _key_findings(fuel: dict, terrain: dict, canopy: dict) -> list[str]:
 
 
 def _stub_narrative(incident_name: str, fuel: dict, terrain: dict, canopy: dict) -> str:
-    parts = [f"[stub] Terrain & fuel summary for {incident_name}."]
+    # Deterministic summary used when no LLM is configured. (It used to be
+    # tagged "[stub]", which leaked into the IC's ICS-201 key findings.)
+    parts = [f"Terrain & fuel summary for {incident_name}."]
     if fuel.get("dominant_classes"):
         top = fuel["dominant_classes"][0]
         parts.append(
@@ -123,7 +125,7 @@ async def _haiku_narrative(
     )
 
     try:
-        client = AsyncAnthropic()
+        client = AsyncAnthropic(timeout=30.0)
         resp = await client.messages.create(
             model=LLM_MODEL,
             max_tokens=600,
@@ -237,6 +239,24 @@ async def run(state: AgentState) -> dict[str, Any]:
     flat_fuel_code = _dominant_fuel_code(fuel)
     flat_slope_pct = _slope_deg_to_pct(terrain)
     flat_aspect_deg = _dominant_aspect_deg(terrain)
+    # Name every flat key that fell back to a planning default, so spread
+    # simulation (and the IC) can tell an assumed GS2 / 15% / SW from data.
+    assumed_inputs = [
+        key
+        for key, missing in (
+            ("fuel_model", not fuel.get("dominant_classes")),
+            ("slope_pct", (terrain.get("slope_deg") or {}).get("mean") is None),
+            ("aspect_deg", not terrain.get("aspect_distribution")),
+        )
+        if missing
+    ]
+    if assumed_inputs and not model_called:
+        narrative += (
+            " LANDFIRE data unavailable for: "
+            + ", ".join(assumed_inputs)
+            + f"; downstream spread uses ASSUMED defaults ({flat_fuel_code}, "
+            f"{flat_slope_pct:.0f}% slope, aspect {flat_aspect_deg:.0f}°)."
+        )
 
     output = AgentOutput(
         agent=AGENT_NAME,
@@ -246,6 +266,7 @@ async def run(state: AgentState) -> dict[str, Any]:
             "fuel_model": flat_fuel_code,
             "slope_pct": flat_slope_pct,
             "aspect_deg": flat_aspect_deg,
+            "assumed_inputs": assumed_inputs,
             # Detailed structures for the UI / debugging.
             "bbox": list(bbox),
             "aoi_radius_km": AOI_RADIUS_KM,

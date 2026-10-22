@@ -89,7 +89,41 @@ def _nearest_point_values(ds: Any, lat: float, lon: float) -> dict[str, float | 
         except Exception:  # noqa: BLE001
             val = None
         out[canonical] = val
+        if canonical in ("wind_u_ms", "wind_v_ms"):
+            attrs = ds[var].attrs
+            if attrs.get("GRIB_uvRelativeToGrid") == 1 and attrs.get("GRIB_gridType") == "lambert":
+                out["_uv_grid"] = {
+                    "lon": float(lons_norm[idx]),
+                    "lov": float(attrs["GRIB_LoVInDegrees"]),
+                    "latin1": float(attrs["GRIB_Latin1InDegrees"]),
+                    "latin2": float(attrs["GRIB_Latin2InDegrees"]),
+                }
     return out
+
+
+def earth_relative_uv(
+    u: float, v: float, lon: float, lov: float, latin1: float, latin2: float
+) -> tuple[float, float]:
+    """Rotate Lambert-conformal grid-relative wind to true east/north.
+
+    HRRR and RTMA publish u/v along the model grid's x/y axes
+    (GRIB uvRelativeToGrid = 1, checked against the live files), not along
+    true east/north. Away from the grid's central meridian ``lov`` the grid
+    is rotated by ``n * (lon - lov)``, where ``n`` is the projection's cone
+    constant. In California that is about 14 degrees for HRRR and 10 for
+    RTMA, so skipping this step points every wind arrow 10-14 degrees off.
+    """
+    phi1, phi2 = math.radians(latin1), math.radians(latin2)
+    if abs(phi1 - phi2) < 1e-9:
+        n = math.sin(phi1)
+    else:
+        n = math.log(math.cos(phi1) / math.cos(phi2)) / math.log(
+            math.tan(math.pi / 4 + phi2 / 2) / math.tan(math.pi / 4 + phi1 / 2)
+        )
+    dlon = (lon - lov + 180.0) % 360.0 - 180.0
+    angle = n * math.radians(dlon)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    return cos_a * u + sin_a * v, -sin_a * u + cos_a * v
 
 
 def _derive(values: dict[str, float | None]) -> dict[str, float | None]:
@@ -105,6 +139,11 @@ def _derive(values: dict[str, float | None]) -> dict[str, float | None]:
     rh = values.get("rh_pct")
 
     out: dict[str, float | None] = {}
+    grid = values.get("_uv_grid")
+    if u is not None and v is not None and isinstance(grid, dict):
+        u, v = earth_relative_uv(
+            u, v, grid["lon"], grid["lov"], grid["latin1"], grid["latin2"]
+        )
     if u is not None and v is not None:
         speed_ms = math.hypot(u, v)
         out["wind_speed_mph"] = round(speed_ms * 2.2369362921, 2)
