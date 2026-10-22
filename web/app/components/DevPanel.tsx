@@ -60,18 +60,21 @@ export function DevPanel() {
 
   return (
     <>
-      {/* Launcher button — bottom-right, always visible */}
+      {/* Launcher: a small icon button in the sidebar's empty lower-left
+          corner. It used to float bottom-right, on top of the approval
+          queue's buttons and stake numbers. The top banner already says
+          "TEST MODE" when it is on. */}
       <button
         onClick={() => setOpen((v) => !v)}
-        className={`fixed bottom-4 right-4 z-40 flex h-10 items-center gap-2 rounded-full border px-3.5 text-xs font-medium shadow-lg backdrop-blur transition ${
+        className={`fixed bottom-14 left-3 z-40 flex h-8 w-8 items-center justify-center rounded-full border shadow-lg backdrop-blur transition ${
           enabled
             ? "border-amber-500/60 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25"
             : "border-smoke-600 bg-smoke-800/90 text-smoke-300 hover:bg-smoke-700"
         }`}
-        title={enabled ? "Test mode is ON" : "Open test utility"}
+        title={enabled ? "Test mode is ON: open test utility" : "Open test utility"}
+        aria-label={enabled ? "Test mode is on. Open test utility" : "Open test utility"}
       >
         <Beaker className="h-3.5 w-3.5" />
-        <span>{enabled ? "TEST MODE" : "Test Utility"}</span>
       </button>
 
       {open && (

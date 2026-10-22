@@ -9,6 +9,11 @@ import {
 
 const AGENT_SET = new Set<string>(AGENT_ORDER);
 
+/** Non-agent graph nodes whose on_chain_end carries an agent's output. */
+const NODE_OUTPUT_OWNER: Record<string, string> = {
+  iap_approval: "master_ic",
+};
+
 type StoreCtx = {
   threadId: string;
   // Chat-mode-only: track the current streaming AI message so chat_token
@@ -238,6 +243,22 @@ function handleFrame(frame: string, ctx: StoreCtx) {
       }
 
       if (!name) return;
+      // Graph nodes that publish another agent's output. The backend
+      // splits Master IC synthesis (node `master_ic`) from the IC's decision
+      // (node `iap_approval`); the decided IAP arrives from the second node
+      // as outputs.master_ic. Older backends never emit `iap_approval`, so
+      // this is a no-op for them.
+      const owner = NODE_OUTPUT_OWNER[name];
+      if (owner && kind === "on_chain_end") {
+        const data = p.data as Record<string, unknown> | undefined;
+        const output = data?.output as Record<string, unknown> | undefined;
+        const outputs = output?.outputs as
+          | Record<string, AgentOutput>
+          | undefined;
+        const ao = outputs?.[owner];
+        if (ao && typeof ao === "object") s.setAgentOutput(owner, ao);
+        return;
+      }
       if (kind === "on_chain_start" && AGENT_SET.has(name)) {
         s.setAgentStatus(name, "running");
       } else if (kind === "on_chain_end" && AGENT_SET.has(name)) {

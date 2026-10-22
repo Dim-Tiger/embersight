@@ -3,6 +3,7 @@
 import {
   AGENT_LABELS,
   type AgentStatus,
+  useAwaitingAgents,
   useStore,
 } from "@/lib/store";
 import {
@@ -10,11 +11,16 @@ import {
   AlertTriangle,
   CheckCircle2,
   CircleDashed,
+  Hand,
   Loader2,
   Sparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { stripMarkdown } from "@/app/components/Markdown";
+
+// "awaiting" = the agent's node called interrupt() and the graph is paused
+// until the IC approves, edits or rejects in the Approval queue.
+type BannerStatus = AgentStatus | "awaiting";
 
 type Props = {
   /** Ordered list of agent name keys to monitor. */
@@ -44,19 +50,25 @@ export function AgentActivityBanner({
   const events = useStore((s) => s.agentEvents);
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
   const streaming = useStore((s) => s.streaming);
+  const awaiting = useAwaitingAgents();
+  const setActiveTab = useStore((s) => s.setActiveTab);
 
-  const combined: AgentStatus = useMemo(() => {
+  const combined: BannerStatus = useMemo(() => {
     if (agents.some((a) => statuses[a] === "error")) return "error";
+    // Paused on an IC decision. Old backends leave the agent "running"
+    // (interrupt inside the node); newer ones finish the synthesis node
+    // and pause in a separate approval node, so the agent is "done".
+    if (agents.some((a) => awaiting.has(a))) return "awaiting";
     if (agents.some((a) => statuses[a] === "running")) return "running";
     if (agents.length > 0 && agents.every((a) => statuses[a] === "done"))
       return "done";
     return "pending";
-  }, [agents, statuses]);
+  }, [agents, statuses, awaiting]);
 
   // Track the moment this banner's combined status entered "running" so we
   // can show an elapsed-time counter that resets between runs.
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
-  const lastStatusRef = useRef<AgentStatus>(combined);
+  const lastStatusRef = useRef<BannerStatus>(combined);
   useEffect(() => {
     if (combined === "running" && lastStatusRef.current !== "running") {
       setRunStartedAt(Date.now());
@@ -146,6 +158,10 @@ export function AgentActivityBanner({
   // Pick a short "current focus" line: prefer the running agent's narrative
   // (if available) or the most recent ticker label.
   const currentFocus = useMemo(() => {
+    if (combined === "awaiting") {
+      const who = agents.find((a) => awaiting.has(a));
+      return `${AGENT_LABELS[who ?? ""] ?? "The agent"} is paused: its DRAFT is waiting for your decision in the Approval queue.`;
+    }
     const running = agents.find((a) => statuses[a] === "running");
     if (running) {
       const out = outputs[running];
@@ -163,7 +179,7 @@ export function AgentActivityBanner({
       return "Analysis complete.";
     }
     return null;
-  }, [agents, statuses, outputs, combined]);
+  }, [agents, statuses, outputs, combined, awaiting]);
 
   const tone = toneFor(combined);
 
@@ -186,7 +202,7 @@ export function AgentActivityBanner({
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
             <h2 className="text-sm font-semibold text-smoke-100">{title}</h2>
             {subtitle && (
-              <p className="text-[10px] uppercase tracking-widest text-smoke-500">
+              <p className="text-[10px] uppercase tracking-widest text-smoke-400">
                 {subtitle}
               </p>
             )}
@@ -209,7 +225,11 @@ export function AgentActivityBanner({
               <AgentChip
                 key={a}
                 name={a}
-                status={statuses[a] ?? "pending"}
+                status={
+                  awaiting.has(a) && statuses[a] !== "error"
+                    ? "awaiting"
+                    : (statuses[a] ?? "pending")
+                }
                 confidence={outputs[a]?.confidence}
               />
             ))}
@@ -221,9 +241,11 @@ export function AgentActivityBanner({
               className={`mt-2 text-[12px] leading-snug ${
                 combined === "running"
                   ? "text-smoke-200"
-                  : combined === "done"
-                    ? "text-smoke-300"
-                    : "text-smoke-500"
+                  : combined === "awaiting"
+                    ? "text-amber-100"
+                    : combined === "done"
+                      ? "text-smoke-300"
+                      : "text-smoke-400"
               }`}
             >
               {combined === "running" && (
@@ -232,13 +254,22 @@ export function AgentActivityBanner({
                 </span>
               )}
               {currentFocus}
+              {combined === "awaiting" && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("Operations")}
+                  className="ml-2 rounded px-1.5 py-0.5 text-[11px] font-semibold text-amber-200 underline underline-offset-2 hover:bg-amber-900/30"
+                >
+                  Open the queue
+                </button>
+              )}
             </p>
           )}
 
           {/* Live ticker */}
           {ticker.length > 0 && (
             <div className="mt-3 border-t border-smoke-700/60 pt-2">
-              <div className="mb-1 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-widest text-smoke-500">
+              <div className="mb-1 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-widest text-smoke-400">
                 <Sparkles className="h-3 w-3" />
                 Live agent activity
               </div>
@@ -256,7 +287,7 @@ export function AgentActivityBanner({
                             ? "text-emerald-400"
                             : row.tone === "error"
                               ? "text-red-400"
-                              : "text-smoke-500"
+                              : "text-smoke-400"
                       }`}
                     >
                       {row.tone === "start"
@@ -267,7 +298,7 @@ export function AgentActivityBanner({
                             ? "✕"
                             : "·"}
                     </span>
-                    <span className="text-smoke-600">
+                    <span className="text-smoke-400">
                       {new Date(row.ts).toLocaleTimeString().slice(0, 8)}
                     </span>
                     <span className="truncate text-smoke-300">{row.label}</span>
@@ -279,15 +310,17 @@ export function AgentActivityBanner({
 
           {/* Empty / idle state */}
           {!selectedIncidentId && (
-            <p className="mt-2 text-[11px] italic text-smoke-500">
+            <p className="mt-2 text-[11px] italic text-smoke-400">
               Pick an active incident to dispatch the team.
             </p>
           )}
           {selectedIncidentId &&
             combined === "pending" &&
             !streaming && (
-              <p className="mt-2 text-[11px] italic text-smoke-500">
-                Waiting for the orchestrator to fan out to specialists…
+              <p className="mt-2 text-[11px] italic text-smoke-400">
+                {awaiting.size > 0
+                  ? "Queued: runs after you decide on the pending DRAFT in the Approval queue."
+                  : "Waiting for the orchestrator to fan out to specialists…"}
               </p>
             )}
         </div>
@@ -302,10 +335,18 @@ function AgentChip({
   confidence,
 }: {
   name: string;
-  status: AgentStatus;
+  status: BannerStatus;
   confidence?: number;
 }) {
   const label = AGENT_LABELS[name] ?? name;
+  if (status === "awaiting") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-900/40 px-2 py-0.5 text-[10px] font-medium text-amber-200 ring-1 ring-amber-600/60">
+        <Hand className="h-2.5 w-2.5" />
+        {label} · awaiting approval
+      </span>
+    );
+  }
   if (status === "running") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-ember-900/40 px-2 py-0.5 text-[10px] font-medium text-ember-200 ring-1 ring-ember-700/60">
@@ -336,14 +377,21 @@ function AgentChip({
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-smoke-800 px-2 py-0.5 text-[10px] font-medium text-smoke-500 ring-1 ring-smoke-700">
+    <span className="inline-flex items-center gap-1 rounded-full bg-smoke-800 px-2 py-0.5 text-[10px] font-medium text-smoke-400 ring-1 ring-smoke-700">
       <CircleDashed className="h-2.5 w-2.5" />
       {label}
     </span>
   );
 }
 
-function CombinedBadge({ status }: { status: AgentStatus }) {
+function CombinedBadge({ status }: { status: BannerStatus }) {
+  if (status === "awaiting")
+    return (
+      <span className="flex items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black">
+        <Hand className="h-3 w-3" />
+        awaiting IC
+      </span>
+    );
   if (status === "running")
     return (
       <span className="flex items-center gap-1 rounded bg-ember-600/90 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white">
@@ -401,7 +449,7 @@ function ShimmerOverlay() {
   );
 }
 
-function toneFor(status: AgentStatus): {
+function toneFor(status: BannerStatus): {
   border: string;
   bg: string;
   iconBg: string;
@@ -413,6 +461,14 @@ function toneFor(status: AgentStatus): {
       bg: "bg-gradient-to-br from-ember-900/30 via-smoke-800/40 to-smoke-800/60",
       iconBg: "bg-ember-900/60",
       iconColor: "text-ember-300",
+    };
+  }
+  if (status === "awaiting") {
+    return {
+      border: "border-amber-600/60",
+      bg: "bg-amber-900/15",
+      iconBg: "bg-amber-900/50",
+      iconColor: "text-amber-300",
     };
   }
   if (status === "done") {

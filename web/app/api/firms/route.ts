@@ -70,10 +70,15 @@ function parseCsv(text: string): FirmsFeature[] {
 export async function GET(req: Request) {
   const key = process.env.FIRMS_MAP_KEY;
   if (!key) {
-    return NextResponse.json(
-      { error: "FIRMS_MAP_KEY not set" },
-      { status: 503 },
-    );
+    // A missing key is a configuration state, not a server fault: answer
+    // 200 with an empty collection and say why, so the browser console
+    // stays clean and the legend can read "unavailable" instead of
+    // implying there are zero hotspots in California.
+    return NextResponse.json({
+      type: "FeatureCollection",
+      features: [],
+      unavailable: "FIRMS_MAP_KEY not set",
+    });
   }
 
   const { searchParams } = new URL(req.url);

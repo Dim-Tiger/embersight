@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { create } from "zustand";
 
 import { INFRA_LAYERS } from "@/lib/infraLayers";
@@ -183,7 +184,7 @@ export type Store = {
   appendChat: (m: ChatMessage) => void;
   setPendingUserQuery: (q: string | null) => void;
   upsertInterrupt: (i: PendingInterrupt) => void;
-  removeInterrupt: (id?: string) => void;
+  removeInterrupt: (id?: string, threadId?: string) => void;
   toggleInfra: (id: string) => void;
   setInfra: (id: string, on: boolean) => void;
   acceptEvacZone: (zone: AcceptedEvacZone) => void;
@@ -347,10 +348,16 @@ export const useStore = create<Store>((set) => ({
     set((s) => ({
       infraVisibility: { ...s.infraVisibility, [id]: on },
     })),
-  removeInterrupt: (id) =>
+  // Match on thread AND id: interrupts without an id would otherwise all
+  // match `undefined` and one approval would clear every such card.
+  removeInterrupt: (id, threadId) =>
     set((s) => ({
       pendingInterrupts: s.pendingInterrupts.filter(
-        (x) => x.interrupt.id !== id,
+        (x) =>
+          !(
+            x.interrupt.id === id &&
+            (threadId == null || x.thread_id === threadId)
+          ),
       ),
     })),
   acceptEvacZone: (zone) =>
@@ -442,6 +449,40 @@ export const AGENT_ORDER = [
 ] as const;
 
 export type AgentName = (typeof AGENT_ORDER)[number];
+
+/** Which agent pauses the graph for each interrupt type. */
+export const INTERRUPT_AGENT: Record<
+  PendingInterrupt["interrupt"]["type"],
+  AgentName
+> = {
+  iap_approval: "master_ic",
+  resource_recommendation: "resource_recommendation",
+  evac_zone_change: "evacuation_intelligence",
+  trigger_point_violation: "spread_simulation",
+};
+
+/**
+ * Agents that are paused on a human decision: every agent that owns a
+ * pending interrupt, once the stream has closed. Two backend shapes lead
+ * here. Older graphs call interrupt() inside the agent's node, so LangGraph
+ * emits on_chain_start and never on_chain_end and the status stays
+ * "running". Newer graphs finish the agent's node (master_ic reports
+ * decision "pending_ic_approval") and pause in a separate approval node.
+ * Either way the UI should say "awaiting your approval", not spin or show
+ * "done".
+ */
+export function useAwaitingAgents(): ReadonlySet<string> {
+  // Select a primitive so the hook only re-renders when the answer changes.
+  const key = useStore((s) => {
+    if (s.streaming) return "";
+    return s.pendingInterrupts
+      .map((p) => INTERRUPT_AGENT[p.interrupt.type])
+      .filter(Boolean)
+      .sort()
+      .join(",");
+  });
+  return useMemo(() => new Set(key ? key.split(",") : []), [key]);
+}
 
 export const AGENT_LABELS: Record<string, string> = {
   orchestrator: "Orchestrator",

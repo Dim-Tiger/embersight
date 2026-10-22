@@ -23,6 +23,21 @@ export function AgentCard({
   // Surface that instead of the generic "Waiting for the agent to start…" copy.
   const streamError = useStore((s) => s.errorMessage);
   const hasStreamError = status === "pending" && !!streamError;
+  // Once the stream has closed nothing is executing: an agent still marked
+  // "running" is paused on interrupt(), and one still "pending" is queued
+  // behind that decision. Say so rather than showing a spinner forever.
+  const paused = useStore(
+    (s) => !s.streaming && s.pendingInterrupts.length > 0,
+  );
+  // Old backends: the node is still "running" inside interrupt(). New
+  // backends: the synthesis node finished with decision
+  // "pending_ic_approval" and a separate node waits for the IC.
+  const awaiting =
+    paused &&
+    (status === "running" ||
+      (output?.payload as { decision?: string } | undefined)?.decision ===
+        "pending_ic_approval");
+  const queued = paused && status === "pending" && !hasStreamError;
   return (
     <section className="rounded-md border border-smoke-700 bg-smoke-800/40">
       <header className="flex items-center justify-between border-b border-smoke-700 px-4 py-2">
@@ -33,7 +48,11 @@ export function AgentCard({
           )}
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge status={status} streamError={hasStreamError} />
+          <StatusBadge
+            status={status}
+            streamError={hasStreamError}
+            awaiting={awaiting}
+          />
           {output?.confidence != null && status === "done" && (
             <span className="rounded bg-ember-900/40 px-2 py-0.5 text-[10px] font-semibold text-ember-200 ring-1 ring-ember-800/60">
               {Math.round(output.confidence * 100)}% conf
@@ -53,18 +72,30 @@ export function AgentCard({
               {streamError}
             </div>
             <div className="mt-1 text-[10px] text-red-300/70">
-              Use &ldquo;Re-run stream&rdquo; in the Agent activity panel once the service is back.
+              Use &ldquo;Re-brief&rdquo; in the Agent activity panel once the service is back.
             </div>
           </div>
         )}
-        {status === "pending" && !hasStreamError && (
-          <p className="text-[11px] italic text-smoke-500">
+        {queued && (
+          <p className="text-[11px] italic text-smoke-400">
+            Queued: this agent runs after you decide on the pending DRAFT in
+            the Approval queue.
+          </p>
+        )}
+        {status === "pending" && !hasStreamError && !queued && (
+          <p className="text-[11px] italic text-smoke-400">
             Waiting for the agent to start. Pick an incident and the team runs
             automatically.
           </p>
         )}
-        {status === "running" && !output && <RunningSkeleton />}
-        {status === "running" && output && (
+        {awaiting && (
+          <p className="text-[11px] text-amber-200">
+            Paused: this agent&apos;s DRAFT is waiting for your approval in the
+            Approval queue.
+          </p>
+        )}
+        {status === "running" && !awaiting && !output && <RunningSkeleton />}
+        {status === "running" && !awaiting && output && (
           <div className="flex items-center gap-1.5 text-[11px] text-ember-300">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ember-400" />
             Streaming new findings…
@@ -85,7 +116,7 @@ export function AgentCard({
               </Markdown>
             )}
             {output.confidence_driver && (
-              <p className="text-[10px] text-smoke-500">
+              <p className="text-[10px] text-smoke-400">
                 Confidence driver: {output.confidence_driver}
               </p>
             )}
@@ -93,7 +124,7 @@ export function AgentCard({
             {output.citation_bundle?.datasets &&
               output.citation_bundle.datasets.length > 0 && (
                 <details className="text-[10px] text-smoke-400">
-                  <summary className="cursor-pointer text-smoke-500">
+                  <summary className="cursor-pointer text-smoke-400">
                     Citations · {output.citation_bundle.datasets.length} sources
                   </summary>
                   <ul className="mt-1 space-y-0.5 pl-3">
@@ -112,7 +143,7 @@ export function AgentCard({
                           d.name || "(unnamed)"
                         )}
                         {d.version ? (
-                          <span className="text-smoke-500"> · {d.version}</span>
+                          <span className="text-smoke-400"> · {d.version}</span>
                         ) : null}
                       </li>
                     ))}
@@ -139,14 +170,14 @@ export function MetricGrid({
           key={it.label}
           className="rounded border border-smoke-700 bg-smoke-900/60 px-3 py-2"
         >
-          <div className="text-[9px] uppercase tracking-widest text-smoke-500">
+          <div className="text-[9px] uppercase tracking-widest text-smoke-400">
             {it.label}
           </div>
           <div className="mt-0.5 text-base font-semibold text-smoke-100">
             {it.value}
           </div>
           {it.hint && (
-            <div className="text-[10px] text-smoke-500">{it.hint}</div>
+            <div className="text-[10px] text-smoke-400">{it.hint}</div>
           )}
         </div>
       ))}
@@ -176,10 +207,19 @@ export function KeyFindings({ items }: { items: string[] }) {
 function StatusBadge({
   status,
   streamError,
+  awaiting,
 }: {
   status: AgentStatus;
   streamError?: boolean;
+  awaiting?: boolean;
 }) {
+  if (awaiting) {
+    return (
+      <span className="flex items-center gap-1 rounded bg-amber-900/40 px-2 py-0.5 text-[10px] font-medium text-amber-200">
+        awaiting approval
+      </span>
+    );
+  }
   if (status === "running") {
     return (
       <span className="flex items-center gap-1 rounded bg-ember-900/40 px-2 py-0.5 text-[10px] font-medium text-ember-200">

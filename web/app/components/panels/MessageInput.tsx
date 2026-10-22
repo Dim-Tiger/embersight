@@ -25,13 +25,16 @@ export function MessageInput() {
     await sendMessage(incident, q);
   }
 
+  // Kept short: the input is ~240 px wide in the 360 px ops column, and the
+  // old "Briefing in progress — the IC will be available momentarily…" was
+  // cut off mid-word.
   const placeholder = !incident
     ? "Select an incident to begin"
     : !briefingComplete
-      ? "Briefing in progress — the IC will be available momentarily…"
+      ? "Chat opens after the briefing…"
       : streaming
         ? "IC is responding…"
-        : `Talk to the AI IC about ${incident.name}`;
+        : `Ask the IC about ${incident.name}`;
 
   return (
     <form
@@ -45,8 +48,10 @@ export function MessageInput() {
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         placeholder={placeholder}
+        title={placeholder}
+        aria-label="Message to the AI Master IC"
         disabled={!incident || streaming || !briefingComplete}
-        className="flex-1 rounded bg-smoke-900 px-3 py-1.5 text-xs text-smoke-200 placeholder:text-smoke-500 focus:outline-none focus:ring-1 focus:ring-ember-500 disabled:opacity-50"
+        className="flex-1 rounded bg-smoke-900 px-3 py-1.5 text-xs text-smoke-200 placeholder:text-smoke-400 focus:outline-none focus:ring-1 focus:ring-ember-500 disabled:opacity-50"
       />
       <button
         type="submit"

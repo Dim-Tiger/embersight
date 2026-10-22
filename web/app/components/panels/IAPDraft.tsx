@@ -1,17 +1,22 @@
 "use client";
 
-import { postResume } from "@/lib/queries";
 import { useStore } from "@/lib/store";
 import { FileText } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Markdown } from "@/app/components/Markdown";
 import { AgentActivityBanner } from "./AgentActivityBanner";
+import { DecisionControls } from "./ApprovalQueue";
 
+// The Master IC sends `sections` as an object keyed by ICS field
+// (incident_name, current_situation, planned_actions, current_org_chart...
+// or ics_202/ics_203/ics_204... for the op-period-2 bundle). The array form
+// is kept for older drafts.
 type Draft = {
   form?: string;
   operational_period?: number;
   objectives?: string[];
-  sections?: Array<{ title?: string; body?: string }>;
+  sections?: Array<{ title?: string; body?: string }> | Record<string, unknown>;
+  dissent_log_acknowledgment?: string[];
   assignments?: Array<{
     division?: string;
     resources?: string[];
@@ -33,11 +38,28 @@ type Draft = {
   }>;
 };
 
+/** One row of the Master IC's dissent log (interrupt payload / output). */
+export type DissentEntry = {
+  source_agent?: string;
+  conflicting_agent?: string | null;
+  claim_a?: string;
+  claim_b?: string;
+  severity?: "low" | "medium" | "high" | string;
+  rationale?: string;
+};
+
+type ResourceDraftLine = {
+  kind?: string;
+  type?: string;
+  quantity?: number;
+  arrival_window?: string;
+};
+
 export function IAPDraft() {
   const pending = useStore((s) => s.pendingInterrupts);
   const masterOut = useStore((s) => s.agentOutputs.master_ic);
-  const remove = useStore((s) => s.removeInterrupt);
   const streamError = useStore((s) => s.errorMessage);
+  const streaming = useStore((s) => s.streaming);
 
   const view = useMemo(() => {
     const fromInterrupt = pending.find(
@@ -50,36 +72,31 @@ export function IAPDraft() {
       const draft = (payload.draft as Draft | undefined) ?? null;
       return {
         draft,
+        dissent: (payload.dissent_log as DissentEntry[] | undefined) ?? [],
         pending: true,
-        threadId: fromInterrupt.thread_id,
-        interruptId: fromInterrupt.interrupt.id,
+        item: fromInterrupt,
         confidence: (payload.confidence as number | undefined) ?? null,
+        decision: "pending_ic_approval",
+        resourceDraft:
+          (payload.resource_request_draft as ResourceDraftLine[] | undefined) ??
+          [],
       } as const;
     }
-    const committed = (masterOut?.payload as Record<string, unknown> | undefined)?.[
-      "iap_draft"
-    ] as Draft | undefined;
+    const out = (masterOut?.payload ?? {}) as Record<string, unknown>;
+    const committed = out.iap_draft as Draft | undefined;
     return {
-      draft: committed ?? null,
+      // A rejected draft comes back as {}: treat it as "no draft".
+      draft: committed && Object.keys(committed).length ? committed : null,
+      dissent: (out.dissent_log as DissentEntry[] | undefined) ?? [],
       pending: false,
-      threadId: null,
-      interruptId: null,
+      item: null,
       confidence: masterOut?.confidence ?? null,
+      // approved | edited | rejected | pending_ic_approval (newer backends
+      // publish the synthesis before the IC decides).
+      decision: typeof out.decision === "string" ? out.decision : null,
+      resourceDraft: [] as ResourceDraftLine[],
     } as const;
   }, [pending, masterOut]);
-
-  const [busy, setBusy] = useState(false);
-
-  async function respond(decision: "approved" | "edited" | "rejected") {
-    if (!view.threadId) return;
-    setBusy(true);
-    try {
-      await postResume(view.threadId, { decision, actor: "ic@example.com" });
-      remove(view.interruptId ?? undefined);
-    } finally {
-      setBusy(false);
-    }
-  }
 
   const draft = view.draft;
 
@@ -88,11 +105,11 @@ export function IAPDraft() {
       <div className="mx-auto max-w-3xl space-y-4">
         <header>
           <h2 className="text-xl font-semibold text-smoke-200">
-            Incident Action Plan — draft
+            Incident Action Plan
           </h2>
           <p className="text-xs text-smoke-400">
-            ICS 201 → 202 → 204 → 215 → 215A. Every form is{" "}
-            <span className="text-ember-200">pending IC approval</span>.
+            ICS 201 → 202 → 204 → 215 → 215A. Every form starts as a{" "}
+            <span className="text-ember-200">DRAFT pending IC approval</span>.
             EmberSight only proposes; the human IC signs.
           </p>
         </header>
@@ -104,37 +121,29 @@ export function IAPDraft() {
           icon={<FileText className="h-5 w-5" />}
         />
 
-        {view.pending && (
-          <div className="flex items-center justify-between rounded border border-ember-700/60 bg-ember-900/30 px-3 py-2 text-xs text-ember-200">
-            <span>
-              ⚠ Pending IC approval
+        {view.pending && view.item && (
+          <div className="rounded border border-ember-700/60 bg-ember-900/20 px-3 py-2">
+            <div className="text-xs font-semibold text-ember-200">
+              DRAFT pending your approval
               {view.confidence != null
                 ? ` · synthesis confidence ${Math.round(view.confidence * 100)}%`
                 : ""}
-            </span>
-            <div className="flex gap-1.5">
-              <ActionButton
-                disabled={busy}
-                onClick={() => respond("approved")}
-                variant="primary"
-              >
-                Approve
-              </ActionButton>
-              <ActionButton
-                disabled={busy}
-                onClick={() => respond("edited")}
-              >
-                Edit
-              </ActionButton>
-              <ActionButton
-                disabled={busy}
-                onClick={() => respond("rejected")}
-                variant="danger"
-              >
-                Reject
-              </ActionButton>
             </div>
+            {/* The whole form is on screen here, so it counts as reviewed. */}
+            <DecisionControls item={view.item} reviewed />
           </div>
+        )}
+
+        {!view.pending &&
+          view.decision &&
+          // The interrupt arrives just after the synthesis ends; don't flash
+          // "no request open" while the stream is still running.
+          !(view.decision === "pending_ic_approval" && streaming) && (
+            <DecisionStatus decision={view.decision} />
+          )}
+
+        {view.resourceDraft.length > 0 && (
+          <ResourceDraft lines={view.resourceDraft} />
         )}
 
         {!draft && streamError ? (
@@ -149,20 +158,29 @@ export function IAPDraft() {
               once the service is back.
             </div>
           </div>
-        ) : !draft ? (
+        ) : !draft && view.decision === "rejected" ? null : !draft ? (
           <div className="rounded border border-dashed border-smoke-700 px-3 py-6 text-center text-xs text-smoke-400">
             No IAP draft yet. Start an agent run by selecting an incident — the
             Master IC drafts the form after the seven subagents finish.
           </div>
         ) : (
-          <FormView draft={draft} />
+          <FormView draft={draft} dissent={view.dissent} />
         )}
       </div>
     </div>
   );
 }
 
-function FormView({ draft }: { draft: Draft }) {
+function FormView({
+  draft,
+  dissent,
+}: {
+  draft: Draft;
+  dissent: DissentEntry[];
+}) {
+  const sectionList = Array.isArray(draft.sections) ? draft.sections : null;
+  const sectionMap =
+    draft.sections && !Array.isArray(draft.sections) ? draft.sections : null;
   return (
     <article className="space-y-4 rounded-md border border-smoke-700 bg-smoke-800/40 p-5">
       <header className="border-b border-smoke-700 pb-3">
@@ -176,7 +194,7 @@ function FormView({ draft }: { draft: Draft }) {
             </span>
           )}
         </div>
-        <div className="mt-1 flex gap-3 text-[10px] text-smoke-500">
+        <div className="mt-1 flex gap-3 text-[10px] text-smoke-400">
           {draft.status && <span>status: {draft.status}</span>}
           {draft.synthesis_mode && <span>mode: {draft.synthesis_mode}</span>}
           {draft.drafted_at && (
@@ -184,6 +202,8 @@ function FormView({ draft }: { draft: Draft }) {
           )}
         </div>
       </header>
+
+      <DissentLog entries={dissent} />
 
       {draft.objectives && draft.objectives.length > 0 && (
         <section>
@@ -211,9 +231,22 @@ function FormView({ draft }: { draft: Draft }) {
         </section>
       )}
 
-      {draft.sections && draft.sections.length > 0 && (
+      {sectionMap && (
         <section className="space-y-3">
-          {draft.sections.map((s, i) => (
+          {Object.entries(sectionMap).map(([key, value]) => (
+            <div key={key}>
+              <h4 className="mb-0.5 text-[11px] font-semibold uppercase tracking-widest text-smoke-400">
+                {humanize(key)}
+              </h4>
+              <SectionValue value={value} />
+            </div>
+          ))}
+        </section>
+      )}
+
+      {sectionList && sectionList.length > 0 && (
+        <section className="space-y-3">
+          {sectionList.map((s, i) => (
             <div key={i}>
               <h4 className="mb-0.5 text-[11px] font-semibold uppercase tracking-widest text-smoke-400">
                 {s.title}
@@ -255,7 +288,7 @@ function FormView({ draft }: { draft: Draft }) {
                   </Markdown>
                 )}
                 {a.special_instructions && (
-                  <Markdown className="mt-1 text-[11px] italic text-smoke-500">
+                  <Markdown className="mt-1 text-[11px] italic text-smoke-400">
                     {a.special_instructions}
                   </Markdown>
                 )}
@@ -296,7 +329,7 @@ function FormView({ draft }: { draft: Draft }) {
                   <Markdown className="text-smoke-300">{d.concern}</Markdown>
                 )}
                 {d.rationale && (
-                  <Markdown className="text-smoke-500">{d.rationale}</Markdown>
+                  <Markdown className="text-smoke-400">{d.rationale}</Markdown>
                 )}
               </li>
             ))}
@@ -307,30 +340,170 @@ function FormView({ draft }: { draft: Draft }) {
   );
 }
 
-function ActionButton({
-  children,
-  onClick,
-  disabled,
-  variant = "default",
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  variant?: "default" | "primary" | "danger";
-}) {
-  const styles =
-    variant === "primary"
-      ? "bg-ember-600 hover:bg-ember-500 text-white"
-      : variant === "danger"
-        ? "bg-smoke-800 hover:bg-red-900 text-smoke-200"
-        : "bg-smoke-800 hover:bg-smoke-700 text-smoke-200";
+const SEVERITY_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+
+/**
+ * The Master IC's own list of gaps and low-confidence inputs. It is the
+ * evidence the IC most needs before signing, so it renders above the form
+ * body, high severity first.
+ */
+export function DissentLog({ entries }: { entries: DissentEntry[] }) {
+  if (!entries.length) return null;
+  const sorted = [...entries].sort(
+    (a, b) =>
+      (SEVERITY_RANK[a.severity ?? ""] ?? 3) -
+      (SEVERITY_RANK[b.severity ?? ""] ?? 3),
+  );
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`rounded px-2 py-0.5 text-[11px] font-semibold transition-colors disabled:opacity-50 ${styles}`}
-    >
-      {children}
-    </button>
+    <section className="rounded border border-red-700/40 bg-red-900/10 p-3">
+      <h4 className="text-[11px] font-semibold uppercase tracking-widest text-red-300">
+        Dissent log · {entries.length} · read before signing
+      </h4>
+      <ul className="mt-1.5 space-y-1.5 text-[12px]">
+        {sorted.map((d, i) => (
+          <li key={i} className="flex gap-2">
+            <span
+              className={`mt-0.5 h-fit flex-shrink-0 rounded px-1.5 py-px text-[9px] font-bold uppercase tracking-wider ${
+                d.severity === "high"
+                  ? "bg-red-700 text-white"
+                  : d.severity === "medium"
+                    ? "bg-amber-600 text-white"
+                    : "bg-smoke-700 text-smoke-200"
+              }`}
+            >
+              {d.severity ?? "note"}
+            </span>
+            <div className="min-w-0">
+              <span className="font-semibold text-smoke-200">
+                {humanize(d.source_agent ?? "agent")}
+              </span>
+              {d.claim_a && (
+                <span className="text-smoke-300"> · {d.claim_a}</span>
+              )}
+              {d.rationale && (
+                <div className="text-[11px] text-smoke-400">{d.rationale}</div>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** "current_org_chart" → "Current org chart"; "ics_204" → "ICS 204". */
+function humanize(key: string): string {
+  const s = key.replace(/_/g, " ").trim();
+  if (/^ics \d/i.test(s)) return s.toUpperCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Renders one ICS section value: text, list, or nested fields. */
+function SectionValue({ value }: { value: unknown }) {
+  if (value == null || value === "") {
+    return <span className="text-[12px] italic text-smoke-400">—</span>;
+  }
+  if (typeof value === "string" || typeof value === "number") {
+    return (
+      <Markdown className="text-[12px] leading-relaxed text-smoke-200">
+        {String(value)}
+      </Markdown>
+    );
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return <span className="text-[12px] italic text-smoke-400">none</span>;
+    }
+    return (
+      <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-smoke-200">
+        {value.map((v, i) => (
+          <li key={i}>
+            {typeof v === "object" && v !== null ? (
+              <SectionValue value={v} />
+            ) : (
+              <Markdown inline>{String(v)}</Markdown>
+            )}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  if (typeof value === "object") {
+    return (
+      <dl className="grid grid-cols-[minmax(0,10rem)_1fr] gap-x-3 gap-y-0.5 text-[12px]">
+        {Object.entries(value as Record<string, unknown>).map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="text-smoke-400">{humanize(k)}</dt>
+            <dd className="min-w-0 text-smoke-200">
+              <SectionValue value={v} />
+            </dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
+  return <span className="text-[12px] text-smoke-200">{String(value)}</span>;
+}
+
+/** What happened to the IAP after the IC's decision (or that it is waiting). */
+function DecisionStatus({ decision }: { decision: string }) {
+  const map: Record<string, { text: string; cls: string }> = {
+    approved: {
+      text: "Approved by the IC. This is the signed ICS form.",
+      cls: "border-emerald-700/50 bg-emerald-900/20 text-emerald-200",
+    },
+    edited: {
+      text: "Approved with the IC's edits.",
+      cls: "border-emerald-700/50 bg-emerald-900/20 text-emerald-200",
+    },
+    rejected: {
+      text: "Rejected by the IC. Re-brief to get a new DRAFT.",
+      cls: "border-red-700/50 bg-red-900/20 text-red-200",
+    },
+    pending_ic_approval: {
+      text: "DRAFT waiting for an IC decision, but no approval request is open. Re-brief to get one.",
+      cls: "border-amber-600/50 bg-amber-900/20 text-amber-200",
+    },
+  };
+  const m = map[decision];
+  if (!m) return null;
+  return (
+    <div className={`rounded border px-3 py-2 text-xs font-medium ${m.cls}`}>
+      {m.text}
+    </div>
+  );
+}
+
+/**
+ * The Resource Recommendation agent's DRAFT, carried inside the IAP request
+ * so the IC reviews it with the plan. Read-only here: it is a proposal, and
+ * nothing is ordered or dispatched by approving the IAP.
+ */
+function ResourceDraft({ lines }: { lines: ResourceDraftLine[] }) {
+  const total = lines.reduce((s, l) => s + (l.quantity ?? 0), 0);
+  return (
+    <section className="rounded border border-smoke-700 bg-smoke-800/40 p-3">
+      <h4 className="text-[11px] font-semibold uppercase tracking-widest text-ember-300">
+        Resource DRAFT with this IAP · {total} units RECOMMENDED
+      </h4>
+      <ul className="mt-1.5 grid grid-cols-1 gap-x-4 gap-y-0.5 text-[12px] text-smoke-200 sm:grid-cols-2">
+        {lines
+          .filter((l) => (l.quantity ?? 0) > 0)
+          .map((l, i) => (
+            <li key={i} className="flex justify-between gap-2">
+              <span>
+                {l.quantity} × {l.type}
+              </span>
+              {l.arrival_window && (
+                <span className="text-smoke-400">{l.arrival_window}</span>
+              )}
+            </li>
+          ))}
+      </ul>
+      <p className="mt-1.5 text-[10px] text-smoke-400">
+        Proposal only. Approving the IAP records your decision; EmberSight
+        never orders or dispatches resources.
+      </p>
+    </section>
   );
 }

@@ -17,6 +17,7 @@ import {
 import { useInfraLayers } from "@/lib/infraQueries";
 import { useStore } from "@/lib/store";
 import { useTestMode } from "@/lib/testMode";
+import { cardinal, formatWind } from "@/lib/units";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import maplibregl from "maplibre-gl";
 import { WindParticleLayer, generateWindTexture } from "maplibre-gl-wind";
@@ -172,10 +173,12 @@ function renderInfraIcon(
   return { width: size, height: size, data: imageData.data };
 }
 
+// Counts can be null when a source layer failed ("unavailable", not zero).
 type ConeImpact = {
-  population_estimate?: number;
-  residential_count?: number;
-  structures_total?: number;
+  population_estimate?: number | null;
+  population_method?: "residential_structures" | "area_density_estimate" | string;
+  residential_count?: number | null;
+  structures_total?: number | null;
   hospitals_count?: number;
   hospitals_total_beds?: number;
   schools_count?: number;
@@ -213,7 +216,7 @@ export function IncidentMap() {
   const [showRoutes, setShowRoutes] = useState(true);
   const [basemap, setBasemap] = useState<Basemap>("dark");
   const [showCone, setShowCone] = useState(true);
-  const [legendCollapsed, setLegendCollapsed] = useState(false);
+  const [legendCollapsed, setLegendCollapsed] = useState(true);
   const [windLowZoom, setWindLowZoom] = useState(
     () => useStore.getState().mapViewport.zoom < WIND_LOW_ZOOM_THRESHOLD,
   );
@@ -351,6 +354,9 @@ export function IncidentMap() {
       // so the map only resizes once per animation frame, never inside
       // a reentrant call.
       trackResize: false,
+      // Compact (ⓘ) attribution: the full credit line wrapped to two rows
+      // at 1024-1280 px and ran under the legend. Credits stay one click away.
+      attributionControl: { compact: true },
     });
 
     // Our own debounced resize observer. Coalesces multiple
@@ -572,6 +578,18 @@ export function IncidentMap() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIncidentId]);
 
+  // While the legend is open it covers ~260 px on the left of the map, so
+  // shift the map's centre (where the selected fire sits) to the right of
+  // it. Camera padding persists, so later flyTo calls respect it too.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    map.easeTo({
+      padding: { left: legendCollapsed ? 0 : 260, top: 0, right: 0, bottom: 0 },
+      duration: 300,
+    });
+  }, [legendCollapsed, mapLoaded]);
+
   // Enable the perimeter session whenever a fire is (re-)selected.
   useEffect(() => {
     setPerimeterEnabled(!!selectedIncidentId);
@@ -664,8 +682,8 @@ export function IncidentMap() {
         .setLngLat(coords)
         .setHTML(
           `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid rgba(249,115,22,0.4)">
-            <strong style="color:#fb923c">${props.name}</strong><br/>
-            ${props.acres?.toLocaleString() ?? "?"} ac &middot; ${props.contained_pct ?? "?"}% contained
+            <strong style="color:#fb923c">${escapeHtml(String(props.name))}</strong><br/>
+            ${props.acres ? (props.acres < 1 ? "&lt;1" : Math.round(props.acres).toLocaleString()) : "?"} ac &middot; ${props.contained_pct ?? "?"}% contained
           </div>`,
         )
         .addTo(map);
@@ -1927,7 +1945,7 @@ export function IncidentMap() {
       "display:flex;flex-direction:column;align-items:center;gap:2px;pointer-events:none;font:600 10px ui-sans-serif,system-ui;color:#f1f5f9;";
     el.innerHTML = `
       <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.6);border-radius:999px;padding:2px 8px;backdrop-filter:blur(4px);white-space:nowrap;">
-        wind ${speedMs.toFixed(1)} m/s → ${Math.round(toDeg)}°
+        wind ${formatWind(speedMs, fromDeg)}
       </div>
       <svg width="42" height="42" viewBox="-21 -21 42 42" style="transform:rotate(${toDeg}deg);filter:drop-shadow(0 0 4px rgba(0,0,0,0.6));">
         <path d="M 0 -16 L 6 8 L 0 4 L -6 8 Z" fill="#38bdf8" stroke="#0c1220" stroke-width="1.5" stroke-linejoin="round" />
@@ -2130,6 +2148,8 @@ export function IncidentMap() {
         wind={wind}
         evacCount={evacFiltered?.features.length ?? 0}
         firmsCount={firms?.features?.length ?? 0}
+        firmsUnavailable={firms?.unavailable ?? null}
+        routingDone={!!routingOutput}
         ingressCount={routingOutput?.payload?.primary_routes?.length ?? 0}
         egressCount={routingOutput?.payload?.egress_routes?.length ?? 0}
         infraVisibility={infraVisibility}
@@ -2306,6 +2326,14 @@ function buildPerimeterCone(
   return { type: "Polygon", coordinates: [convexHull(swept)] };
 }
 
+/** Local clock time ("2:05 PM") for a feed timestamp, or "" if unparseable. */
+function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
 function fmtInt(n: number | undefined | null): string {
   if (n == null || !Number.isFinite(n)) return "—";
   return Math.round(n).toLocaleString();
@@ -2335,11 +2363,34 @@ function renderConeLabel(impact: ConeImpact | null): string {
         24h spread cone
       </div>
       <div style="font-weight:700;font-size:14px;color:#fff">
-        ~${fmtInt(impact.population_estimate)} people
+        ${
+          impact.population_estimate == null
+            ? "people: unavailable"
+            : `~${fmtInt(impact.population_estimate)} people`
+        }
+      </div>
+      <div style="font-size:10px;opacity:0.75">
+        ${
+          // The agent says how it counted people: from residences in the
+          // cone, or (when the structure layer failed) a rough area
+          // estimate that must not read like a census.
+          impact.population_method === "area_density_estimate"
+            ? "rough estimate from area (structures unavailable)"
+            : impact.population_method === "residential_structures"
+              ? "from residences in the cone × 2.5"
+              : ""
+        }
       </div>
       <div style="border-top:1px solid rgba(240,171,252,0.3);margin:5px 0 4px 0"></div>
       <div>🏠 ${fmtInt(impact.residential_count)} residences
-        <span style="opacity:0.65">/ ${fmtInt(impact.structures_total)} total</span>
+        ${
+          // The structures query can be capped upstream, which produced
+          // "2,659 residences / 2,000 total". Only show a total that is
+          // at least the residential count.
+          (impact.structures_total ?? 0) >= (impact.residential_count ?? 0)
+            ? `<span style="opacity:0.65">/ ${fmtInt(impact.structures_total)} total</span>`
+            : ""
+        }
       </div>
       <div>🏥 ${fmtInt(impact.hospitals_count)} hospitals
         <span style="opacity:0.65">(${fmtInt(impact.hospitals_total_beds)} beds)</span>
@@ -2436,7 +2487,7 @@ function buildStagingPopupHtml(
       : "";
   const windLine =
     wind && wind.from_deg != null
-      ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">wind from ${Number(wind.from_deg).toFixed(0)}°${wind.speed_mph != null ? ` @ ${Number(wind.speed_mph).toFixed(0)} mph` : ""}</div>`
+      ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">wind from ${cardinal(Number(wind.from_deg))} (${Number(wind.from_deg).toFixed(0)}°)${wind.speed_mph != null ? ` @ ${Number(wind.speed_mph).toFixed(0)} mph` : ""}</div>`
       : "";
   return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:8px 10px;border-radius:6px;border:1px solid #22c55e66;min-width:220px">
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
@@ -2556,6 +2607,8 @@ function Legend({
   wind,
   evacCount,
   firmsCount,
+  firmsUnavailable,
+  routingDone,
   ingressCount,
   egressCount,
   infraVisibility,
@@ -2582,6 +2635,8 @@ function Legend({
   wind: WindGrid | undefined;
   evacCount: number;
   firmsCount: number;
+  firmsUnavailable: string | null;
+  routingDone: boolean;
   ingressCount: number;
   egressCount: number;
   infraVisibility: Record<string, boolean>;
@@ -2598,14 +2653,26 @@ function Legend({
     // z-50 + isolate keeps the legend above the deck.gl wind overlay canvas,
     // which paints inside the maplibre container and would otherwise overlap
     // any sibling at z-20.
-    <div className="absolute bottom-3 left-3 z-50 isolate max-w-[260px] rounded-md bg-smoke-800/90 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
+    // Collapsed by default: open, it is ~700 px tall and used to cover the
+    // lower-left of the map, including the selected fire's popup. When
+    // open it scrolls inside the map instead of overflowing it, and the map
+    // pads its centre to the right (see the legend padding effect).
+    <div className="absolute bottom-3 left-3 z-50 isolate flex max-h-[calc(100%-1.5rem)] w-[248px] flex-col rounded-md bg-smoke-800/95 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
       <button
         type="button"
         onClick={() => setCollapsed(!collapsed)}
-        className="flex w-full items-center justify-between gap-2 rounded-t-md px-3 py-2 text-left text-smoke-200 hover:bg-smoke-700/60"
+        className="flex w-full flex-shrink-0 items-center justify-between gap-2 rounded-t-md px-3 py-2 text-left text-smoke-200 hover:bg-smoke-700/60"
         aria-expanded={!collapsed}
+        aria-controls="map-legend-body"
       >
-        <span className="font-semibold">Legend</span>
+        <span className="min-w-0">
+          <span className="block font-semibold">Legend &amp; layers</span>
+          {collapsed && center && (
+            <span className="block truncate text-[10px] text-smoke-300">
+              Wind {formatWind(center.speed, center.direction, wind?.gust_max_ms)}
+            </span>
+          )}
+        </span>
         <span
           className="text-smoke-400"
           aria-hidden
@@ -2619,7 +2686,7 @@ function Legend({
         </span>
       </button>
       {collapsed ? null : (
-      <div className="px-3 pb-3">
+      <div id="map-legend-body" className="min-h-0 overflow-y-auto px-3 pb-3">
       <div className="mb-1 font-semibold text-smoke-200">Basemap</div>
       <div className="mb-2 inline-flex overflow-hidden rounded border border-smoke-700">
         <button
@@ -2721,12 +2788,16 @@ function Legend({
             <span>Streamlines — direction & speed</span>
           </div>
           {center && (
-            <div>
-              {center.speed.toFixed(1)} m/s ·{" "}
-              {Math.round(center.direction)}°
-              {wind?.gust_max_ms
-                ? ` · gust ${wind.gust_max_ms.toFixed(0)} m/s`
-                : ""}
+            <div
+              title={`${center.speed.toFixed(1)} m/s from ${Math.round(center.direction)}° (Open-Meteo, 10 m)`}
+            >
+              {formatWind(center.speed, center.direction, wind?.gust_max_ms)}
+              {wind?.sampled_at && fmtClock(wind.sampled_at) && (
+                <span className="text-smoke-400">
+                  {" "}
+                  · Open-Meteo {fmtClock(wind.sampled_at)}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -2758,10 +2829,15 @@ function Legend({
           className="h-3 w-3 accent-ember-500"
         />
         <span className="font-medium">
-          VIIRS hotspots ({firmsCount})
+          VIIRS hotspots ({firmsUnavailable ? "off" : firmsCount})
         </span>
       </label>
-      {showFirms && (
+      {showFirms && firmsUnavailable && (
+        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-400">
+          Feed unavailable ({firmsUnavailable})
+        </div>
+      )}
+      {showFirms && !firmsUnavailable && (
         <div className="ml-5 mt-1 flex items-center gap-1.5 text-[10px] text-smoke-400">
           <span
             className="h-2 w-12 rounded-sm"
@@ -2826,8 +2902,10 @@ function Legend({
         </div>
       )}
       {showRoutes && ingressCount + egressCount === 0 && (
-        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-500">
-          waiting on routing_staging agent…
+        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-400">
+          {routingDone
+            ? "The Routing & Staging agent returned no routes (see Resources)."
+            : "Waiting on the Routing & Staging agent…"}
         </div>
       )}
 
@@ -2836,7 +2914,7 @@ function Legend({
           Critical infrastructure
         </div>
         {!infraEnabled ? (
-          <div className="italic text-smoke-500">
+          <div className="italic text-smoke-400">
             Select an incident to load nearby facilities (25 km AOI).
           </div>
         ) : (
@@ -2853,7 +2931,7 @@ function Legend({
         )}
       </div>
 
-      <div className="mt-2 text-[10px] text-smoke-500">
+      <div className="mt-2 text-[10px] text-smoke-400">
         Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS · OSM/OSMnx · HIFLD · NCES · FEMA
       </div>
       </div>

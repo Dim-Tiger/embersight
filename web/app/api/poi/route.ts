@@ -109,43 +109,78 @@ type OverpassElement = {
   tags?: Record<string, string>;
 };
 
+// Overpass mirrors — overpass-api.de aggressively rate-limits and
+// occasionally 403s. We round-robin through the public mirrors until one
+// answers. Order: main → kumi.systems → private.coffee, the same three
+// full-planet mirrors the agent service uses. (overpass.osm.ch only holds
+// Switzerland, so for a California bbox it answered 200 with zero elements
+// and the layer showed "0" instead of an error.)
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+];
+
+// Give up on a mirror a little after the query's own server-side timeout,
+// so one hung host cannot stall the layer for minutes.
+const MIRROR_TIMEOUT_MS = (OVERPASS_TIMEOUT_S + 5) * 1000;
+
 async function fetchOverpass(
   src: InfraSource,
   bbox: Bbox,
 ): Promise<GeoJSON.FeatureCollection> {
   const query = buildOverpassQuery(src, bbox);
-  const r = await fetch(src.endpoint, {
-    method: "POST",
-    headers: {
-      "User-Agent": OVERPASS_USER_AGENT,
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({ data: query }).toString(),
-    next: { revalidate: src.revalidate },
-  });
-  if (!r.ok) throw new Error(`overpass ${r.status}`);
-  const data = (await r.json()) as { elements?: OverpassElement[] };
-  const features: GeoJSON.Feature[] = [];
-  for (const el of data.elements ?? []) {
-    const lat = el.lat ?? el.center?.lat;
-    const lon = el.lon ?? el.center?.lon;
-    if (lat == null || lon == null) continue;
-    features.push({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [lon, lat] },
-      properties: {
-        osm_id: `${el.type}/${el.id}`,
-        name:
-          el.tags?.name ??
-          el.tags?.operator ??
-          el.tags?.["addr:housename"] ??
-          null,
-        ...(el.tags ?? {}),
-      },
-    });
+  // Try the configured endpoint first; on failure (403, 429, 5xx), walk
+  // the public mirror list so a single overloaded host doesn't black-hole
+  // an entire layer.
+  const endpoints = [
+    src.endpoint,
+    ...OVERPASS_ENDPOINTS.filter((e) => e !== src.endpoint),
+  ];
+  let lastErr: string | null = null;
+  for (const endpoint of endpoints) {
+    try {
+      const r = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "User-Agent": OVERPASS_USER_AGENT,
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ data: query }).toString(),
+        next: { revalidate: src.revalidate },
+        signal: AbortSignal.timeout(MIRROR_TIMEOUT_MS),
+      });
+      if (!r.ok) {
+        lastErr = `overpass ${r.status} @ ${new URL(endpoint).host}`;
+        continue;
+      }
+      const data = (await r.json()) as { elements?: OverpassElement[] };
+      const features: GeoJSON.Feature[] = [];
+      for (const el of data.elements ?? []) {
+        const lat = el.lat ?? el.center?.lat;
+        const lon = el.lon ?? el.center?.lon;
+        if (lat == null || lon == null) continue;
+        features.push({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [lon, lat] },
+          properties: {
+            osm_id: `${el.type}/${el.id}`,
+            name:
+              el.tags?.name ??
+              el.tags?.operator ??
+              el.tags?.["addr:housename"] ??
+              null,
+            ...(el.tags ?? {}),
+          },
+        });
+      }
+      return { type: "FeatureCollection", features };
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : String(err);
+    }
   }
-  return { type: "FeatureCollection", features };
+  throw new Error(lastErr ?? "overpass: all mirrors failed");
 }
 
 // --------------------------------------------------------------------------- //
