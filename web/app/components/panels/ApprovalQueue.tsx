@@ -1023,6 +1023,12 @@ function describeIap(p: Record<string, unknown>): Described {
     /deterministic/i.test(String(m.name)),
   );
   const objectives = (draft.objectives as string[] | undefined) ?? [];
+  // Newer backends carry the Resource Recommendation DRAFT inside the IAP
+  // request instead of pausing for it separately.
+  const resourceLines = (
+    (p.resource_request_draft as ResourceLine[] | undefined) ?? []
+  ).filter((l) => (l.quantity ?? 0) > 0);
+  const resourceUnits = resourceLines.reduce((s, l) => s + (l.quantity ?? 0), 0);
   return {
     kind: `IAP DRAFT · ${String(p.form_type ?? draft.form ?? "ICS")}`,
     tone: "ember",
@@ -1045,6 +1051,9 @@ function describeIap(p: Record<string, unknown>): Described {
         value: String(medium.length),
         tone: medium.length ? "amber" : "smoke",
       },
+      ...(resourceLines.length
+        ? [{ label: "Resource DRAFT", value: `${resourceUnits} units` }]
+        : []),
     ],
     confidence: typeof p.confidence === "number" ? p.confidence : null,
     confidenceNote: high.length
@@ -1074,6 +1083,19 @@ function describeIap(p: Record<string, unknown>): Described {
           ))}
         />
         <EvidenceList
+          title="Resource DRAFT carried with this IAP (RECOMMEND only)"
+          items={resourceLines.map((l, i) => (
+            <span key={i}>
+              <span className="font-semibold">
+                {l.quantity} × {l.type}
+              </span>
+              {l.arrival_window && (
+                <span className="text-smoke-400"> · arrives {l.arrival_window}</span>
+              )}
+            </span>
+          ))}
+        />
+        <EvidenceList
           title="Objectives"
           items={objectives.map((o) => <Markdown inline key={o}>{o}</Markdown>)}
         />
@@ -1083,7 +1105,7 @@ function describeIap(p: Record<string, unknown>): Described {
         </p>
       </>
     ),
-    evidenceCount: high.length + medium.length + objectives.length,
+    evidenceCount: high.length + medium.length + objectives.length + resourceLines.length,
     approveLabel: "Approve DRAFT",
     editor: "iap",
   };

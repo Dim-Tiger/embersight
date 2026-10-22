@@ -48,10 +48,18 @@ export type DissentEntry = {
   rationale?: string;
 };
 
+type ResourceDraftLine = {
+  kind?: string;
+  type?: string;
+  quantity?: number;
+  arrival_window?: string;
+};
+
 export function IAPDraft() {
   const pending = useStore((s) => s.pendingInterrupts);
   const masterOut = useStore((s) => s.agentOutputs.master_ic);
   const streamError = useStore((s) => s.errorMessage);
+  const streaming = useStore((s) => s.streaming);
 
   const view = useMemo(() => {
     const fromInterrupt = pending.find(
@@ -68,6 +76,10 @@ export function IAPDraft() {
         pending: true,
         item: fromInterrupt,
         confidence: (payload.confidence as number | undefined) ?? null,
+        decision: "pending_ic_approval",
+        resourceDraft:
+          (payload.resource_request_draft as ResourceDraftLine[] | undefined) ??
+          [],
       } as const;
     }
     const out = (masterOut?.payload ?? {}) as Record<string, unknown>;
@@ -79,6 +91,10 @@ export function IAPDraft() {
       pending: false,
       item: null,
       confidence: masterOut?.confidence ?? null,
+      // approved | edited | rejected | pending_ic_approval (newer backends
+      // publish the synthesis before the IC decides).
+      decision: typeof out.decision === "string" ? out.decision : null,
+      resourceDraft: [] as ResourceDraftLine[],
     } as const;
   }, [pending, masterOut]);
 
@@ -89,11 +105,11 @@ export function IAPDraft() {
       <div className="mx-auto max-w-3xl space-y-4">
         <header>
           <h2 className="text-xl font-semibold text-smoke-200">
-            Incident Action Plan — draft
+            Incident Action Plan
           </h2>
           <p className="text-xs text-smoke-400">
-            ICS 201 → 202 → 204 → 215 → 215A. Every form is{" "}
-            <span className="text-ember-200">pending IC approval</span>.
+            ICS 201 → 202 → 204 → 215 → 215A. Every form starts as a{" "}
+            <span className="text-ember-200">DRAFT pending IC approval</span>.
             EmberSight only proposes; the human IC signs.
           </p>
         </header>
@@ -116,6 +132,18 @@ export function IAPDraft() {
             {/* The whole form is on screen here, so it counts as reviewed. */}
             <DecisionControls item={view.item} reviewed />
           </div>
+        )}
+
+        {!view.pending &&
+          view.decision &&
+          // The interrupt arrives just after the synthesis ends; don't flash
+          // "no request open" while the stream is still running.
+          !(view.decision === "pending_ic_approval" && streaming) && (
+            <DecisionStatus decision={view.decision} />
+          )}
+
+        {view.resourceDraft.length > 0 && (
+          <ResourceDraft lines={view.resourceDraft} />
         )}
 
         {!draft && streamError ? (
@@ -415,4 +443,67 @@ function SectionValue({ value }: { value: unknown }) {
     );
   }
   return <span className="text-[12px] text-smoke-200">{String(value)}</span>;
+}
+
+/** What happened to the IAP after the IC's decision (or that it is waiting). */
+function DecisionStatus({ decision }: { decision: string }) {
+  const map: Record<string, { text: string; cls: string }> = {
+    approved: {
+      text: "Approved by the IC. This is the signed ICS form.",
+      cls: "border-emerald-700/50 bg-emerald-900/20 text-emerald-200",
+    },
+    edited: {
+      text: "Approved with the IC's edits.",
+      cls: "border-emerald-700/50 bg-emerald-900/20 text-emerald-200",
+    },
+    rejected: {
+      text: "Rejected by the IC. Re-brief to get a new DRAFT.",
+      cls: "border-red-700/50 bg-red-900/20 text-red-200",
+    },
+    pending_ic_approval: {
+      text: "DRAFT waiting for an IC decision, but no approval request is open. Re-brief to get one.",
+      cls: "border-amber-600/50 bg-amber-900/20 text-amber-200",
+    },
+  };
+  const m = map[decision];
+  if (!m) return null;
+  return (
+    <div className={`rounded border px-3 py-2 text-xs font-medium ${m.cls}`}>
+      {m.text}
+    </div>
+  );
+}
+
+/**
+ * The Resource Recommendation agent's DRAFT, carried inside the IAP request
+ * so the IC reviews it with the plan. Read-only here: it is a proposal, and
+ * nothing is ordered or dispatched by approving the IAP.
+ */
+function ResourceDraft({ lines }: { lines: ResourceDraftLine[] }) {
+  const total = lines.reduce((s, l) => s + (l.quantity ?? 0), 0);
+  return (
+    <section className="rounded border border-smoke-700 bg-smoke-800/40 p-3">
+      <h4 className="text-[11px] font-semibold uppercase tracking-widest text-ember-300">
+        Resource DRAFT with this IAP · {total} units RECOMMENDED
+      </h4>
+      <ul className="mt-1.5 grid grid-cols-1 gap-x-4 gap-y-0.5 text-[12px] text-smoke-200 sm:grid-cols-2">
+        {lines
+          .filter((l) => (l.quantity ?? 0) > 0)
+          .map((l, i) => (
+            <li key={i} className="flex justify-between gap-2">
+              <span>
+                {l.quantity} × {l.type}
+              </span>
+              {l.arrival_window && (
+                <span className="text-smoke-400">{l.arrival_window}</span>
+              )}
+            </li>
+          ))}
+      </ul>
+      <p className="mt-1.5 text-[10px] text-smoke-400">
+        Proposal only. Approving the IAP records your decision; EmberSight
+        never orders or dispatches resources.
+      </p>
+    </section>
+  );
 }
