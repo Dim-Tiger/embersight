@@ -601,8 +601,10 @@ function OperationsView({
   // When a decision is waiting, the approval queue is the most important
   // thing on screen, so it takes the larger share of the right column.
   const hasPending = useStore((s) => s.pendingInterrupts.length > 0);
+  // Right column is 320 px below 1280 px wide so the map keeps ~480 px at
+  // 1024 instead of ~440.
   return (
-    <div className="grid h-full min-h-0 grid-cols-[1fr_360px] grid-rows-[minmax(0,1fr)] gap-px bg-smoke-700">
+    <div className="grid h-full min-h-0 grid-cols-[1fr_320px] xl:grid-cols-[1fr_360px] grid-rows-[minmax(0,1fr)] gap-px bg-smoke-700">
       <div className="relative min-h-0 bg-smoke-900">
         <IncidentMap />
         {/* Overlay the no-incident pill on top of the map without

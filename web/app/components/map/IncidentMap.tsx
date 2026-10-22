@@ -352,6 +352,9 @@ export function IncidentMap() {
       // so the map only resizes once per animation frame, never inside
       // a reentrant call.
       trackResize: false,
+      // Compact (ⓘ) attribution: the full credit line wrapped to two rows
+      // at 1024-1280 px and ran under the legend. Credits stay one click away.
+      attributionControl: { compact: true },
     });
 
     // Our own debounced resize observer. Coalesces multiple
