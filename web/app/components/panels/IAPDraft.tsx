@@ -158,7 +158,7 @@ export function IAPDraft() {
               once the service is back.
             </div>
           </div>
-        ) : !draft ? (
+        ) : !draft && view.decision === "rejected" ? null : !draft ? (
           <div className="rounded border border-dashed border-smoke-700 px-3 py-6 text-center text-xs text-smoke-400">
             No IAP draft yet. Start an agent run by selecting an incident — the
             Master IC drafts the form after the seven subagents finish.
