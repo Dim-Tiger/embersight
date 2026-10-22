@@ -131,19 +131,35 @@ export function ResourcesTab() {
 
   // Which lines to show: the approved/edited output, else the DRAFT that is
   // waiting in the approval queue, else a rejected draft for the record.
+  // Backend statuses: approved / edited / rejected / unrecognized (held,
+  // fails closed) and, in briefing mode, draft_pending_iap_approval: the
+  // order rides inside the IAP approval instead of pausing on its own.
+  const st = (rrp.status ?? "").toLowerCase();
+  const decided = st === "approved" || st === "edited";
+  const refused = st === "rejected" || st === "unrecognized";
+  const draftViaIap = st.startsWith("draft");
   let lines: ResourceLine[] = [];
   let orderState: "draft" | "approved" | "edited" | "rejected" | null = null;
-  if (resource && rrp.status !== "rejected") {
+  if (resource && decided) {
     lines =
       rrp.recommendations ??
       (rrp.draft_resources ?? []).map((label) => ({ kind: label, type: label }));
-    orderState = rrp.status === "edited" ? "edited" : "approved";
+    orderState = st === "edited" ? "edited" : "approved";
   } else if (draft) {
     lines = flattenEnvelope(draft.envelope);
     orderState = "draft";
-  } else if (resource && rrp.status === "rejected") {
+  } else if (resource && !refused && (rrp.recommendations || rrp.recommendation)) {
+    lines = rrp.recommendations ?? flattenEnvelope(rrp.recommendation);
+    orderState = "draft";
+  } else if (resource && refused) {
     lines = flattenEnvelope(rrp.draft);
     orderState = "rejected";
+  } else if (resource && !st) {
+    // Older payloads without a status were always approved outputs.
+    lines =
+      rrp.recommendations ??
+      (rrp.draft_resources ?? []).map((label) => ({ kind: label, type: label }));
+    orderState = "approved";
   }
   const urgency = draft?.urgency ?? rrp.urgency ?? rrp.recommendation?.urgency;
   const expiresAt = draft?.expiresAt ?? rrp.expires_at;
@@ -166,11 +182,15 @@ export function ResourcesTab() {
       level: "warning",
       value: fmtInt(unitCount),
       unit: "units",
-      title: "Resource order DRAFT is waiting for your approval",
+      title: draftViaIap && !draft
+        ? "Resource order DRAFT: you approve it with the IAP"
+        : "Resource order DRAFT is waiting for your approval",
       detail: [
         urgency ? `Urgency ${urgency.toUpperCase()}.` : null,
         fmtClock(expiresAt) ? `Draft expires ${fmtClock(expiresAt)}.` : null,
-        "Nothing is ordered until you approve.",
+        draftViaIap && !draft
+          ? "Its line items are inside the IAP DRAFT in the approval queue. Nothing is ordered until you approve."
+          : "Nothing is ordered until you approve.",
       ]
         .filter(Boolean)
         .join(" "),
@@ -189,7 +209,10 @@ export function ResourcesTab() {
     attention.push({
       id: "order",
       level: "info",
-      title: "Resource DRAFT was rejected",
+      title:
+        st === "unrecognized"
+          ? "Resource DRAFT held: the decision was not recognised"
+          : "Resource DRAFT was rejected",
       detail: rrp.reason ? `Reason: ${rrp.reason}` : "No reason recorded.",
     });
   } else if (runFinished && resourceStatus !== "running") {
@@ -270,7 +293,11 @@ export function ResourcesTab() {
               <div className="flex flex-wrap items-center gap-2 text-[13px] text-smoke-200">
                 {orderState === "draft" && (
                   <>
-                    <SeverityBadge level="warning" word="Draft · awaiting approval" size="md" />
+                    <SeverityBadge
+                      level="warning"
+                      word={draftViaIap && !draft ? "Draft · approve with the IAP" : "Draft · awaiting approval"}
+                      size="md"
+                    />
                     <button
                       onClick={goToQueue}
                       className="rounded border border-smoke-600 bg-smoke-700 px-2.5 py-1 text-[12px] font-semibold text-smoke-100 hover:border-ember-500"
@@ -282,7 +309,13 @@ export function ResourcesTab() {
                 {(orderState === "approved" || orderState === "edited") && (
                   <SeverityBadge level="ok" word={`RECOMMENDED · ${orderState}`} size="md" />
                 )}
-                {orderState === "rejected" && <SeverityBadge level="info" word="Rejected" size="md" />}
+                {orderState === "rejected" && (
+                  <SeverityBadge
+                    level="info"
+                    word={st === "unrecognized" ? "Held · decision not recognised" : "Rejected"}
+                    size="md"
+                  />
+                )}
                 {urgency && (
                   <SeverityBadge level={urgencyLevel(urgency)} word={`Urgency ${urgency}`} size="md" />
                 )}

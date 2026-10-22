@@ -3,6 +3,7 @@
 import {
   AGENT_LABELS,
   AGENT_ORDER,
+  type AgentOutput,
   type AgentStatus,
   type ChatMessage,
   type PendingInterrupt,
@@ -202,6 +203,8 @@ export function BriefingTab() {
   const statuses = useStore((s) => s.agentStatuses);
 
   const pending = useStore((s) => s.pendingInterrupts);
+  const outputs = useStore((s) => s.agentOutputs);
+  const approvals = useMemo(() => pendingApprovals(pending, outputs), [pending, outputs]);
 
   const doneCount = useMemo(
     () => AGENT_ORDER.filter((a) => statuses[a] === "done").length,
@@ -210,16 +213,16 @@ export function BriefingTab() {
   const runningAgent = useMemo(
     () =>
       AGENT_ORDER.find(
-        (a) => statuses[a] === "running" && !blockedAgents(pending).has(a),
+        (a) => statuses[a] === "running" && !blockedAgents(pending, outputs).has(a),
       ) ?? null,
-    [statuses, pending],
+    [statuses, pending, outputs],
   );
   // Agents still outstanding once the run has finished, with the reason.
   // "Briefing complete" next to "6/9 agents reported" read as a
   // contradiction; naming who is missing and why resolves it.
   const outstanding = useMemo(() => {
     if (streaming || !(done || briefingComplete)) return [];
-    const blocked = blockedAgents(pending);
+    const blocked = blockedAgents(pending, outputs);
     return AGENT_ORDER.filter((a) => statuses[a] !== "done").map((a) => ({
       agent: a,
       reason: blocked.has(a)
@@ -228,7 +231,7 @@ export function BriefingTab() {
           ? "did not finish"
           : "did not report",
     }));
-  }, [streaming, done, briefingComplete, pending, statuses]);
+  }, [streaming, done, briefingComplete, pending, outputs, statuses]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-smoke-900">
@@ -243,6 +246,7 @@ export function BriefingTab() {
         hasIncident={!!selectedIncidentId}
         errorMessage={errorMessage}
         outstanding={outstanding}
+        approvalsWaiting={approvals.length}
       />
 
       {selectedIncidentId && <BriefingAttention outstanding={outstanding} />}
@@ -271,6 +275,7 @@ function BriefingHeader({
   hasIncident,
   errorMessage,
   outstanding,
+  approvalsWaiting,
 }: {
   streaming: boolean;
   done: boolean;
@@ -282,6 +287,7 @@ function BriefingHeader({
   hasIncident: boolean;
   errorMessage: string | null;
   outstanding: Array<{ agent: string; reason: string }>;
+  approvalsWaiting: number;
 }) {
   let statusLabel: string;
   let statusTone: "live" | "ready" | "idle" | "error" | "partial";
@@ -293,6 +299,10 @@ function BriefingHeader({
     statusTone = "live";
   } else if ((briefingComplete || done) && outstanding.length > 0) {
     statusLabel = "partial";
+    statusTone = "partial";
+  } else if ((briefingComplete || done) && approvalsWaiting > 0) {
+    // Every agent reported, but the IAP is still a DRAFT until the IC acts.
+    statusLabel = "approval needed";
     statusTone = "partial";
   } else if (briefingComplete || done) {
     statusLabel = "ready";
@@ -329,7 +339,9 @@ function BriefingHeader({
                     ? `Partial briefing · ${doneCount} of ${totalAgents} agents reported · waiting on: ${outstanding
                         .map((o) => `${AGENT_LABELS[o.agent] ?? o.agent} (${o.reason})`)
                         .join(", ")}`
-                    : briefingComplete
+                    : approvalsWaiting > 0
+                      ? `All ${totalAgents} agents reported · ${approvalsWaiting} ${approvalsWaiting === 1 ? "DRAFT" : "DRAFTs"} waiting for your approval`
+                      : briefingComplete
                       ? `Briefing complete · all ${totalAgents} agents reported · ask the IC anything`
                       : `${doneCount} of ${totalAgents} agents reported · standing by`}
           </p>
@@ -402,8 +414,34 @@ function HeaderShimmer() {
   );
 }
 
-function blockedAgents(pending: PendingInterrupt[]): Set<string> {
-  return new Set(pending.map((p) => INTERRUPT_AGENT[p.interrupt.type]).filter(Boolean));
+/**
+ * Approvals the IC owes, by type. Normally these are the pending interrupts.
+ * The Master IC's synthesis also marks its own output
+ * `decision: "pending_ic_approval"` before the separate `iap_approval` node
+ * pauses, so that counts too, even if the interrupt event has not reached
+ * the store yet.
+ */
+function pendingApprovals(
+  pending: PendingInterrupt[],
+  outputs: Record<string, AgentOutput>,
+): string[] {
+  const types = pending.map((p) => p.interrupt.type as string);
+  const icDecision = (outputs.master_ic?.payload as Record<string, unknown> | undefined)?.decision;
+  if (icDecision === "pending_ic_approval" && !types.includes("iap_approval")) {
+    types.push("iap_approval");
+  }
+  return types;
+}
+
+function blockedAgents(
+  pending: PendingInterrupt[],
+  outputs: Record<string, AgentOutput>,
+): Set<string> {
+  return new Set(
+    pendingApprovals(pending, outputs)
+      .map((t) => INTERRUPT_AGENT[t])
+      .filter(Boolean),
+  );
 }
 
 /**
@@ -423,17 +461,23 @@ function BriefingAttention({
   const asOf = useAgentAsOf(AGENT_ORDER);
 
   const items: AttentionItem[] = [];
-  if (pending.length > 0) {
-    const labels = [
-      ...new Set(pending.map((p) => INTERRUPT_LABEL[p.interrupt.type] ?? p.interrupt.type)),
-    ];
+  const approvals = pendingApprovals(pending, outputs);
+  if (approvals.length > 0) {
+    const labels = [...new Set(approvals.map((t) => INTERRUPT_LABEL[t] ?? t))];
+    // In briefing mode the resource order rides inside the IAP approval.
+    const resourceDraft = String(
+      (outputs.resource_recommendation?.payload as Record<string, unknown> | undefined)?.status ?? "",
+    ).startsWith("draft");
+    if (resourceDraft && approvals.includes("iap_approval") && !labels.includes(INTERRUPT_LABEL.resource_recommendation)) {
+      labels.push("resource order DRAFT inside it");
+    }
     items.push({
       id: "approvals",
       // The one thing on this screen only the IC can do: always first.
       pinned: true,
       level: "warning",
-      value: String(pending.length),
-      unit: pending.length === 1 ? "decision" : "decisions",
+      value: String(approvals.length),
+      unit: approvals.length === 1 ? "decision" : "decisions",
       title: "waiting for your approval",
       detail: `${labels.join(", ")}. Nothing happens until you approve.`,
       action: { label: "Open approval queue", onClick: () => setActiveTab("Operations") },
@@ -467,7 +511,11 @@ function BriefingAttention({
     values: outputs.values_at_risk,
     spread: outputs.spread_simulation,
     terrain: outputs.terrain_fuel,
-  }).filter((i) => i.level === "critical" || i.level === "warning");
+  }).filter(
+    // Critical/warning threats, plus the explicit "contained, no projection"
+    // note so a contained fire never looks like a missing spread report.
+    (i) => i.level === "critical" || i.level === "warning" || i.id === "contained",
+  );
   for (const t of threats.slice(0, 2)) {
     items.push({ ...t, action: { label: "Open Threats", onClick: () => setActiveTab("Threats") } });
   }
@@ -502,7 +550,7 @@ function AgentRoster() {
   const pending = useStore((s) => s.pendingInterrupts);
   const done = useStore((s) => s.done);
   const streaming = useStore((s) => s.streaming);
-  const blocked = blockedAgents(pending);
+  const blocked = blockedAgents(pending, outputs);
   const runFinished = done && !streaming;
 
   return (
@@ -521,7 +569,7 @@ function AgentRoster() {
             status={statuses[name] ?? "pending"}
             narrative={outputs[name]?.narrative}
             confidence={outputs[name]?.confidence}
-            blocked={blocked.has(name) && statuses[name] !== "done"}
+            blocked={blocked.has(name)}
             missing={runFinished && statuses[name] !== "done" && statuses[name] !== "error" && !blocked.has(name)}
           />
         ))}
@@ -954,7 +1002,11 @@ function SystemNarrative({ message }: { message: ChatMessage }) {
   // The resource agent's report is a decision record ("30 units RECOMMENDED
   // for approval, decision: approved"); recognise it by its shape too, so it
   // is never shown under an anonymous "agent" label.
-  const isDecision = /RECOMMENDED for approval, decision:/.test(message.text);
+  // Shapes: "DRAFT: 13 units RECOMMENDED; the IC reviews them with the IAP"
+  // (briefing), "13 units RECOMMENDED, IC decision: approved" (chat), and
+  // the older "30 units RECOMMENDED for approval, decision: approved".
+  const isDecision = /\d+ units RECOMMENDED/.test(message.text);
+  const isDraft = /^\s*DRAFT:/.test(message.text);
   const key =
     findAgentKey(message.agentName) ?? (isDecision ? "resource_recommendation" : null);
   const meta = metaFor(key ?? "");
@@ -987,7 +1039,7 @@ function SystemNarrative({ message }: { message: ChatMessage }) {
             {author}
           </span>
           <span className="text-[10px] uppercase tracking-widest text-smoke-400">
-            {isDecision ? "approval log" : "reporting in"}
+            {isDraft ? "draft for your approval" : isDecision ? "approval log" : "reporting in"}
           </span>
           <span className="text-[10px] text-smoke-400">
             {formatTime(message.ts)}
