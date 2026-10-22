@@ -173,10 +173,12 @@ function renderInfraIcon(
   return { width: size, height: size, data: imageData.data };
 }
 
+// Counts can be null when a source layer failed ("unavailable", not zero).
 type ConeImpact = {
-  population_estimate?: number;
-  residential_count?: number;
-  structures_total?: number;
+  population_estimate?: number | null;
+  population_method?: "residential_structures" | "area_density_estimate" | string;
+  residential_count?: number | null;
+  structures_total?: number | null;
   hospitals_count?: number;
   hospitals_total_beds?: number;
   schools_count?: number;
@@ -2361,7 +2363,23 @@ function renderConeLabel(impact: ConeImpact | null): string {
         24h spread cone
       </div>
       <div style="font-weight:700;font-size:14px;color:#fff">
-        ~${fmtInt(impact.population_estimate)} people
+        ${
+          impact.population_estimate == null
+            ? "people: unavailable"
+            : `~${fmtInt(impact.population_estimate)} people`
+        }
+      </div>
+      <div style="font-size:10px;opacity:0.75">
+        ${
+          // The agent says how it counted people: from residences in the
+          // cone, or (when the structure layer failed) a rough area
+          // estimate that must not read like a census.
+          impact.population_method === "area_density_estimate"
+            ? "rough estimate from area (structures unavailable)"
+            : impact.population_method === "residential_structures"
+              ? "from residences in the cone × 2.5"
+              : ""
+        }
       </div>
       <div style="border-top:1px solid rgba(240,171,252,0.3);margin:5px 0 4px 0"></div>
       <div>🏠 ${fmtInt(impact.residential_count)} residences
