@@ -23,6 +23,14 @@ export function AgentCard({
   // Surface that instead of the generic "Waiting for the agent to start…" copy.
   const streamError = useStore((s) => s.errorMessage);
   const hasStreamError = status === "pending" && !!streamError;
+  // Once the stream has closed nothing is executing: an agent still marked
+  // "running" is paused on interrupt(), and one still "pending" is queued
+  // behind that decision. Say so rather than showing a spinner forever.
+  const paused = useStore(
+    (s) => !s.streaming && s.pendingInterrupts.length > 0,
+  );
+  const awaiting = paused && status === "running";
+  const queued = paused && status === "pending" && !hasStreamError;
   return (
     <section className="rounded-md border border-smoke-700 bg-smoke-800/40">
       <header className="flex items-center justify-between border-b border-smoke-700 px-4 py-2">
@@ -33,7 +41,11 @@ export function AgentCard({
           )}
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge status={status} streamError={hasStreamError} />
+          <StatusBadge
+            status={status}
+            streamError={hasStreamError}
+            awaiting={awaiting}
+          />
           {output?.confidence != null && status === "done" && (
             <span className="rounded bg-ember-900/40 px-2 py-0.5 text-[10px] font-semibold text-ember-200 ring-1 ring-ember-800/60">
               {Math.round(output.confidence * 100)}% conf
@@ -53,18 +65,30 @@ export function AgentCard({
               {streamError}
             </div>
             <div className="mt-1 text-[10px] text-red-300/70">
-              Use &ldquo;Re-run stream&rdquo; in the Agent activity panel once the service is back.
+              Use &ldquo;Re-brief&rdquo; in the Agent activity panel once the service is back.
             </div>
           </div>
         )}
-        {status === "pending" && !hasStreamError && (
-          <p className="text-[11px] italic text-smoke-500">
+        {queued && (
+          <p className="text-[11px] italic text-smoke-400">
+            Queued: this agent runs after you decide on the pending DRAFT in
+            the Approval queue.
+          </p>
+        )}
+        {status === "pending" && !hasStreamError && !queued && (
+          <p className="text-[11px] italic text-smoke-400">
             Waiting for the agent to start. Pick an incident and the team runs
             automatically.
           </p>
         )}
-        {status === "running" && !output && <RunningSkeleton />}
-        {status === "running" && output && (
+        {awaiting && (
+          <p className="text-[11px] text-amber-200">
+            Paused: this agent&apos;s DRAFT is waiting for your approval in the
+            Approval queue.
+          </p>
+        )}
+        {status === "running" && !awaiting && !output && <RunningSkeleton />}
+        {status === "running" && !awaiting && output && (
           <div className="flex items-center gap-1.5 text-[11px] text-ember-300">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ember-400" />
             Streaming new findings…
@@ -176,10 +200,19 @@ export function KeyFindings({ items }: { items: string[] }) {
 function StatusBadge({
   status,
   streamError,
+  awaiting,
 }: {
   status: AgentStatus;
   streamError?: boolean;
+  awaiting?: boolean;
 }) {
+  if (awaiting) {
+    return (
+      <span className="flex items-center gap-1 rounded bg-amber-900/40 px-2 py-0.5 text-[10px] font-medium text-amber-200">
+        awaiting approval
+      </span>
+    );
+  }
   if (status === "running") {
     return (
       <span className="flex items-center gap-1 rounded bg-ember-900/40 px-2 py-0.5 text-[10px] font-medium text-ember-200">

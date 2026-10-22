@@ -49,7 +49,7 @@ export function ApprovalQueue() {
 function GenericInterruptCard({ item }: { item: PendingInterrupt }) {
   const remove = useStore((s) => s.removeInterrupt);
   const [busy, setBusy] = useState(false);
-  const id = item.interrupt.id ?? item.thread_id;
+  const [error, setError] = useState<string | null>(null);
   const label = TYPE_LABEL[item.interrupt.type] ?? item.interrupt.type;
   const confidence =
     (item.interrupt.payload as any)?.confidence ??
@@ -57,9 +57,13 @@ function GenericInterruptCard({ item }: { item: PendingInterrupt }) {
 
   async function respond(decision: "approved" | "edited" | "rejected") {
     setBusy(true);
+    setError(null);
     try {
       await postResume(item.thread_id, { decision, actor: "ic@example.com" });
-      remove(item.interrupt.id);
+      remove(item.interrupt.id, item.thread_id);
+    } catch (err) {
+      // Keep the card: the decision did not reach the agent service.
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -102,7 +106,16 @@ function GenericInterruptCard({ item }: { item: PendingInterrupt }) {
           Reject
         </ActionButton>
       </div>
+      {error && <DecisionError message={error} />}
     </article>
+  );
+}
+
+function DecisionError({ message }: { message: string }) {
+  return (
+    <p role="alert" className="mt-2 text-[11px] text-red-300">
+      {message}. Nothing was approved or rejected; try again.
+    </p>
   );
 }
 
@@ -146,8 +159,11 @@ function EvacZoneCard({ item }: { item: PendingInterrupt }) {
   const displacement = impact.human_displacement_estimate ?? payload.population_estimate;
   const structures = impact.residential_structures_estimate;
 
+  const [error, setError] = useState<string | null>(null);
+
   async function respond(decision: "approved" | "rejected") {
     setBusy(true);
+    setError(null);
     try {
       await postResume(item.thread_id, { decision, actor: "ic@example.com" });
       if (decision === "approved" && payload.polygon_geojson) {
@@ -159,7 +175,9 @@ function EvacZoneCard({ item }: { item: PendingInterrupt }) {
           accepted_at: Date.now(),
         });
       }
-      remove(item.interrupt.id);
+      remove(item.interrupt.id, item.thread_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -285,6 +303,7 @@ function EvacZoneCard({ item }: { item: PendingInterrupt }) {
           {payload.refineOpen ? "Hide refine" : "Refine"}
         </ActionButton>
       </div>
+      {error && <DecisionError message={error} />}
 
       {payload.refineOpen && (
         <RefineThread item={item} payload={payload} interruptId={interruptId} />

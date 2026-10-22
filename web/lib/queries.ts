@@ -102,12 +102,17 @@ export function useWind(lat: number | null, lon: number | null) {
   });
 }
 
+/** FIRMS hotspots plus an `unavailable` reason when the feed is off. */
+export type FirmsResult = GeoJSON.FeatureCollection & { unavailable?: string };
+
 export function useFirms(days = 1) {
   return useQuery({
     queryKey: ["firms", days],
-    queryFn: async (): Promise<GeoJSON.FeatureCollection | null> => {
+    queryFn: async (): Promise<FirmsResult> => {
       const r = await fetch(`/api/firms?days=${days}`);
-      if (!r.ok) return null;
+      if (!r.ok) {
+        return { type: "FeatureCollection", features: [], unavailable: `feed error ${r.status}` };
+      }
       return r.json();
     },
     refetchInterval: 10 * 60_000,
@@ -151,7 +156,12 @@ export async function postResume(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ thread_id: threadId, decision }),
   });
-  if (!r.ok || !r.body) throw new Error(`resume ${r.status}`);
+  if (!r.ok || !r.body) {
+    const detail = await r.text().catch(() => "");
+    throw new Error(
+      `Decision not sent (agent service ${r.status}${detail ? `: ${detail.slice(0, 120)}` : ""})`,
+    );
+  }
   // Pump the resumed SSE through the same store handlers. We fire-and-forget
   // so the approval button returns immediately; continuation events keep
   // flowing into the dashboard as the graph advances post-interrupt.

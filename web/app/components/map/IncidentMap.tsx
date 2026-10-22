@@ -17,6 +17,7 @@ import {
 import { useInfraLayers } from "@/lib/infraQueries";
 import { useStore } from "@/lib/store";
 import { useTestMode } from "@/lib/testMode";
+import { cardinal, formatWind } from "@/lib/units";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import maplibregl from "maplibre-gl";
 import { WindParticleLayer, generateWindTexture } from "maplibre-gl-wind";
@@ -664,8 +665,8 @@ export function IncidentMap() {
         .setLngLat(coords)
         .setHTML(
           `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid rgba(249,115,22,0.4)">
-            <strong style="color:#fb923c">${props.name}</strong><br/>
-            ${props.acres?.toLocaleString() ?? "?"} ac &middot; ${props.contained_pct ?? "?"}% contained
+            <strong style="color:#fb923c">${escapeHtml(String(props.name))}</strong><br/>
+            ${props.acres ? (props.acres < 1 ? "&lt;1" : Math.round(props.acres).toLocaleString()) : "?"} ac &middot; ${props.contained_pct ?? "?"}% contained
           </div>`,
         )
         .addTo(map);
@@ -1927,7 +1928,7 @@ export function IncidentMap() {
       "display:flex;flex-direction:column;align-items:center;gap:2px;pointer-events:none;font:600 10px ui-sans-serif,system-ui;color:#f1f5f9;";
     el.innerHTML = `
       <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.6);border-radius:999px;padding:2px 8px;backdrop-filter:blur(4px);white-space:nowrap;">
-        wind ${speedMs.toFixed(1)} m/s → ${Math.round(toDeg)}°
+        wind ${formatWind(speedMs, fromDeg)}
       </div>
       <svg width="42" height="42" viewBox="-21 -21 42 42" style="transform:rotate(${toDeg}deg);filter:drop-shadow(0 0 4px rgba(0,0,0,0.6));">
         <path d="M 0 -16 L 6 8 L 0 4 L -6 8 Z" fill="#38bdf8" stroke="#0c1220" stroke-width="1.5" stroke-linejoin="round" />
@@ -2130,6 +2131,8 @@ export function IncidentMap() {
         wind={wind}
         evacCount={evacFiltered?.features.length ?? 0}
         firmsCount={firms?.features?.length ?? 0}
+        firmsUnavailable={firms?.unavailable ?? null}
+        routingDone={!!routingOutput}
         ingressCount={routingOutput?.payload?.primary_routes?.length ?? 0}
         egressCount={routingOutput?.payload?.egress_routes?.length ?? 0}
         infraVisibility={infraVisibility}
@@ -2306,6 +2309,14 @@ function buildPerimeterCone(
   return { type: "Polygon", coordinates: [convexHull(swept)] };
 }
 
+/** Local clock time ("2:05 PM") for a feed timestamp, or "" if unparseable. */
+function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
 function fmtInt(n: number | undefined | null): string {
   if (n == null || !Number.isFinite(n)) return "—";
   return Math.round(n).toLocaleString();
@@ -2339,7 +2350,14 @@ function renderConeLabel(impact: ConeImpact | null): string {
       </div>
       <div style="border-top:1px solid rgba(240,171,252,0.3);margin:5px 0 4px 0"></div>
       <div>🏠 ${fmtInt(impact.residential_count)} residences
-        <span style="opacity:0.65">/ ${fmtInt(impact.structures_total)} total</span>
+        ${
+          // The structures query can be capped upstream, which produced
+          // "2,659 residences / 2,000 total". Only show a total that is
+          // at least the residential count.
+          (impact.structures_total ?? 0) >= (impact.residential_count ?? 0)
+            ? `<span style="opacity:0.65">/ ${fmtInt(impact.structures_total)} total</span>`
+            : ""
+        }
       </div>
       <div>🏥 ${fmtInt(impact.hospitals_count)} hospitals
         <span style="opacity:0.65">(${fmtInt(impact.hospitals_total_beds)} beds)</span>
@@ -2436,7 +2454,7 @@ function buildStagingPopupHtml(
       : "";
   const windLine =
     wind && wind.from_deg != null
-      ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">wind from ${Number(wind.from_deg).toFixed(0)}°${wind.speed_mph != null ? ` @ ${Number(wind.speed_mph).toFixed(0)} mph` : ""}</div>`
+      ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">wind from ${cardinal(Number(wind.from_deg))} (${Number(wind.from_deg).toFixed(0)}°)${wind.speed_mph != null ? ` @ ${Number(wind.speed_mph).toFixed(0)} mph` : ""}</div>`
       : "";
   return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:8px 10px;border-radius:6px;border:1px solid #22c55e66;min-width:220px">
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
@@ -2556,6 +2574,8 @@ function Legend({
   wind,
   evacCount,
   firmsCount,
+  firmsUnavailable,
+  routingDone,
   ingressCount,
   egressCount,
   infraVisibility,
@@ -2582,6 +2602,8 @@ function Legend({
   wind: WindGrid | undefined;
   evacCount: number;
   firmsCount: number;
+  firmsUnavailable: string | null;
+  routingDone: boolean;
   ingressCount: number;
   egressCount: number;
   infraVisibility: Record<string, boolean>;
@@ -2721,12 +2743,16 @@ function Legend({
             <span>Streamlines — direction & speed</span>
           </div>
           {center && (
-            <div>
-              {center.speed.toFixed(1)} m/s ·{" "}
-              {Math.round(center.direction)}°
-              {wind?.gust_max_ms
-                ? ` · gust ${wind.gust_max_ms.toFixed(0)} m/s`
-                : ""}
+            <div
+              title={`${center.speed.toFixed(1)} m/s from ${Math.round(center.direction)}° (Open-Meteo, 10 m)`}
+            >
+              {formatWind(center.speed, center.direction, wind?.gust_max_ms)}
+              {wind?.sampled_at && fmtClock(wind.sampled_at) && (
+                <span className="text-smoke-400">
+                  {" "}
+                  · Open-Meteo {fmtClock(wind.sampled_at)}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -2758,10 +2784,15 @@ function Legend({
           className="h-3 w-3 accent-ember-500"
         />
         <span className="font-medium">
-          VIIRS hotspots ({firmsCount})
+          VIIRS hotspots ({firmsUnavailable ? "off" : firmsCount})
         </span>
       </label>
-      {showFirms && (
+      {showFirms && firmsUnavailable && (
+        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-400">
+          Feed unavailable ({firmsUnavailable})
+        </div>
+      )}
+      {showFirms && !firmsUnavailable && (
         <div className="ml-5 mt-1 flex items-center gap-1.5 text-[10px] text-smoke-400">
           <span
             className="h-2 w-12 rounded-sm"
@@ -2826,8 +2857,10 @@ function Legend({
         </div>
       )}
       {showRoutes && ingressCount + egressCount === 0 && (
-        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-500">
-          waiting on routing_staging agent…
+        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-400">
+          {routingDone
+            ? "The Routing & Staging agent returned no routes (see Resources)."
+            : "Waiting on the Routing & Staging agent…"}
         </div>
       )}
 

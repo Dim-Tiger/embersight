@@ -15,8 +15,11 @@ const CALFIRE =
   "https://incidents.fire.ca.gov/umbraco/api/IncidentApi/List?inactive=false";
 // IncidentTypeCategory='WF' filters out RX (prescribed burns), which are ~40%
 // of the national WFIGS list and not what an IMT-facing map wants to see.
+// POOState='US-CA' keeps the list to California: without it the dropdown
+// listed ~220 fires from Florida to Alaska under an "Active Incident" picker
+// for a CAL FIRE dashboard, and the empty-state copy promises CA incidents.
 const WFIGS_POINTS =
-  "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query?where=IncidentTypeCategory%3D%27WF%27&outFields=*&f=geojson";
+  "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query?where=IncidentTypeCategory%3D%27WF%27%20AND%20POOState%3D%27US-CA%27&outFields=*&f=geojson";
 
 type Out = {
   id: string;
@@ -87,7 +90,8 @@ export async function GET() {
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       merged.push({
         id: `calfire:${it?.UniqueId ?? it?.Id ?? `${lat},${lon}`}`,
-        name: it?.Name ?? "Unnamed Incident",
+        // CAL FIRE names sometimes carry trailing spaces ("Norte Fire ").
+        name: String(it?.Name ?? "Unnamed Incident").trim(),
         lat,
         lon,
         acres: typeof it?.AcresBurned === "number" ? it.AcresBurned : null,
@@ -106,7 +110,7 @@ export async function GET() {
       const [lon, lat] = f?.geometry?.coordinates ?? [];
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const p = f?.properties ?? {};
-      const name: string = p?.IncidentName ?? "Unnamed Incident";
+      const name: string = String(p?.IncidentName ?? "Unnamed Incident").trim();
       const id = `wfigs:${p?.IrwinID ?? p?.UniqueFireIdentifier ?? `${lat},${lon}`}`;
 
       // Skip if already represented by a CAL FIRE entry (same name or nearby location)
@@ -142,6 +146,15 @@ export async function GET() {
       });
     }
   }
+
+  // Synthetic first, then CAL FIRE (the feed this dashboard is built for),
+  // then WFIGS largest-first so the fires that matter are at the top of the
+  // dropdown instead of buried under 0.01-acre initial-attack reports.
+  const rank = (o: Out) =>
+    o.source === "synthetic" ? 0 : o.source === "calfire" ? 1 : 2;
+  merged.sort(
+    (a, b) => rank(a) - rank(b) || (b.acres ?? -1) - (a.acres ?? -1),
+  );
 
   return NextResponse.json(merged);
 }

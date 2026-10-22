@@ -5,12 +5,25 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   const body = await req.text();
-  const upstream = await fetch(`${AGENT_BASE}/agent/resume`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-    cache: "no-store",
-  });
+  // Same guard as /api/agent/stream: if the agent service is down, fetch
+  // throws, and without a catch Next answers an opaque 500 and logs a stack
+  // trace. A 502 with a reason lets the approval card tell the IC that the
+  // decision was NOT recorded.
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${AGENT_BASE}/agent/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      cache: "no-store",
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return new Response(
+      JSON.stringify({ error: "agent unreachable", detail: msg }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
 
   if (!upstream.ok || !upstream.body) {
     return new Response(

@@ -4,6 +4,7 @@ import { useIncidents } from "@/lib/queries";
 import { AGENT_ORDER, type AgentStatus, useStore } from "@/lib/store";
 import { useTestMode } from "@/lib/testMode";
 import { useTheme } from "@/lib/theme";
+import { formatStarted } from "@/lib/units";
 import {
   AlertTriangle,
   ChevronDown,
@@ -96,6 +97,9 @@ export default function Page() {
 
   const handleIncidentChange = (id: string) => {
     setSelectedIncident(id || null);
+    // With no incident the side tabs have nothing to show and their nav
+    // items are disabled, so return to the map rather than strand the IC.
+    if (!id) setActiveTab("Operations");
   };
 
   return (
@@ -185,7 +189,7 @@ export default function Page() {
                 {incidents?.map((inc) => (
                   <option key={inc.id} value={inc.id}>
                     {inc.name}
-                    {inc.acres ? ` (${Math.round(inc.acres).toLocaleString()} ac)` : ""}
+                    {inc.acres != null ? ` (${fmtAcres(inc.acres)})` : ""}
                   </option>
                 ))}
               </select>
@@ -222,14 +226,26 @@ export default function Page() {
                   </div>
                 )}
                 {selectedIncident.acres != null && (
-                  <div className="text-smoke-400">
-                    {Math.round(selectedIncident.acres).toLocaleString()} acres
+                  <div className="text-smoke-300">
+                    {fmtAcres(selectedIncident.acres)}
                   </div>
                 )}
                 {selectedIncident.started_at && (
-                  <div className="text-smoke-500">
-                    Started{" "}
-                    {new Date(selectedIncident.started_at).toLocaleDateString()}
+                  <div
+                    className="text-smoke-400"
+                    title={new Date(selectedIncident.started_at).toLocaleString()}
+                  >
+                    Started {formatStarted(selectedIncident.started_at)}
+                  </div>
+                )}
+                {selectedIncident.source && (
+                  <div className="text-smoke-400">
+                    Source:{" "}
+                    {selectedIncident.source === "calfire"
+                      ? "CAL FIRE"
+                      : selectedIncident.source === "wfigs"
+                        ? "NIFC WFIGS"
+                        : "synthetic (test mode)"}
                   </div>
                 )}
               </div>
@@ -346,6 +362,10 @@ function NavItem({
   onClick: () => void;
 }) {
   const statuses = useStore((s) => s.agentStatuses);
+  // After the stream closes, a "running" agent is paused on an IC decision.
+  const paused = useStore(
+    (s) => !s.streaming && s.pendingInterrupts.length > 0,
+  );
   const agents = TAB_AGENTS[tab] ?? [];
 
   const { combined, doneCount, runningCount } = useMemo(() => {
@@ -358,12 +378,12 @@ function NavItem({
       else if (st === "running") running++;
       else if (st === "error") error++;
     }
-    let combined: AgentStatus = "pending";
+    let combined: AgentStatus | "awaiting" = "pending";
     if (error > 0) combined = "error";
-    else if (running > 0) combined = "running";
+    else if (running > 0) combined = paused ? "awaiting" : "running";
     else if (agents.length > 0 && done === agents.length) combined = "done";
     return { combined, doneCount: done, runningCount: running };
-  }, [agents, statuses]);
+  }, [agents, statuses, paused]);
 
   return (
     <button
@@ -388,9 +408,11 @@ function NavItem({
             className={`absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full ${
               combined === "running"
                 ? "bg-ember-400"
-                : combined === "done"
-                  ? "bg-emerald-400/80"
-                  : "bg-red-500"
+                : combined === "awaiting"
+                  ? "bg-amber-400"
+                  : combined === "done"
+                    ? "bg-emerald-400/80"
+                    : "bg-red-500"
             }`}
           />
         )}
@@ -418,7 +440,15 @@ function NavItem({
   );
 }
 
-function NavDot({ status }: { status: AgentStatus }) {
+function NavDot({ status }: { status: AgentStatus | "awaiting" }) {
+  if (status === "awaiting") {
+    return (
+      <span
+        className="h-2 w-2 flex-shrink-0 rounded-full bg-amber-400"
+        title="Waiting for your decision"
+      />
+    );
+  }
   if (status === "running") {
     return (
       <span className="relative flex h-2 w-2 flex-shrink-0">
@@ -680,4 +710,11 @@ function OperationsTab() {
       empty={false}
     />
   );
+}
+
+/** "570 ac", "<1 ac" (initial-attack reports are often 0.01 ac), "—". */
+function fmtAcres(acres: number | null | undefined): string {
+  if (acres == null || !Number.isFinite(acres)) return "size unknown";
+  if (acres < 1) return "<1 ac";
+  return `${Math.round(acres).toLocaleString()} ac`;
 }
