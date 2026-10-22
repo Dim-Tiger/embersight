@@ -15,6 +15,10 @@ export type AttentionItem = {
   title: string;
   /** Optional second line: source, threshold, or what to do. */
   detail?: ReactNode;
+  /** Always shown first, whatever its severity. Used for decisions only
+   * the IC can make (pending approvals), which must never be demoted to
+   * the overflow line by a higher-severity fact. */
+  pinned?: boolean;
   /** One-line version for the "Also flagged" overflow line. */
   summary?: string;
   /** Optional call to action (e.g. jump to the approval queue). */
@@ -41,7 +45,9 @@ export function AttentionStrip({
   compact?: boolean;
 }) {
   const ranked = [...items].sort(
-    (a, b) => SEVERITY_RANK[a.level] - SEVERITY_RANK[b.level],
+    (a, b) =>
+      Number(!!b.pinned) - Number(!!a.pinned) ||
+      SEVERITY_RANK[a.level] - SEVERITY_RANK[b.level],
   );
   const sorted = ranked.slice(0, max);
   const hidden = ranked.slice(max);

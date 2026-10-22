@@ -118,7 +118,9 @@ export function ThreatsTab() {
                 icon={<Users className="h-3.5 w-3.5" aria-hidden />}
                 value={impact?.population_estimate != null ? `~${fmtInt(impact.population_estimate)}` : "—"}
                 unit="people"
-                hint="From the Spread Simulation cone"
+                // Same number the Spread report quotes. The agent takes the
+                // larger of homes × 2.5 people and a building-density model.
+                hint="Spread agent estimate: homes × 2.5 or building density, whichever is larger"
                 unavailable={impact ? null : spread ? "Spread exposure query unavailable" : "Waiting for Spread Simulation"}
               />
               <StatTile

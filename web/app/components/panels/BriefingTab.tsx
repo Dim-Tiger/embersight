@@ -429,6 +429,8 @@ function BriefingAttention({
     ];
     items.push({
       id: "approvals",
+      // The one thing on this screen only the IC can do: always first.
+      pinned: true,
       level: "warning",
       value: String(pending.length),
       unit: pending.length === 1 ? "decision" : "decisions",
@@ -949,9 +951,16 @@ function SystemNarrative({ message }: { message: ChatMessage }) {
   // Sub-agent narratives surface as "system" entries — render them as a
   // compact left-aligned bubble in the agent's color, distinct from the
   // larger IC bubble. This is the "the team is reporting in" view.
-  const key = findAgentKey(message.agentName);
+  // The resource agent's report is a decision record ("30 units RECOMMENDED
+  // for approval, decision: approved"); recognise it by its shape too, so it
+  // is never shown under an anonymous "agent" label.
+  const isDecision = /RECOMMENDED for approval, decision:/.test(message.text);
+  const key =
+    findAgentKey(message.agentName) ?? (isDecision ? "resource_recommendation" : null);
   const meta = metaFor(key ?? "");
   const { Icon, accent } = meta;
+  const author =
+    (key && DISPLAY_NAMES[key]) ?? message.agentName ?? (key ? AGENT_LABELS[key] : null) ?? "Agent update";
   const output = useStore((s) => (key ? s.agentOutputs[key] : undefined));
   const [expanded, setExpanded] = useState(false);
 
@@ -975,10 +984,10 @@ function SystemNarrative({ message }: { message: ChatMessage }) {
       <div className="min-w-0 flex-1">
         <div className="mb-0.5 flex items-baseline gap-2">
           <span className={`text-[12px] font-semibold ${accent.text}`}>
-            {message.agentName ?? "agent"}
+            {author}
           </span>
           <span className="text-[10px] uppercase tracking-widest text-smoke-400">
-            reporting in
+            {isDecision ? "approval log" : "reporting in"}
           </span>
           <span className="text-[10px] text-smoke-400">
             {formatTime(message.ts)}
@@ -1018,6 +1027,12 @@ function Avatar({ meta }: { meta: AgentMeta }) {
     </div>
   );
 }
+
+// Fuller names for the feed where AGENT_LABELS is shortened for the
+// sidebar ("Resources" reads like a tab name, not an author).
+const DISPLAY_NAMES: Record<string, string> = {
+  resource_recommendation: "Resource Recommendation",
+};
 
 function findAgentKey(label?: string): string | null {
   if (!label) return null;

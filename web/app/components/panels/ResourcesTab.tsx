@@ -162,6 +162,7 @@ export function ResourcesTab() {
   if (orderState === "draft") {
     attention.push({
       id: "order",
+      pinned: true,
       level: "warning",
       value: fmtInt(unitCount),
       unit: "units",
