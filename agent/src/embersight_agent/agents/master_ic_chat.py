@@ -21,6 +21,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from ..state import AgentState
+from ..units import containment_fraction, containment_label
 from .tools import ALL_TOOLS
 
 log = logging.getLogger("embersight.master_ic_chat")
@@ -55,7 +56,9 @@ def _state_briefing(state: AgentState) -> str:
         "lat": incident.lat if incident else None,
         "lon": incident.lon if incident else None,
         "acres": incident.acres if incident else None,
-        "contained_pct": incident.contained_pct if incident else None,
+        # The raw field is a 0..1 fraction from the web proxy; handing the
+        # model a bare 1 invites "1% contained". Spell it out.
+        "contained": containment_label(containment_fraction(incident)),
         "started_at": incident.started_at if incident else None,
     }
     cached = {}

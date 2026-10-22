@@ -215,18 +215,23 @@ async def _consult_impl(
     new_outputs = patch.get("outputs") or {}
     new_output = new_outputs.get(agent_name)
     summary = _summarize(new_output, agent_name)
-    return Command(
-        update={
-            "outputs": new_outputs,  # merged via _merge_outputs reducer
-            "messages": [
-                ToolMessage(
-                    content=json.dumps(summary, default=str),
-                    tool_call_id=tool_call_id,
-                    name=f"consult_{agent_name}",
-                )
-            ],
-        }
-    )
+    update: dict[str, Any] = {
+        "outputs": new_outputs,  # merged via _merge_outputs reducer
+        "messages": [
+            ToolMessage(
+                content=json.dumps(summary, default=str),
+                tool_call_id=tool_call_id,
+                name=f"consult_{agent_name}",
+            )
+        ],
+    }
+    # Forward the specialist's HITL records. Dropping them (the old code
+    # only forwarded outputs) meant decisions the IC made during chat never
+    # reached the audit log.
+    for key in ("audit_log", "dissent_log"):
+        if patch.get(key):
+            update[key] = patch[key]
+    return Command(update=update)
 
 
 # --------------------------------------------------------------------------- #
