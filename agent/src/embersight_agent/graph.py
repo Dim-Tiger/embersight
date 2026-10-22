@@ -20,7 +20,9 @@ Briefing topology (one-shot, ~30-60s):
         / \\
        RR  EI            # resource rec + evac intel - parallel, depend on V
         \\ /
-        master_ic        # synthesizes IAP + interrupts for IC approval
+        master_ic        # synthesizes the IAP draft
+         |
+     iap_approval        # interrupt(): IC approves / edits / rejects
 
 Chat topology (per user message, ~3-15s):
 
@@ -84,6 +86,10 @@ def build_briefing_graph() -> StateGraph:
     g.add_node("resource_recommendation", resource_recommendation.run)
     g.add_node("evacuation_intelligence", evacuation_intelligence.run)
     g.add_node("master_ic", master_ic.run)
+    # Approval is its own node so resuming the interrupt re-runs only the
+    # cheap approval step, never the (possibly LLM) synthesis. See
+    # master_ic.run for why that matters.
+    g.add_node("iap_approval", master_ic.approve_iap)
 
     g.add_edge(START, "orchestrator")
 
@@ -116,7 +122,8 @@ def build_briefing_graph() -> StateGraph:
         "master_ic",
     )
 
-    g.add_edge("master_ic", END)
+    g.add_edge("master_ic", "iap_approval")
+    g.add_edge("iap_approval", END)
     return g
 
 

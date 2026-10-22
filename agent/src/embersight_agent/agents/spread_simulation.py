@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from ..hitl import audit_entry, request_human_decision
+from ..hitl import audit_entry, decision_kind, request_human_decision
 from ..state import AgentOutput, AgentState, CitationBundle, Dataset, Model
 
 # Average residents per residential structure — same default the evac tool uses
@@ -695,22 +695,29 @@ async def run(state: AgentState) -> dict:  # noqa: C901
         decision = request_human_decision("trigger_point_violation", interrupt_payload)
         audit_records.append(audit_entry("trigger_point_violation", interrupt_payload, decision))
 
-        dec = decision.get("decision", "approve") if isinstance(decision, dict) else "approve"
+        # Canonical vocabulary is approved / edited / rejected (hitl.py).
+        # An unrecognised resume value is treated like a rejection so a
+        # malformed decision never publishes cones the IC did not accept.
+        dec = decision_kind(decision)
 
-        if dec == "reject":
+        if dec in ("rejected", "unrecognized"):
             output = _low_confidence_output(
                 incident_name,
                 f"Spread run rejected by IC at trigger-point breach "
                 f"({breach['trigger_id']}, {breach['hours_until_breach']}h). "
-                "Awaiting updated inputs.",
+                "Awaiting updated inputs."
+                if dec == "rejected"
+                else f"Spread run held: unrecognised IC decision {decision!r} at "
+                f"trigger-point breach ({breach['trigger_id']}). Awaiting a "
+                "clear approve / edit / reject.",
             )
             return {
                 "outputs": {AGENT_NAME: output},
                 "audit_log": audit_records,
             }
 
-        if dec == "edit":
-            edited_cones = decision.get("edits", {}).get("cones") or None
+        if dec == "edited":
+            edited_cones = (decision.get("edits") or {}).get("cones") or None
 
         # "approve" → fall through and continue with existing cones.
 

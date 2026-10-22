@@ -45,6 +45,24 @@ def request_human_decision(
     return decision
 
 
+DecisionKind = Literal["approved", "edited", "rejected", "unrecognized"]
+
+
+def decision_kind(decision: Any) -> DecisionKind:
+    """Normalise a resume value to one of the three canonical decisions.
+
+    Anything else (a typo like "approve", an empty dict, a bare string)
+    comes back as "unrecognized". Callers must treat that as NOT approved:
+    a malformed resume should never publish a draft on the IC's behalf.
+    """
+    if not isinstance(decision, dict):
+        return "unrecognized"
+    kind = decision.get("decision")
+    if kind in ("approved", "edited", "rejected"):
+        return kind
+    return "unrecognized"
+
+
 def audit_entry(
     interrupt_type: InterruptType,
     payload: dict[str, Any],
