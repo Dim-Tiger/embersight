@@ -4,8 +4,9 @@ Reads every upstream subagent output, runs a Claude Sonnet 4.5 synthesis
 pass to draft the appropriate ICS form bundle for the current operational
 period (ICS-201 for op period 1; ICS-202 + 203 + 204 + 215 + 215A for
 later periods), builds a dissent log from low-confidence and
-inter-agent-contradicting upstream claims, and ALWAYS pauses on the
-`iap_approval` interrupt before the draft is considered actionable.
+inter-agent-contradicting upstream claims, and hands the draft to the
+``approve_iap`` node, which ALWAYS pauses on the `iap_approval` interrupt
+before the draft is considered actionable.
 
 Hard repo rules enforced here (this agent is the canonical exemplar):
 - No function/tool named ``dispatch_*`` / ``order_*`` / ``send_*`` /
@@ -31,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..hitl import audit_entry, request_human_decision
+from ..hitl import audit_entry, decision_kind, request_human_decision
 from ..state import (
     AgentOutput,
     AgentState,
@@ -225,22 +226,23 @@ def _detect_dissent(state: AgentState) -> list[dict[str, Any]]:
     spread = outputs.get("spread_simulation")
     values = outputs.get("values_at_risk")
     if spread is not None and values is not None:
-        spread_txt = _payload_text(spread)
-        values_txt = _payload_text(values)
-        spread_high = any(
-            tok in spread_txt
-            for tok in ("high risk", "high-risk", '"high"', "severe", "critical")
+        sp = spread.payload or {}
+        # Read the numbers both agents actually publish. The old keyword
+        # scan matched "critical" in every spread payload (the
+        # critical_facilities_total key) and looked for a structures_count
+        # key that values_at_risk never emits, so this check could not fire
+        # correctly.
+        ros = sp.get("head_ros_chains_per_hr") or 0.0
+        area = sp.get("burn_area_24h_km2_p25") or 0.0
+        spread_high = (
+            float(ros) >= 10.0
+            or float(area) >= 5.0
+            or str(sp.get("risk_level", "")).lower() == "high"
         )
-        values_empty = any(
-            tok in values_txt
-            for tok in (
-                "no structures",
-                "zero structures",
-                '"structures_count": 0',
-                "structures_count: 0",
-                "no values at risk",
-                "no values-at-risk",
-            )
+        rollup = (values.payload or {}).get("rollup") or {}
+        values_empty = rollup.get("structures_total") == 0 or (
+            "structures_count" in (values.payload or {})
+            and (values.payload or {}).get("structures_count") == 0
         )
         if spread_high and values_empty:
             dissents.append(
@@ -439,7 +441,7 @@ async def _llm_synthesize(
     user_msg = _build_user_message(state, form_type, dissent_log)
 
     try:
-        llm = ChatAnthropic(model=MODEL_ID, temperature=0.2, max_tokens=4096)
+        llm = ChatAnthropic(model=MODEL_ID, temperature=0.2, max_tokens=4096, timeout=90)
     except Exception as exc:  # noqa: BLE001
         log.warning("ChatAnthropic init failed: %s", exc)
         return None
@@ -649,7 +651,9 @@ def _deterministic_key_findings(state: AgentState) -> list[str]:
         if out is None:
             findings.append(f"{name}: (no output — synthesis used neutral default)")
             continue
-        snippet = (out.narrative or "").strip().replace("\n", " ")[:140]
+        # Drop a leading "[agent_name]" log tag; the IC already sees the name.
+        narrative = re.sub(r"^\[[\w_]+\]\s*", "", (out.narrative or "").strip())
+        snippet = narrative.replace("\n", " ")[:140]
         findings.append(f"{name} (conf={out.confidence:.2f}): {snippet}")
         if len(findings) >= 5:
             break
@@ -695,7 +699,27 @@ def _build_citation_bundle(used_llm: bool) -> CitationBundle:
     )
 
 
+def _resource_request_draft(state: AgentState) -> list[dict[str, Any]]:
+    """The resource recommendation's line items, carried inside the IAP
+    envelope. In briefing mode resource_recommendation does not pause on its
+    own interrupt, so this is where the IC actually sees and signs off on
+    the PROPOSED resources."""
+    rr = state.outputs.get("resource_recommendation")
+    if rr is None:
+        return []
+    return list((rr.payload or {}).get("recommendations") or [])
+
+
 async def run(state: AgentState) -> dict:
+    """Synthesize the IAP draft. Does NOT pause.
+
+    The approval interrupt lives in a separate graph node (``approve_iap``)
+    on purpose. LangGraph re-executes an interrupted node from the top when
+    it resumes, so if synthesis and interrupt() shared a node, an LLM run
+    would draft a NEW IAP on resume and the IC's "approve" would be applied
+    to text they never saw. Splitting them means the draft is computed once,
+    checkpointed, and the approval node only reads it back.
+    """
     op_period = max(1, int(state.operational_period or 1))
     form_type = _form_type(op_period)
 
@@ -730,25 +754,80 @@ async def run(state: AgentState) -> dict:
         "type": "iap_approval",
         "form_type": form_type,
         "draft": draft,
+        "resource_request_draft": _resource_request_draft(state),
         "dissent_log": dissent_log,
         "confidence": confidence,
+        "confidence_driver": conf_driver,
         "citations": citation_bundle.model_dump(),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    decision = request_human_decision("iap_approval", interrupt_envelope)
 
-    # Decision branching.
-    decision_kind = (decision or {}).get("decision", "approved")
-    edited_draft = (decision or {}).get("edited_draft")
-    reject_reason = (decision or {}).get("reason")
+    narrative = (
+        f"Master IC DRAFT {form_type} for operational period {op_period} is "
+        f"ready for IC review: confidence={confidence:.2f}, "
+        f"dissents={len(dissent_log)}, synthesis="
+        f"{'LLM' if used_llm else 'deterministic'}. Nothing is final until "
+        "the IC approves it."
+    )
+    output = AgentOutput(
+        agent=AGENT_NAME,
+        narrative=narrative,
+        payload={
+            "iap_draft": draft,
+            "form_type": form_type,
+            "decision": "pending_ic_approval",
+            "dissent_log": dissent_log,
+            "key_findings": draft.get("key_findings") or _deterministic_key_findings(state),
+            "synthesis_source": "llm" if used_llm else "deterministic",
+            "interrupt_envelope": interrupt_envelope,
+        },
+        confidence=confidence,
+        confidence_driver=conf_driver,
+        citation_bundle=citation_bundle,
+    )
+    return {"outputs": {AGENT_NAME: output}}
 
-    final_draft: dict[str, Any]
-    if decision_kind == "approved":
+
+async def approve_iap(state: AgentState) -> dict:
+    """Pause on the ``iap_approval`` interrupt for the draft ``run`` stored.
+
+    Fails closed: only an explicit "approved", or "edited" WITH an
+    ``edited_draft``, publishes an IAP. "rejected", "edited" without edits,
+    and anything unrecognised leave ``state.iap_draft`` untouched.
+    """
+    synthesized = state.outputs.get(AGENT_NAME)
+    payload = dict((synthesized.payload if synthesized else None) or {})
+    envelope = payload.get("interrupt_envelope")
+    if not envelope:
+        # Nothing to approve (synthesis did not run). Never invent a draft.
+        return {}
+
+    draft = payload.get("iap_draft") or {}
+    dissent_log = list(payload.get("dissent_log") or [])
+
+    decision = request_human_decision("iap_approval", envelope)
+    kind = decision_kind(decision)
+    decision = decision if isinstance(decision, dict) else {"raw": decision}
+    edited_draft = decision.get("edited_draft")
+    reject_reason = decision.get("reason")
+
+    final_draft: dict[str, Any] = {}
+    if kind == "approved":
         final_draft = draft
-    elif decision_kind == "edited" and isinstance(edited_draft, dict):
+    elif kind == "edited" and isinstance(edited_draft, dict) and edited_draft:
         final_draft = edited_draft
-    elif decision_kind == "rejected":
-        final_draft = {}
+    elif kind == "edited":
+        dissent_log.append(
+            _dissent_entry(
+                source_agent="human_ic",
+                conflicting_agent=AGENT_NAME,
+                claim_a="IC chose Edit but no edited draft was supplied",
+                claim_b="draft held for revision; not published",
+                severity="medium",
+                rationale="Edit is not approval; the IAP stays a DRAFT.",
+            )
+        )
+    elif kind == "rejected":
         dissent_log.append(
             _dissent_entry(
                 source_agent="human_ic",
@@ -763,57 +842,45 @@ async def run(state: AgentState) -> dict:
             )
         )
     else:
-        # Unknown decision keyword — treat as approved-with-warning so the
-        # graph still terminates, but record the unexpected envelope.
-        final_draft = draft
         dissent_log.append(
             _dissent_entry(
                 source_agent="human_ic",
                 conflicting_agent=AGENT_NAME,
-                claim_a=f"Unrecognized decision: {decision_kind!r}",
-                claim_b="treated as approved",
-                severity="medium",
-                rationale="Unexpected interrupt envelope; review audit log.",
+                claim_a=f"Unrecognized decision: {decision.get('decision')!r}",
+                claim_b="treated as NOT approved; draft not published",
+                severity="high",
+                rationale="Unexpected resume value; review the audit log.",
             )
         )
 
+    published = bool(final_draft)
     narrative = (
-        f"Master IC DRAFT {form_type} for operational period {op_period}: "
-        f"decision={decision_kind}, confidence={confidence:.2f}, "
-        f"dissents={len(dissent_log)}, synthesis="
-        f"{'LLM' if used_llm else 'deterministic'}."
+        f"Master IC DRAFT {payload.get('form_type', '')}: decision={kind}; "
+        + (
+            "IAP approved by the IC."
+            if kind == "approved"
+            else "IAP approved with the IC's edits."
+            if published
+            else "IAP NOT published."
+        )
     )
-
-    payload = {
-        "iap_draft": final_draft,
-        "form_type": form_type,
-        "decision": decision_kind,
-        "dissent_log": dissent_log,
-        "key_findings": draft.get("key_findings") or _deterministic_key_findings(state),
-        "synthesis_source": "llm" if used_llm else "deterministic",
-    }
-
     output = AgentOutput(
         agent=AGENT_NAME,
         narrative=narrative,
-        payload=payload,
-        confidence=confidence,
-        confidence_driver=conf_driver,
-        citation_bundle=citation_bundle,
+        payload={**payload, "decision": kind, "iap_draft": final_draft},
+        confidence=synthesized.confidence if synthesized else 0.0,
+        confidence_driver=synthesized.confidence_driver if synthesized else "",
+        citation_bundle=synthesized.citation_bundle if synthesized else CitationBundle(),
     )
-
-    audit_record = audit_entry("iap_approval", interrupt_envelope, decision or {})
-
     patch: dict[str, Any] = {
         "outputs": {AGENT_NAME: output},
-        "audit_log": [audit_record],
+        "audit_log": [audit_entry("iap_approval", envelope, decision)],
         "dissent_log": dissent_log,
     }
     # Mirror the approved/edited draft onto the state-level slot so the
     # dashboard can render it without digging into output.payload.
-    if final_draft:
+    if published:
         patch["iap_draft"] = final_draft
-
     return patch
 
 
@@ -963,7 +1030,11 @@ async def _smoke() -> None:
         me.request_human_decision = _fake  # type: ignore[assignment]
         try:
             state = _mock_state_with_dissents()
-            patch = await me.run(state)
+            synth = await me.run(state)
+            state = state.model_copy(
+                update={"outputs": {**state.outputs, **synth["outputs"]}}
+            )
+            patch = await me.approve_iap(state)
         finally:
             me.request_human_decision = original_hitl  # type: ignore[assignment]
 

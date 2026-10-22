@@ -35,9 +35,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..hitl import audit_entry, request_human_decision
+from ..hitl import decision_kind as normalise_decision
 from ..state import AgentOutput, AgentState, CitationBundle, Dataset, Model
 from ..tools import evac as evac_tools
 from ..tools import zone_catalog
+from .provenance import narrator_model
 
 log = logging.getLogger(__name__)
 
@@ -373,7 +375,7 @@ async def _llm_proposal_async(
     user_msg = _build_zone_prompt(zone, overlaps, population, egress)
 
     try:
-        chat = ChatAnthropic(model=LLM_MODEL, max_tokens=200, temperature=0.0)
+        chat = ChatAnthropic(model=LLM_MODEL, max_tokens=200, temperature=0.0, timeout=30)
         resp = await chat.ainvoke(
             [
                 {"role": "system", "content": system_prompt},
@@ -415,6 +417,15 @@ def _llm_proposal(
     except RuntimeError:
         # Already inside a running loop — fall back to deterministic.
         return None
+
+
+def _zone_population(zone: dict) -> tuple[int, str]:
+    """(population, method). Use the zone's published population when the
+    catalog has one; otherwise fall back to the area-density estimate."""
+    published = zone.get("population_static")
+    if isinstance(published, int) and published >= 0:
+        return published, "zone_catalog"
+    return evac_tools.estimate_population(zone["polygon_wkt"]), "area_density_estimate"
 
 
 def _confidence(
@@ -579,9 +590,11 @@ async def _run_synthetic_test_mode(
         decision = request_human_decision("evac_zone_change", envelope)
         audit_records.append(audit_entry("evac_zone_change", envelope, decision))
 
-        decision_kind = (decision or {}).get("decision", "rejected")
+        decision_kind = normalise_decision(decision)
         edits = (decision or {}).get("edits") or {}
-        edited_status = edits.get("proposed_status") if isinstance(edits, dict) else None
+        edited_status = (
+            str(edits.get("proposed_status") or "").upper() if isinstance(edits, dict) else None
+        )
         if decision_kind == "approved":
             final_status = z["status"]
             counts["approved"] += 1
@@ -881,7 +894,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         overlaps = cand["overlaps"]
         adjacent_to_order = cand["adjacent_to_order"]
 
-        population = evac_tools.estimate_population(zone["polygon_wkt"])
+        population, population_method = _zone_population(zone)
         egress = evac_tools.compute_evacuation_routes_clear(
             zone["polygon_wkt"],
             road_graph,
@@ -922,6 +935,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
                 "effective_overlaps": effective_overlaps,
                 "adjacent_to_order": adjacent_to_order,
                 "population": population,
+                "population_method": population_method,
                 "egress": egress,
                 "use_llm": use_llm,
             }
@@ -963,6 +977,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         effective_overlaps = cand["effective_overlaps"]
         adjacent_to_order = cand["adjacent_to_order"]
         population = cand["population"]
+        population_method = cand["population_method"]
         egress = cand["egress"]
         llm_out = cand.get("llm_out") if cand.get("use_llm") else None
 
@@ -1010,13 +1025,15 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         ).isoformat()
 
         polygon_geojson = _wkt_to_geojson(zone["polygon_wkt"])
-        residential_count = 0
-        try:
+        # Prefer the zone's published structure count. Otherwise back it out
+        # of the population. (This used to divide by an undefined name inside
+        # a bare except, so every envelope reported 0 residences.)
+        if isinstance(zone.get("structures_static"), int):
+            residential_count = zone["structures_static"]
+        else:
             residential_count = max(
-                0, int(round(population / DEFAULT_HOUSEHOLD_SIZE))
+                0, int(round(population / evac_tools.DEFAULT_HOUSEHOLD_SIZE))
             )
-        except Exception:  # noqa: BLE001
-            residential_count = 0
 
         # Structured "why" — assembled from the model's one-liner + the
         # signals that drove the proposal. The IC card formats these as
@@ -1065,6 +1082,9 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
             "impact": impact,
             "polygon_geojson": polygon_geojson,
             "population_estimate": population,
+            # "zone_catalog" = the county's published figure; anything else
+            # is EmberSight's area-density ESTIMATE and the card should say so.
+            "population_method": population_method,
             "egress_status": egress,
             "overlaps": overlaps,
             "adjacent_to_active_evac_zone": adjacent_to_order,
@@ -1073,9 +1093,11 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         decision = request_human_decision("evac_zone_change", envelope)
         audit_records.append(audit_entry("evac_zone_change", envelope, decision))
 
-        decision_kind = (decision or {}).get("decision", "rejected")
+        decision_kind = normalise_decision(decision)
         edits = (decision or {}).get("edits") or {}
-        edited_status = edits.get("proposed_status") if isinstance(edits, dict) else None
+        edited_status = (
+            str(edits.get("proposed_status") or "").upper() if isinstance(edits, dict) else None
+        )
 
         if decision_kind == "approved":
             final_status = proposed_status
@@ -1134,7 +1156,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
                 url="https://github.com/microsoft/USBuildingFootprints",
             ),
         ],
-        models=[Model(name=LLM_MODEL, version="haiku-4.5")],
+        models=[narrator_model(LLM_MODEL, used_llm=llm_calls > 0)],
         reasoning_trace_id=str(uuid.uuid4()),
     )
 

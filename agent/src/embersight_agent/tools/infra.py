@@ -7,16 +7,17 @@
     + EIA US Electric Power Transmission Lines
   - Critical facilities: fire stations, EOCs, comm towers
 
-All ArcGIS FeatureServer endpoints accept an envelope geometry filter
-in EPSG:4326. We pass `(minx, miny, maxx, maxy)` tuples throughout and
-return plain dicts/lists for JSON-safe handoff to the LLM prompt.
+Every query takes an ``area``: a WKT polygon (the spread cone, so results
+describe the cone itself) or a ``(minx, miny, maxx, maxy)`` bbox. The
+spatial filter is built in ``tools.arcgis``. Results are plain dicts/lists
+for JSON-safe handoff to the LLM prompt.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import httpx
+from .arcgis import Area, geometry_params, query
 
 HOSPITALS_URL = (
     "https://services1.arcgis.com/0MSEUqKaxRlEPj5g/arcgis/rest/services/"
@@ -55,40 +56,18 @@ COMM_TOWER_URL = (
 )
 
 
-def _envelope(bbox: tuple[float, float, float, float]) -> str:
-    minx, miny, maxx, maxy = bbox
-    return (
-        f'{{"xmin":{minx},"ymin":{miny},"xmax":{maxx},"ymax":{maxy},'
-        '"spatialReference":{"wkid":4326}}'
-    )
-
-
-def _fetch_features(
-    url: str, bbox: tuple[float, float, float, float], out_fields: str
-) -> dict[str, Any]:
+def _fetch_features(url: str, area: Area, out_fields: str) -> dict[str, Any]:
+    """Features inside ``area`` (WKT polygon or bbox tuple) as GeoJSON."""
     params = {
         "where": "1=1",
-        "geometry": _envelope(bbox),
-        "geometryType": "esriGeometryEnvelope",
-        "inSR": "4326",
-        "spatialRel": "esriSpatialRelIntersects",
+        **geometry_params(area),
         "outFields": out_fields,
         "returnGeometry": "true",
         "outSR": "4326",
         "resultRecordCount": "1000",
         "f": "geojson",
     }
-    with httpx.Client(timeout=20) as client:
-        r = client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
-    # ArcGIS returns HTTP 200 with an `error` envelope when the layer is
-    # missing or unauthorized. Treat that as a real failure.
-    if isinstance(data, dict) and "error" in data and "features" not in data:
-        err = data["error"]
-        msg = err.get("message") if isinstance(err, dict) else str(err)
-        raise RuntimeError(f"arcgis:{msg}")
-    return data
+    return query(url, params)
 
 
 def _point_coords(geom: dict[str, Any] | None) -> tuple[float, float] | None:
@@ -109,11 +88,11 @@ def _point_coords(geom: dict[str, Any] | None) -> tuple[float, float] | None:
         return None
 
 
-def query_hospitals(bbox: tuple[float, float, float, float]) -> list[dict[str, Any]]:
-    """HIFLD/CMS hospitals in bbox. Returns list of dicts."""
+def query_hospitals(area: Area) -> list[dict[str, Any]]:
+    """HIFLD/CMS hospitals in `area`. Returns list of dicts."""
     try:
         data = _fetch_features(
-            HOSPITALS_URL, bbox, "NAME,BEDS,TYPE,STATUS,TRAUMA"
+            HOSPITALS_URL, area, "NAME,BEDS,TYPE,STATUS,TRAUMA"
         )
     except Exception as exc:  # noqa: BLE001
         return [{"error": f"http:{exc}"}]
@@ -141,11 +120,11 @@ def query_hospitals(bbox: tuple[float, float, float, float]) -> list[dict[str, A
     return out
 
 
-def query_schools(bbox: tuple[float, float, float, float]) -> list[dict[str, Any]]:
-    """NCES Common Core of Data schools in bbox."""
+def query_schools(area: Area) -> list[dict[str, Any]]:
+    """NCES Common Core of Data schools in `area`."""
     try:
         data = _fetch_features(
-            SCHOOLS_URL, bbox, "NAME,ENROLLMENT,LEVEL_,STATUS"
+            SCHOOLS_URL, area, "NAME,ENROLLMENT,LEVEL_,STATUS"
         )
     except Exception as exc:  # noqa: BLE001
         return [{"error": f"http:{exc}"}]
@@ -173,12 +152,12 @@ def query_schools(bbox: tuple[float, float, float, float]) -> list[dict[str, Any
 
 
 def query_transmission_lines(
-    bbox: tuple[float, float, float, float],
+    area: Area,
 ) -> list[dict[str, Any]]:
-    """EIA US Electric Power Transmission Lines intersecting bbox."""
+    """EIA US Electric Power Transmission Lines intersecting `area`."""
     try:
         data = _fetch_features(
-            TRANSMISSION_URL, bbox, "VOLTAGE,OWNER,TYPE,STATUS,VOLT_CLASS"
+            TRANSMISSION_URL, area, "VOLTAGE,OWNER,TYPE,STATUS,VOLT_CLASS"
         )
     except Exception as exc:  # noqa: BLE001
         return [{"error": f"http:{exc}"}]
@@ -221,9 +200,13 @@ def _ci_get(props: dict[str, Any], *keys: str) -> Any:
 
 
 def query_critical_facilities(
-    bbox: tuple[float, float, float, float],
+    area: Area,
 ) -> dict[str, Any]:
-    """Composite query: fire stations + EOCs + comm towers in bbox."""
+    """Composite query: fire stations + EOCs + comm towers in ``area``.
+
+    Returns ``{fire_stations, eocs, comm_towers, total, errors?}``; ``errors``
+    maps each sub-layer that failed to its message.
+    """
     out: dict[str, Any] = {"fire_stations": [], "eocs": [], "comm_towers": []}
 
     for key, url, fields in (
@@ -234,9 +217,12 @@ def query_critical_facilities(
         ("comm_towers", COMM_TOWER_URL, "StrucType,Licensee,LocCity"),
     ):
         try:
-            data = _fetch_features(url, bbox, fields)
+            data = _fetch_features(url, area, fields)
         except Exception as exc:  # noqa: BLE001
-            out[key] = [{"error": f"http:{exc}"}]
+            # Keep the sub-layer list empty so the total never counts an
+            # error as a facility; the failure is reported under `errors`.
+            out[key] = []
+            out.setdefault("errors", {})[key] = f"http:{exc}"
             continue
         rows: list[dict[str, Any]] = []
         for feat in data.get("features", []) or []:

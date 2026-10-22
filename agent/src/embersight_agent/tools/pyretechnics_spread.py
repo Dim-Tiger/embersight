@@ -18,8 +18,9 @@ fallback is used.
 from __future__ import annotations
 
 import math
+import re
 import os
-from typing import Any
+from typing import Any, NamedTuple
 
 PYRETECHNICS_VERSION = "unavailable"
 PYRETECHNICS_USED = False
@@ -92,8 +93,45 @@ _FBFM40: dict[str, dict[str, float]] = {
 }
 
 
+_FALLBACK_CODE = "GS2"
+_NON_BURNABLE = {"load": 0.0, "depth": 0.0, "moe": 0.0}
+_CODE_RE = re.compile(r"\b(NB|GR|GS|SH|TU|TL|SB)(\d)\b", re.IGNORECASE)
+
+
+class FuelPreset(NamedTuple):
+    code: str              # the FBFM40 code whose parameters are used
+    params: dict[str, float]
+    requested: str         # the code that was asked for ("" if unparseable)
+    substituted: bool      # True when `code` != `requested`
+
+
+def fuel_code(fuel_model: str) -> str:
+    """Extract the Scott & Burgan code from any label we receive.
+
+    terrain_fuel publishes LANDFIRE labels like ``"102 GR2 low load, dry
+    climate grass"``; tests and the LLM may pass a bare ``"GR2"``.
+    """
+    m = _CODE_RE.search(str(fuel_model or ""))
+    return f"{m.group(1).upper()}{m.group(2)}" if m else ""
+
+
+def fuel_preset(fuel_model: str) -> FuelPreset:
+    """Parameters for a fuel model, saying so when a substitute is used.
+
+    NB* (urban, water, snow, agriculture, bare ground) does not carry fire.
+    A burnable model that is not in the simplified table falls back to GS2
+    and is flagged, so the narrative can tell the IC.
+    """
+    code = fuel_code(fuel_model)
+    if code.startswith("NB"):
+        return FuelPreset(code, _NON_BURNABLE, code, False)
+    if code in _FBFM40:
+        return FuelPreset(code, _FBFM40[code], code, False)
+    return FuelPreset(_FALLBACK_CODE, _FBFM40[_FALLBACK_CODE], code, True)
+
+
 def _preset(fuel_model: str) -> dict[str, float]:
-    return _FBFM40.get(fuel_model.upper(), _FBFM40["GS2"])
+    return fuel_preset(fuel_model).params
 
 
 # --------------------------------------------------------------------------- #
@@ -110,6 +148,12 @@ def calc_surface_ros(
     fuel_moisture: dict,
 ) -> dict:
     """Head-fire ROS for one representative cell.
+
+    This always uses ``_rothermel_fallback``: a simplified power-law in the
+    shape of Rothermel's model (base spread x (1 + wind factor + slope
+    factor)), NOT the full Rothermel 1972 equations and NOT a pyretechnics
+    grid run. pyretechnics is only imported to record its version. Treat the
+    output as an order-of-magnitude planning estimate.
 
     `wind_dir_deg` is the heading the **head of the fire** propagates toward,
     measured clockwise from north. Callers that have meteorological "wind

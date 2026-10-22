@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import pathlib
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..state import (
@@ -35,8 +36,11 @@ from ..state import (
     Dataset,
     Model,
 )
+from ..units import wind_phrase
+from .provenance import narrator_model
 
 AGENT_NAME = "weather_wind"
+log = logging.getLogger(__name__)
 
 _PROMPT_PATH = (
     pathlib.Path(__file__).resolve().parent.parent / "prompts" / "fban.md"
@@ -196,7 +200,11 @@ async def _llm_narrative(fused: dict[str, Any]) -> str | None:
         "Write a 4-6 sentence FBAN-style summary covering: 24-hour wind "
         "trend, RH crossover risk, any Red Flag / Fire Weather Watch in "
         "effect, the worst-case hour, and HRRR/RTMA agreement. Use the "
-        "RECOMMEND / PROPOSE / SUGGEST verbs only.\n\n"
+        "RECOMMEND / PROPOSE / SUGGEST verbs only. State wind as US fire "
+        "crews do: speed in mph and the cardinal direction it blows FROM "
+        "(e.g. '15 mph from the ESE'); directions in the data are FROM "
+        "degrees. If flat.assumed_inputs is non-empty, say those values are "
+        "planning defaults, not observations.\n\n"
         f"{json.dumps(fused, default=str)[:8000]}"
     )
     try:
@@ -204,7 +212,8 @@ async def _llm_narrative(fused: dict[str, Any]) -> str | None:
         return await stream_text(
             llm, [SystemMessage(content=system), HumanMessage(content=human)]
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — fall back to deterministic text
+        log.warning("weather LLM narrative failed: %s", exc)
         return None
 
 
@@ -227,13 +236,30 @@ def _deterministic_narrative(fused: dict[str, Any]) -> str:
         )
     else:
         parts.append("No Red Flag Warning in effect.")
+    flat = fused.get("flat") or {}
+    if flat:
+        sources = flat.get("sources") or {}
+        assumed = flat.get("assumed_inputs") or []
+        wind = wind_phrase(flat.get("wind_speed_mph"), flat.get("wind_dir_deg"))
+        if {"wind_speed_mph", "wind_dir_deg"} & set(assumed):
+            parts.append(
+                f"No live wind available: spread modelling uses an ASSUMED {wind} "
+                "planning default, not an observation."
+            )
+        elif str(sources.get("wind_dir_deg", "")).endswith("(calm)"):
+            parts.append(f"Current wind calm (source: {sources.get('wind_speed_mph')}).")
+        else:
+            parts.append(f"Current wind {wind} (source: {sources.get('wind_speed_mph')}).")
+        other = [k for k in assumed if k not in ("wind_speed_mph", "wind_dir_deg")]
+        if other:
+            parts.append("ASSUMED planning defaults for: " + ", ".join(other) + ".")
     if crit:
         parts.append(
             f"Worst HRRR hour {crit.get('valid_time')}: "
-            f"{crit.get('wind_speed_mph')} mph from {crit.get('wind_direction_deg')}°, "
+            f"{wind_phrase(crit.get('wind_speed_mph'), crit.get('wind_direction_deg'))}, "
             f"RH {crit.get('rh_pct')}%, {crit.get('temp_f')}°F."
         )
-    parts.append(f"PROPOSE confidence {conf:.2f} (HRRR/RTMA agreement).")
+    parts.append(f"PROPOSE confidence {conf:.2f} ({fused.get('confidence_driver', 'HRRR/RTMA agreement')}).")
     return " ".join(parts)
 
 
@@ -242,25 +268,71 @@ def _deterministic_narrative(fused: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 
 
+_CARDINAL_DEG = {
+    name: i * 22.5
+    for i, name in enumerate(
+        ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+         "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+    )
+}
+
+
+def _nws_current_hour(nws_forecast: Any) -> dict[str, Any]:
+    """First period of the NWS hourly forecast as flat keys.
+
+    NWS needs no API key or science packages, so it is the last real source
+    before planning defaults. ``windSpeed`` arrives as "10 mph" or
+    "5 to 10 mph" (we take the upper number) and ``windDirection`` as a
+    16-point cardinal ("WSW"), which is a FROM direction like ours.
+    """
+    try:
+        periods = (nws_forecast or {})["forecast"]["properties"]["periods"]
+        p = periods[0]
+    except (KeyError, IndexError, TypeError):
+        return {}
+    out: dict[str, Any] = {}
+    speeds = [float(t) for t in str(p.get("windSpeed") or "").split() if t.replace(".", "", 1).isdigit()]
+    if speeds:
+        out["wind_speed_mph"] = max(speeds)
+    direction = _CARDINAL_DEG.get(str(p.get("windDirection") or "").upper())
+    if direction is not None:
+        out["wind_dir_deg"] = direction
+    temp = p.get("temperature")
+    if isinstance(temp, (int, float)):
+        out["temp_f"] = float(temp) if p.get("temperatureUnit", "F") == "F" else float(temp) * 9 / 5 + 32
+    rh = (p.get("relativeHumidity") or {}).get("value")
+    if isinstance(rh, (int, float)):
+        out["rh_pct"] = float(rh)
+    return out
+
+
+# Planning defaults used only when every source is silent. They are listed in
+# payload.assumed_inputs so downstream agents and the IC can see them.
+_PLANNING_DEFAULTS = {
+    "wind_speed_mph": 15.0,
+    "wind_dir_deg": 270.0,
+    "temp_f": 90.0,
+    "rh_pct": 20.0,
+}
+
+
 def _flat_wx_keys(
     rtma: dict[str, Any],
     hrrr_hourly: list[dict[str, Any]],
     critical: dict[str, Any] | None,
     raws: dict[str, Any],
+    nws_forecast: Any = None,
+    open_meteo: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project the richest source into the flat keys spread_simulation expects.
 
-    Source preference per key: RTMA now → HRRR f=0 → critical window → latest RAWS.
-    Defaults match spread_simulation's hardcoded fallbacks (15 mph @ 270°,
-    20% RH, 90°F) so the degraded path stays deterministic.
+    Source preference per key: RTMA now → HRRR f=0 → critical window →
+    latest RAWS → Open-Meteo current (what the dashboard's wind layer shows)
+    → NWS hourly forecast → planning default. Every key that
+    falls through to a default is named in ``assumed_inputs`` and its
+    source is recorded in ``sources``, so a made-up number can never pass
+    for an observation.
     """
-
-    def _first_non_none(*candidates: Any) -> Any:
-        for c in candidates:
-            if c is not None:
-                return c
-        return None
-
     hrrr0 = next(
         (h for h in hrrr_hourly if h.get("fxx") == 0),
         None,
@@ -276,42 +348,84 @@ def _flat_wx_keys(
             "rh_pct": (latest.get("relative_humidity") or {}).get("value"),
         }
         break
+    nws_now = _nws_current_hour(nws_forecast)
+    om = open_meteo or {}
 
-    wind_speed = _first_non_none(
-        rtma.get("wind_speed_mph"),
-        hrrr0.get("wind_speed_mph"),
-        crit.get("wind_speed_mph"),
-        raws_latest.get("wind_speed_mph"),
-        15.0,
-    )
-    wind_dir = _first_non_none(
-        rtma.get("wind_direction_deg"),
-        hrrr0.get("wind_direction_deg"),
-        crit.get("wind_direction_deg"),
-        raws_latest.get("wind_dir_deg"),
-        270.0,
-    )
-    temp_f = _first_non_none(
-        rtma.get("temp_f"),
-        hrrr0.get("temp_f"),
-        crit.get("temp_f"),
-        raws_latest.get("temp_f"),
-        90.0,
-    )
-    rh = _first_non_none(
-        rtma.get("rh_pct"),
-        hrrr0.get("rh_pct"),
-        crit.get("rh_pct"),
-        raws_latest.get("rh_pct"),
-        20.0,
-    )
-    return {
-        "wind_speed_mph": float(wind_speed),
-        "wind_dir_deg": float(wind_dir),
-        "temp_f": float(temp_f),
-        "rh_pct": float(rh),
-        "fuel_moisture": {},  # weather_wind has no fuel-moisture pipeline yet
+    candidates = {
+        "wind_speed_mph": [
+            ("rtma", rtma.get("wind_speed_mph")),
+            ("hrrr_f0", hrrr0.get("wind_speed_mph")),
+            ("hrrr_critical_window", crit.get("wind_speed_mph")),
+            ("raws", raws_latest.get("wind_speed_mph")),
+            ("open_meteo", om.get("wind_speed_mph")),
+            ("nws_hourly", nws_now.get("wind_speed_mph")),
+        ],
+        "wind_dir_deg": [
+            ("rtma", rtma.get("wind_direction_deg")),
+            ("hrrr_f0", hrrr0.get("wind_direction_deg")),
+            ("hrrr_critical_window", crit.get("wind_direction_deg")),
+            ("raws", raws_latest.get("wind_dir_deg")),
+            ("open_meteo", om.get("wind_dir_deg")),
+            ("nws_hourly", nws_now.get("wind_dir_deg")),
+        ],
+        "temp_f": [
+            ("rtma", rtma.get("temp_f")),
+            ("hrrr_f0", hrrr0.get("temp_f")),
+            ("hrrr_critical_window", crit.get("temp_f")),
+            ("raws", raws_latest.get("temp_f")),
+            ("open_meteo", om.get("temp_f")),
+            ("nws_hourly", nws_now.get("temp_f")),
+        ],
+        "rh_pct": [
+            ("rtma", rtma.get("rh_pct")),
+            ("hrrr_f0", hrrr0.get("rh_pct")),
+            ("hrrr_critical_window", crit.get("rh_pct")),
+            ("raws", raws_latest.get("rh_pct")),
+            ("open_meteo", om.get("rh_pct")),
+            ("nws_hourly", nws_now.get("rh_pct")),
+        ],
     }
+    flat: dict[str, Any] = {"fuel_moisture": {}}  # no fuel-moisture pipeline yet
+    sources: dict[str, str] = {}
+    assumed: list[str] = []
+
+    # Wind speed and direction must come from the SAME source: a speed from
+    # one feed with a direction from another describes no real wind. A calm
+    # report (0 mph, no direction, as NWS sends it) is a valid observation;
+    # its direction is irrelevant, so it is not "assumed".
+    speeds = dict(candidates.pop("wind_speed_mph"))
+    directions = dict(candidates.pop("wind_dir_deg"))
+    wind = None
+    for src, speed in speeds.items():
+        if speed is None:
+            continue
+        if directions.get(src) is not None:
+            wind = (src, float(speed), float(directions[src]), src)
+            break
+        if float(speed) == 0.0:
+            wind = (src, 0.0, _PLANNING_DEFAULTS["wind_dir_deg"], f"{src} (calm)")
+            break
+    if wind is None:
+        flat["wind_speed_mph"] = _PLANNING_DEFAULTS["wind_speed_mph"]
+        flat["wind_dir_deg"] = _PLANNING_DEFAULTS["wind_dir_deg"]
+        sources["wind_speed_mph"] = sources["wind_dir_deg"] = "planning_default"
+        assumed += ["wind_speed_mph", "wind_dir_deg"]
+    else:
+        flat["wind_speed_mph"], flat["wind_dir_deg"] = wind[1], wind[2]
+        sources["wind_speed_mph"], sources["wind_dir_deg"] = wind[0], wind[3]
+
+    for key, options in candidates.items():
+        chosen = next(((src, val) for src, val in options if val is not None), None)
+        if chosen is None:
+            flat[key] = _PLANNING_DEFAULTS[key]
+            sources[key] = "planning_default"
+            assumed.append(key)
+        else:
+            flat[key] = float(chosen[1])
+            sources[key] = chosen[0]
+    flat["sources"] = sources
+    flat["assumed_inputs"] = assumed
+    return flat
 
 
 # --------------------------------------------------------------------------- #
@@ -320,23 +434,25 @@ def _flat_wx_keys(
 
 
 async def _gather_inputs(lat: float, lon: float) -> dict[str, Any]:
-    """Pull NWS + RAWS + HRRR + RTMA in parallel.
+    """Pull NWS + Open-Meteo + RAWS + HRRR + RTMA in parallel.
 
     Imports are deferred so a graph-import smoke test doesn't require the
     science group to be installed.
     """
-    from ..tools import herbie_wx, nws, synoptic_raws
+    from ..tools import herbie_wx, nws, open_meteo, synoptic_raws
 
     bbox = synoptic_raws.bbox_around(lat, lon, 50.0)
 
     forecast_task = nws.get_forecast(lat, lon)
+    open_meteo_task = open_meteo.get_current(lat, lon)
     alerts_task = nws.get_active_alerts(lat, lon)
     raws_task = synoptic_raws.get_raws_observations(bbox, lookback_hours=24)
     hrrr_task = asyncio.to_thread(herbie_wx.get_hrrr_forecast, lat, lon, 24)
     rtma_task = asyncio.to_thread(herbie_wx.get_rtma_analysis, lat, lon)
 
-    forecast, alerts, raws, hrrr, rtma = await asyncio.gather(
+    forecast, om_now, alerts, raws, hrrr, rtma = await asyncio.gather(
         forecast_task,
+        open_meteo_task,
         alerts_task,
         raws_task,
         hrrr_task,
@@ -351,6 +467,7 @@ async def _gather_inputs(lat: float, lon: float) -> dict[str, Any]:
 
     return {
         "nws_forecast": _coerce(forecast, {"forecast": None}),
+        "open_meteo": {} if isinstance(om_now, Exception) else om_now,
         "nws_alerts": (
             [] if isinstance(alerts, Exception) else alerts
         ),
@@ -365,6 +482,9 @@ async def _gather_inputs(lat: float, lon: float) -> dict[str, Any]:
 # Test-mode overrides
 # --------------------------------------------------------------------------- #
 
+
+# How long a dev-panel synthetic alert stays in effect after issuance.
+SYNTHETIC_ALERT_HOURS = 12
 
 _ALERT_PRESETS: dict[str, dict[str, str]] = {
     "red_flag_warning": {
@@ -411,10 +531,11 @@ def _apply_test_overrides(inputs: dict[str, Any], overrides: Any) -> None:
     preset = getattr(overrides, "alert_preset", "none")
     if preset and preset != "none" and preset in _ALERT_PRESETS:
         p = _ALERT_PRESETS[preset]
-        now_iso = datetime.now(timezone.utc).isoformat()
-        ends_iso = (
-            datetime.now(timezone.utc).replace(microsecond=0)
-        ).isoformat()
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now.isoformat()
+        # A real Red Flag Warning runs for hours; ending it at issuance made
+        # the demo alert show up already expired.
+        ends_iso = (now + timedelta(hours=SYNTHETIC_ALERT_HOURS)).isoformat()
         inputs["nws_alerts"] = [
             {
                 "type": "Feature",
@@ -531,13 +652,33 @@ async def run(state: AgentState) -> dict:
         ],
     }
 
-    narrative = await _llm_narrative(fused) or _deterministic_narrative(fused)
+    # Flat top-level keys for downstream consumers (spread_simulation).
+    flat = _flat_wx_keys(
+        rtma, hrrr_hourly, critical, raws, inputs["nws_forecast"], inputs.get("open_meteo")
+    )
+    fused["flat"] = flat
+
+    llm_text = await _llm_narrative(fused)
+    narrative = llm_text or _deterministic_narrative(fused)
+    if llm_text and flat["assumed_inputs"]:
+        # Never rely on the model to mention that a number was made up.
+        narrative = (
+            narrative.rstrip()
+            + " ASSUMED planning defaults (no live data) for: "
+            + ", ".join(flat["assumed_inputs"])
+            + "."
+        )
 
     citations = CitationBundle(
         datasets=[
             Dataset(
                 name="NWS Active Alerts",
                 url=f"https://api.weather.gov/alerts/active?point={lat:.4f},{lon:.4f}",
+            ),
+            Dataset(
+                name="Open-Meteo current conditions",
+                url="https://open-meteo.com/",
+                timestamp=(inputs.get("open_meteo") or {}).get("valid_time"),
             ),
             Dataset(
                 name="NWS Hourly Forecast",
@@ -560,16 +701,10 @@ async def run(state: AgentState) -> dict:
             ),
         ],
         models=[
-            Model(name="claude-haiku-4-5", version="anthropic"),
+            narrator_model(_LLM_MODEL, used_llm=llm_text is not None),
         ],
         reasoning_trace_id=str(uuid.uuid4()),
     )
-
-    # Flat top-level keys for downstream consumers (spread_simulation).
-    # Source preference: RTMA now → HRRR f=0 → critical window → first RAWS.
-    # Defaults match spread_simulation's `_extract_weather` fallbacks so a
-    # silent-degrade path remains deterministic.
-    flat = _flat_wx_keys(rtma, hrrr_hourly, critical, raws)
 
     output = AgentOutput(
         agent=AGENT_NAME,
@@ -581,6 +716,10 @@ async def run(state: AgentState) -> dict:
             "temp_f": flat["temp_f"],
             "rh_pct": flat["rh_pct"],
             "fuel_moisture": flat["fuel_moisture"],
+            # Which feed each flat key came from, and which are made-up
+            # planning defaults (spread_simulation repeats these to the IC).
+            "wx_sources": flat["sources"],
+            "assumed_inputs": flat["assumed_inputs"],
             # Detailed structures for the UI / debugging.
             "red_flag": red_flag,
             "critical_window": critical,

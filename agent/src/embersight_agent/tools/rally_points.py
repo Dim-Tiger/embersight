@@ -33,7 +33,7 @@ from typing import Any
 
 import httpx
 
-from .overpass import OVERPASS, USER_AGENT, query_osm
+from .overpass import OVERPASS, USER_AGENT, query_osm_union
 
 # --------------------------------------------------------------------------- #
 # Type system
@@ -108,29 +108,26 @@ def _osm_tag_to_type(tags: dict[str, Any]) -> str:
 async def fetch_osm_rally_points(
     bbox: tuple[float, float, float, float],
 ) -> list[dict[str, Any]]:
-    """Pull every OSM tag we treat as an evacuation destination."""
-    queries: list[tuple[str, dict[str, list[str]], tuple[str, ...]]] = [
-        (
-            "assembly_point",
-            {"emergency": ["assembly_point"]},
-            ("node", "way", "relation"),
-        ),
-        ("shelter", {"social_facility": ["shelter"]}, ("node", "way", "relation")),
-        (
-            "school+community+townhall+firestation",
-            {"amenity": ["school", "community_centre", "townhall", "fire_station"]},
-            ("node", "way", "relation"),
-        ),
-        ("stadium+sports", {"leisure": ["stadium", "sports_centre"]}, ("way", "relation")),
-        ("camp_site", {"tourism": ["camp_site"]}, ("node", "way", "relation")),
-    ]
-    elements: list[dict[str, Any]] = []
-    for _label, filters, etypes in queries:
-        try:
-            chunk = await query_osm(bbox, filters, element_types=etypes)
-        except Exception:
-            continue
-        elements.extend(chunk)
+    """Pull every OSM tag we treat as an evacuation destination.
+
+    One union query instead of five (Overpass usage policy: be gentle with
+    the shared servers). Failures propagate, so discover_rally_points can
+    report "osm" in source_failures instead of silently returning nothing.
+    """
+    elements = await query_osm_union(
+        bbox,
+        [
+            ("emergency", ["assembly_point"], ("node", "way", "relation")),
+            ("social_facility", ["shelter"], ("node", "way", "relation")),
+            (
+                "amenity",
+                ["school", "community_centre", "townhall", "fire_station"],
+                ("node", "way", "relation"),
+            ),
+            ("leisure", ["stadium", "sports_centre"], ("way", "relation")),
+            ("tourism", ["camp_site"], ("node", "way", "relation")),
+        ],
+    )
     return _normalize_osm_rally(elements)
 
 
@@ -233,13 +230,13 @@ async def _hifld_query(
         "resultRecordCount": "200",
     }
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
-    try:
-        async with httpx.AsyncClient(timeout=HIFLD_TIMEOUT_S, headers=headers) as cli:
-            r = await cli.get(url, params=params)
-            r.raise_for_status()
-            data = r.json()
-    except Exception:
-        return []
+    # Errors propagate to fetch_hifld_rally_points, which reports them.
+    async with httpx.AsyncClient(timeout=HIFLD_TIMEOUT_S, headers=headers) as cli:
+        r = await cli.get(url, params=params)
+        r.raise_for_status()
+        data = r.json()
+    if isinstance(data, dict) and "error" in data and "features" not in data:
+        raise RuntimeError(f"arcgis:{data['error']}")
 
     out: list[dict[str, Any]] = []
     features = data.get("features") or []
@@ -318,10 +315,10 @@ async def fetch_hifld_rally_points(
         return_exceptions=True,
     )
 
-    def _ok(x: Any) -> list[dict[str, Any]]:
-        return x if isinstance(x, list) else []
-
-    return _ok(schools_pub_t) + _ok(schools_priv_t) + _ok(eoc_t)
+    results = (schools_pub_t, schools_priv_t, eoc_t)
+    if all(isinstance(r, BaseException) for r in results):
+        raise RuntimeError(f"all HIFLD layers failed: {results[0]!r}")
+    return [p for r in results if isinstance(r, list) for p in r]
 
 
 # --------------------------------------------------------------------------- #
