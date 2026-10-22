@@ -8,21 +8,35 @@ type MarkdownProps = {
   children: string;
   className?: string;
   inline?: boolean;
+  /** Mark the agents' action verbs (RECOMMEND, PROPOSE…) so the ask in a
+   * long report stands out when skimming. */
+  highlightVerbs?: boolean;
 };
+
+// The verbs agents are allowed to use for anything actionable. EmberSight
+// never dispatches, so these words are where a report asks the IC to decide.
+const ACTION_VERB = /^(RECOMMEND(?:ED|S)?|PROPOSE[DS]?|SUGGEST(?:ED|S)?|DRAFT)$/;
+const ACTION_VERB_IN_TEXT =
+  /(?<![*\w])(RECOMMEND(?:ED|S)?|PROPOSE[DS]?|SUGGEST(?:ED|S)?|DRAFT)(?![*\w])/g;
 
 // Shared renderer for agent-authored text. Agents emit GitHub-flavored
 // markdown (bold, headings, bullets, tables, inline code) and we want it
 // to actually render in the UI instead of showing the raw "**" / "###"
 // characters. The styling is tuned for the dense dark "smoke" panels —
 // headings stay small, lists keep their indents, code uses an inline pill.
-export function Markdown({ children, className, inline }: MarkdownProps) {
+export function Markdown({ children, className, inline, highlightVerbs }: MarkdownProps) {
   // Empty / whitespace-only input still needs to render so streaming
   // cursors line up; ReactMarkdown handles that fine.
   const components: Components = inline ? inlineComponents : blockComponents;
+  // Wrapping the verb in ** lets the `strong` renderer below style it, so
+  // no custom markdown plugin is needed.
+  const source = highlightVerbs
+    ? children.replace(ACTION_VERB_IN_TEXT, "**$1**")
+    : children;
   return (
     <div className={className ? `md ${className}` : "md"}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {children}
+        {source}
       </ReactMarkdown>
     </div>
   );
@@ -40,9 +54,16 @@ function InlineParagraph({ children }: { children?: ReactNode }) {
 
 const blockComponents: Components = {
   p: ({ children }) => <Paragraph>{children}</Paragraph>,
-  strong: ({ children }) => (
-    <strong className="font-semibold text-smoke-50">{children}</strong>
-  ),
+  strong: ({ children }) =>
+    typeof children === "string" && ACTION_VERB.test(children) ? (
+      // Underlined ember word, not a filled chip, so it stays readable
+      // mid-sentence in both themes.
+      <strong className="font-bold tracking-wide text-ember-200 underline decoration-ember-500 decoration-2 underline-offset-2">
+        {children}
+      </strong>
+    ) : (
+      <strong className="font-semibold text-smoke-50">{children}</strong>
+    ),
   em: ({ children }) => <em className="italic">{children}</em>,
   h1: ({ children }) => (
     <h1 className="mt-2 text-[13px] font-semibold text-smoke-50 first:mt-0">

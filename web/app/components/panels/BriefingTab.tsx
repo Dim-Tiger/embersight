@@ -5,6 +5,7 @@ import {
   AGENT_ORDER,
   type AgentStatus,
   type ChatMessage,
+  type PendingInterrupt,
   type ToolCall,
   useStore,
 } from "@/lib/store";
@@ -26,8 +27,19 @@ import {
   Truck,
   Wind,
 } from "lucide-react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Markdown, stripMarkdown } from "@/app/components/Markdown";
+import { AsOf, AttentionStrip, type AttentionItem } from "@/app/components/ui/AttentionStrip";
+import { confidenceWord } from "@/app/components/ui/AgentStatusRow";
+import { SeverityBadge } from "@/app/components/ui/Severity";
+import {
+  INTERRUPT_AGENT,
+  INTERRUPT_LABEL,
+  fmtClock,
+  threatAttention,
+  truncateWords,
+} from "@/app/components/ui/triage";
+import { useAgentAsOf } from "@/app/components/ui/useAgentAsOf";
 import { MessageInput } from "./MessageInput";
 
 type AgentAccent = {
@@ -189,14 +201,34 @@ export function BriefingTab() {
   const requestRestart = useStore((s) => s.requestRestart);
   const statuses = useStore((s) => s.agentStatuses);
 
+  const pending = useStore((s) => s.pendingInterrupts);
+
   const doneCount = useMemo(
     () => AGENT_ORDER.filter((a) => statuses[a] === "done").length,
     [statuses],
   );
   const runningAgent = useMemo(
-    () => AGENT_ORDER.find((a) => statuses[a] === "running") ?? null,
-    [statuses],
+    () =>
+      AGENT_ORDER.find(
+        (a) => statuses[a] === "running" && !blockedAgents(pending).has(a),
+      ) ?? null,
+    [statuses, pending],
   );
+  // Agents still outstanding once the run has finished, with the reason.
+  // "Briefing complete" next to "6/9 agents reported" read as a
+  // contradiction; naming who is missing and why resolves it.
+  const outstanding = useMemo(() => {
+    if (streaming || !(done || briefingComplete)) return [];
+    const blocked = blockedAgents(pending);
+    return AGENT_ORDER.filter((a) => statuses[a] !== "done").map((a) => ({
+      agent: a,
+      reason: blocked.has(a)
+        ? "awaiting your approval"
+        : statuses[a] === "running"
+          ? "did not finish"
+          : "did not report",
+    }));
+  }, [streaming, done, briefingComplete, pending, statuses]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-smoke-900">
@@ -210,7 +242,10 @@ export function BriefingTab() {
         onRestart={requestRestart}
         hasIncident={!!selectedIncidentId}
         errorMessage={errorMessage}
+        outstanding={outstanding}
       />
+
+      {selectedIncidentId && <BriefingAttention outstanding={outstanding} />}
 
       <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)] gap-px bg-smoke-700">
         <aside className="min-h-0 overflow-hidden bg-smoke-900">
@@ -235,6 +270,7 @@ function BriefingHeader({
   onRestart,
   hasIncident,
   errorMessage,
+  outstanding,
 }: {
   streaming: boolean;
   done: boolean;
@@ -245,15 +281,19 @@ function BriefingHeader({
   onRestart: () => void;
   hasIncident: boolean;
   errorMessage: string | null;
+  outstanding: Array<{ agent: string; reason: string }>;
 }) {
   let statusLabel: string;
-  let statusTone: "live" | "ready" | "idle" | "error";
+  let statusTone: "live" | "ready" | "idle" | "error" | "partial";
   if (errorMessage) {
     statusLabel = "error";
     statusTone = "error";
   } else if (streaming) {
     statusLabel = "live";
     statusTone = "live";
+  } else if ((briefingComplete || done) && outstanding.length > 0) {
+    statusLabel = "partial";
+    statusTone = "partial";
   } else if (briefingComplete || done) {
     statusLabel = "ready";
     statusTone = "ready";
@@ -274,20 +314,24 @@ function BriefingHeader({
             <h1 className="text-base font-semibold text-smoke-100">
               Live Briefing
             </h1>
-            <p className="text-[10px] uppercase tracking-widest text-smoke-500">
+            <p className="text-[10px] uppercase tracking-widest text-smoke-400">
               talk to the master IC · watch the team work
             </p>
           </div>
-          <p className="mt-0.5 text-[11px] text-smoke-400">
+          <p className="mt-0.5 text-[12px] text-smoke-300">
             {!hasIncident
               ? "Choose an active incident — the orchestrator will fan out to the specialists."
               : streaming && runningAgent
-                ? `${AGENT_LABELS[runningAgent]} is on the radio — ${doneCount}/${totalAgents} agents reported`
+                ? `${AGENT_LABELS[runningAgent]} is on the radio — ${doneCount} of ${totalAgents} agents reported`
                 : streaming
-                  ? `${doneCount}/${totalAgents} agents reported — synthesizing…`
-                  : briefingComplete
-                    ? `Briefing complete · ${doneCount}/${totalAgents} agents reported · ask the IC anything`
-                    : `${doneCount}/${totalAgents} agents reported · standing by`}
+                  ? `${doneCount} of ${totalAgents} agents reported — synthesizing…`
+                  : outstanding.length > 0
+                    ? `Partial briefing · ${doneCount} of ${totalAgents} agents reported · waiting on: ${outstanding
+                        .map((o) => `${AGENT_LABELS[o.agent] ?? o.agent} (${o.reason})`)
+                        .join(", ")}`
+                    : briefingComplete
+                      ? `Briefing complete · all ${totalAgents} agents reported · ask the IC anything`
+                      : `${doneCount} of ${totalAgents} agents reported · standing by`}
           </p>
         </div>
         <StatusPill label={statusLabel} tone={statusTone} />
@@ -310,8 +354,11 @@ function StatusPill({
   tone,
 }: {
   label: string;
-  tone: "live" | "ready" | "idle" | "error";
+  tone: "live" | "ready" | "idle" | "error" | "partial";
 }) {
+  if (tone === "partial") {
+    return <SeverityBadge level="warning" word={label} size="md" />;
+  }
   if (tone === "live") {
     return (
       <span className="flex items-center gap-1.5 rounded-full bg-ember-600/90 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-white">
@@ -355,9 +402,101 @@ function HeaderShimmer() {
   );
 }
 
+function blockedAgents(pending: PendingInterrupt[]): Set<string> {
+  return new Set(pending.map((p) => INTERRUPT_AGENT[p.interrupt.type]).filter(Boolean));
+}
+
+/**
+ * The 1–3 facts an IC should act on first, pulled from every agent: open
+ * approvals, a Red Flag Warning, the top threats, and agents that did not
+ * report. Sits above the roster and feed so it is the first thing read.
+ */
+function BriefingAttention({
+  outstanding,
+}: {
+  outstanding: Array<{ agent: string; reason: string }>;
+}) {
+  const outputs = useStore((s) => s.agentOutputs);
+  const pending = useStore((s) => s.pendingInterrupts);
+  const setActiveTab = useStore((s) => s.setActiveTab);
+  const requestRestart = useStore((s) => s.requestRestart);
+  const asOf = useAgentAsOf(AGENT_ORDER);
+
+  const items: AttentionItem[] = [];
+  if (pending.length > 0) {
+    const labels = [
+      ...new Set(pending.map((p) => INTERRUPT_LABEL[p.interrupt.type] ?? p.interrupt.type)),
+    ];
+    items.push({
+      id: "approvals",
+      level: "warning",
+      value: String(pending.length),
+      unit: pending.length === 1 ? "decision" : "decisions",
+      title: "waiting for your approval",
+      detail: `${labels.join(", ")}. Nothing happens until you approve.`,
+      action: { label: "Open approval queue", onClick: () => setActiveTab("Operations") },
+    });
+  }
+  const rf = (outputs.weather_wind?.payload as Record<string, unknown> | undefined)?.red_flag as
+    | Record<string, unknown>
+    | null
+    | undefined;
+  if (rf) {
+    const until = fmtClock(rf.expires as string | undefined);
+    items.push({
+      id: "red-flag",
+      level: "critical",
+      title: String(rf.event ?? "Red Flag conditions forecast"),
+      detail:
+        rf.source === "derived_hrrr" || rf.source === "derived_raws"
+          ? `Forecast meets Red Flag criteria: RH ${rf.rh_pct ?? "?"}%, wind ${rf.wind_speed_mph ?? "?"} mph, ${rf.temp_f ?? "?"} °F.`
+          : until
+            ? `In effect until ${until}.`
+            : "Active NWS alert for this location.",
+      action: { label: "Open Weather", onClick: () => setActiveTab("Weather") },
+    });
+  }
+  const threats = threatAttention({
+    values: outputs.values_at_risk,
+    spread: outputs.spread_simulation,
+    terrain: outputs.terrain_fuel,
+  }).filter((i) => i.level === "critical" || i.level === "warning");
+  for (const t of threats.slice(0, 2)) {
+    items.push({ ...t, action: { label: "Open Threats", onClick: () => setActiveTab("Threats") } });
+  }
+  const silent = outstanding.filter((o) => o.reason !== "awaiting your approval");
+  if (silent.length > 0) {
+    items.push({
+      id: "silent",
+      level: "degraded",
+      value: String(silent.length),
+      unit: silent.length === 1 ? "agent" : "agents",
+      title: "did not finish reporting on this run",
+      detail: `${silent.map((o) => AGENT_LABELS[o.agent] ?? o.agent).join(", ")}. Their tabs show what to use instead.`,
+      action: { label: "Re-brief", onClick: requestRestart },
+    });
+  }
+
+  return (
+    <div className="border-b border-smoke-700 bg-smoke-900 px-6 py-3">
+      <AttentionStrip
+        compact
+        items={items}
+        asOf={<AsOf ts={asOf} label="Latest report" />}
+        emptyText="Nothing flagged yet. Items appear here as the team reports."
+      />
+    </div>
+  );
+}
+
 function AgentRoster() {
   const statuses = useStore((s) => s.agentStatuses);
   const outputs = useStore((s) => s.agentOutputs);
+  const pending = useStore((s) => s.pendingInterrupts);
+  const done = useStore((s) => s.done);
+  const streaming = useStore((s) => s.streaming);
+  const blocked = blockedAgents(pending);
+  const runFinished = done && !streaming;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -375,6 +514,8 @@ function AgentRoster() {
             status={statuses[name] ?? "pending"}
             narrative={outputs[name]?.narrative}
             confidence={outputs[name]?.confidence}
+            blocked={blocked.has(name) && statuses[name] !== "done"}
+            missing={runFinished && statuses[name] !== "done" && statuses[name] !== "error" && !blocked.has(name)}
           />
         ))}
       </div>
@@ -387,22 +528,31 @@ function RosterCard({
   status,
   narrative,
   confidence,
+  blocked,
+  missing,
 }: {
   name: string;
   status: AgentStatus;
   narrative?: string;
   confidence?: number;
+  /** Paused on an interrupt the IC has to approve. */
+  blocked?: boolean;
+  /** Run is over and this agent never delivered. */
+  missing?: boolean;
 }) {
   const meta = metaFor(name);
   const { Icon, accent, blurb } = meta;
   const label = AGENT_LABELS[name] ?? name;
 
-  const running = status === "running";
+  const running = status === "running" && !blocked && !missing;
   const doneOk = status === "done";
   const errored = status === "error";
 
-  const headline = narrative
-    ? stripMarkdown(stripPrefix(narrative)).split(/[.;]\s/)[0].slice(0, 140)
+  // First sentence only, cut on a word boundary with an ellipsis. The full
+  // report is in the feed; the roster is for scanning.
+  const fullText = narrative ? stripMarkdown(stripPrefix(narrative)) : null;
+  const headline = fullText
+    ? truncateWords(fullText.split(/(?<=[.;])\s/)[0], 140)
     : null;
 
   const borderTone = running
@@ -442,15 +592,26 @@ function RosterCard({
               {label}
             </span>
             <span className="ml-auto flex-shrink-0">
-              <RosterStatusBadge status={status} accent={accent} />
+              {blocked ? (
+                <SeverityBadge level="warning" word="approve" />
+              ) : missing ? (
+                <SeverityBadge level="degraded" word="no report" />
+              ) : (
+                <RosterStatusBadge status={status} accent={accent} />
+              )}
             </span>
           </div>
           <p
-            className={`mt-0.5 line-clamp-2 text-[10px] leading-snug ${
-              headline ? "text-smoke-300" : "italic text-smoke-500"
+            title={fullText ?? undefined}
+            className={`mt-0.5 line-clamp-2 text-[11px] leading-snug ${
+              headline ? "text-smoke-200" : "italic text-smoke-400"
             }`}
           >
-            {headline ?? blurb}
+            {blocked
+              ? "Paused until you approve its DRAFT in the approval queue."
+              : missing
+                ? "Did not report on this run."
+                : (headline ?? blurb)}
           </p>
           {doneOk && typeof confidence === "number" && (
             <ConfidenceBar value={confidence} barColor={accent.bar} />
@@ -510,6 +671,7 @@ function ConfidenceBar({
   barColor: string;
 }) {
   const pct = Math.max(0, Math.min(1, value));
+  const word = confidenceWord(pct);
   return (
     <div className="mt-1.5 flex items-center gap-1.5">
       <div className="h-1 flex-1 overflow-hidden rounded-full bg-smoke-700">
@@ -518,8 +680,12 @@ function ConfidenceBar({
           style={{ width: `${Math.round(pct * 100)}%` }}
         />
       </div>
-      <span className="font-mono text-[9px] text-smoke-400">
-        {Math.round(pct * 100)}%
+      {/* Spell the band out: a bare "10%" next to a confident colour bar
+          was easy to misread as a working result. */}
+      <span
+        className={`font-mono text-[10px] ${word === "low" ? "font-semibold text-smoke-100" : "text-smoke-300"}`}
+      >
+        {Math.round(pct * 100)}% {word === "low" ? "· low conf" : ""}
       </span>
     </div>
   );
@@ -700,7 +866,7 @@ function AgentBubble({ message }: { message: ChatMessage }) {
         >
           {text ? (
             <div>
-              <Markdown>{text}</Markdown>
+              <Markdown highlightVerbs>{text}</Markdown>
               {streaming && (
                 <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-ember-300 align-middle" />
               )}
@@ -781,6 +947,19 @@ function SystemNarrative({ message }: { message: ChatMessage }) {
   const key = findAgentKey(message.agentName);
   const meta = metaFor(key ?? "");
   const { Icon, accent } = meta;
+  const output = useStore((s) => (key ? s.agentOutputs[key] : undefined));
+  const [expanded, setExpanded] = useState(false);
+
+  // The SSE layer stores only the first 280 characters of each report in
+  // the chat log, which cut sentences mid-word. Use the agent's full
+  // narrative when this message is the start of it.
+  const full = output?.narrative ? stripPrefix(output.narrative) : null;
+  const probe = message.text.slice(0, 60);
+  const text = full && full.startsWith(probe) ? full : message.text;
+  const clipped = text === message.text && message.text.length >= 280;
+  const long = text.length > 220;
+  const conf = output && full && full.startsWith(probe) ? output.confidence : null;
+
   return (
     <div className="flex items-start gap-2.5">
       <div
@@ -790,18 +969,34 @@ function SystemNarrative({ message }: { message: ChatMessage }) {
       </div>
       <div className="min-w-0 flex-1">
         <div className="mb-0.5 flex items-baseline gap-2">
-          <span className={`text-[10.5px] font-semibold ${accent.text}`}>
+          <span className={`text-[12px] font-semibold ${accent.text}`}>
             {message.agentName ?? "agent"}
           </span>
-          <span className="text-[9px] uppercase tracking-widest text-smoke-600">
+          <span className="text-[10px] uppercase tracking-widest text-smoke-400">
             reporting in
           </span>
-          <span className="text-[9px] text-smoke-500">
+          <span className="text-[10px] text-smoke-400">
             {formatTime(message.ts)}
           </span>
+          {conf != null && confidenceWord(conf) === "low" && (
+            <SeverityBadge level="degraded" word={`low confidence ${Math.round(conf * 100)}%`} />
+          )}
         </div>
-        <div className="rounded-xl rounded-tl-md bg-smoke-800/60 px-3 py-1.5 text-[11.5px] leading-relaxed text-smoke-300 ring-1 ring-smoke-700/70">
-          <Markdown>{message.text}</Markdown>
+        <div className="rounded-xl rounded-tl-md bg-smoke-800/60 px-3 py-2 text-[12.5px] leading-relaxed text-smoke-200 ring-1 ring-smoke-700/70">
+          <div className={long && !expanded ? "line-clamp-3" : undefined}>
+            <Markdown highlightVerbs>
+              {clipped ? truncateWords(message.text, 279) : text}
+            </Markdown>
+          </div>
+          {long && (
+            <button
+              onClick={() => setExpanded((v) => !v)}
+              aria-expanded={expanded}
+              className="mt-1 text-[11.5px] font-semibold text-ember-200 underline decoration-dotted underline-offset-2 hover:text-ember-50"
+            >
+              {expanded ? "Show less" : "Show full report"}
+            </button>
+          )}
         </div>
       </div>
     </div>
