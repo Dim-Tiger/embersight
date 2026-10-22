@@ -10,6 +10,7 @@ trigger-point violations.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import pathlib
@@ -23,6 +24,7 @@ from ..tools.pyretechnics_spread import fuel_preset
 from ..units import containment_fraction, containment_label, wind_phrase
 
 AGENT_NAME = "spread_simulation"
+log = logging.getLogger(__name__)
 _PROMPT_PATH = pathlib.Path(__file__).parent.parent / "prompts" / "spread_simulation.md"
 
 # Default dead-fuel moisture (%) used when weather subagent provides no RAWS data.
@@ -91,13 +93,14 @@ async def _llm_narrate(context: str) -> str | None:
             prompt_text = _PROMPT_PATH.read_text()
 
         from ..tools.llm_stream import stream_text
-        llm = ChatAnthropic(model=model_name, max_tokens=800, temperature=0.2)
+        llm = ChatAnthropic(model=model_name, max_tokens=800, temperature=0.2, timeout=30)
         msgs = [
             SystemMessage(content=prompt_text or "You are a wildland fire analyst."),
             HumanMessage(content=context),
         ]
         return await stream_text(llm, msgs)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — fall back to deterministic text
+        log.warning("spread LLM narrative failed, using deterministic text: %s", exc)
         return None
 
 

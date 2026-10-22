@@ -19,6 +19,7 @@ No ``interrupt()`` is requested here — values-at-risk is informational.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import uuid
@@ -46,6 +47,7 @@ from ..tools.infra import (
 )
 
 AGENT_NAME = "values_at_risk"
+log = logging.getLogger(__name__)
 
 PROMPT_PATH = (
     Path(__file__).resolve().parent.parent / "prompts" / "values_at_risk.md"
@@ -523,15 +525,15 @@ async def _llm_narrative(
     )
     try:
         from ..tools.llm_stream import stream_text  # noqa: PLC0415
-        llm = ChatAnthropic(model=LLM_MODEL_ID, max_tokens=400, temperature=0.2)
+        llm = ChatAnthropic(model=LLM_MODEL_ID, max_tokens=400, temperature=0.2, timeout=30)
         text = await stream_text(
             llm,
             [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)],
         )
         if text and text.strip():
             return text.strip()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 — fall back to deterministic text
+        log.warning("values_at_risk LLM narrative failed: %s", exc)
     return _fallback_narrative(roll, cone_source, incident)
 
 

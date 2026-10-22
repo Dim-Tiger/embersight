@@ -373,7 +373,7 @@ async def _llm_proposal_async(
     user_msg = _build_zone_prompt(zone, overlaps, population, egress)
 
     try:
-        chat = ChatAnthropic(model=LLM_MODEL, max_tokens=200, temperature=0.0)
+        chat = ChatAnthropic(model=LLM_MODEL, max_tokens=200, temperature=0.0, timeout=30)
         resp = await chat.ainvoke(
             [
                 {"role": "system", "content": system_prompt},

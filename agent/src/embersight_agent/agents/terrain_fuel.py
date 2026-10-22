@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -30,6 +31,7 @@ from ..state import (
 )
 
 AGENT_NAME = "terrain_fuel"
+log = logging.getLogger(__name__)
 LLM_MODEL = "claude-haiku-4-5"
 AOI_RADIUS_KM = 50.0
 
@@ -134,7 +136,8 @@ async def _haiku_narrative(
         )
         chunks = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
         return "\n".join(chunks).strip() or None
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — fall back to deterministic text
+        log.warning("terrain LLM narrative failed: %s", exc)
         return None
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import pathlib
 import uuid
@@ -38,6 +39,7 @@ from ..state import (
 from ..units import wind_phrase
 
 AGENT_NAME = "weather_wind"
+log = logging.getLogger(__name__)
 
 _PROMPT_PATH = (
     pathlib.Path(__file__).resolve().parent.parent / "prompts" / "fban.md"
@@ -209,7 +211,8 @@ async def _llm_narrative(fused: dict[str, Any]) -> str | None:
         return await stream_text(
             llm, [SystemMessage(content=system), HumanMessage(content=human)]
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — fall back to deterministic text
+        log.warning("weather LLM narrative failed: %s", exc)
         return None
 
 

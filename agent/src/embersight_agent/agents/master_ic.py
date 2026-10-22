@@ -440,7 +440,7 @@ async def _llm_synthesize(
     user_msg = _build_user_message(state, form_type, dissent_log)
 
     try:
-        llm = ChatAnthropic(model=MODEL_ID, temperature=0.2, max_tokens=4096)
+        llm = ChatAnthropic(model=MODEL_ID, temperature=0.2, max_tokens=4096, timeout=90)
     except Exception as exc:  # noqa: BLE001
         log.warning("ChatAnthropic init failed: %s", exc)
         return None

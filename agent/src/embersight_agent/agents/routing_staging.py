@@ -19,6 +19,7 @@ and it never raises an interrupt.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import uuid
@@ -50,6 +51,7 @@ from ..tools.routing import (
 )
 
 AGENT_NAME = "routing_staging"
+log = logging.getLogger(__name__)
 MODEL_NAME = "claude-haiku-4-5"
 AOI_RADIUS_KM = 25.0
 _PROMPT_PATH = (
@@ -534,13 +536,14 @@ async def _llm_narrative(payload: dict[str, Any]) -> str | None:
     )
     try:
         from ..tools.llm_stream import stream_text
-        llm = ChatAnthropic(model=MODEL_NAME, max_tokens=400, temperature=0.2)
+        llm = ChatAnthropic(model=MODEL_NAME, max_tokens=400, temperature=0.2, timeout=30)
         content = await stream_text(
             llm,
             [SystemMessage(content=system_prompt), HumanMessage(content=user)],
         )
         return content.strip() if content else None
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — fall back to deterministic text
+        log.warning("routing LLM narrative failed: %s", exc)
         return None
 
 
