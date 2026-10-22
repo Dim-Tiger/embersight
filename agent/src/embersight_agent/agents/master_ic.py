@@ -651,7 +651,9 @@ def _deterministic_key_findings(state: AgentState) -> list[str]:
         if out is None:
             findings.append(f"{name}: (no output — synthesis used neutral default)")
             continue
-        snippet = (out.narrative or "").strip().replace("\n", " ")[:140]
+        # Drop a leading "[agent_name]" log tag; the IC already sees the name.
+        narrative = re.sub(r"^\[[\w_]+\]\s*", "", (out.narrative or "").strip())
+        snippet = narrative.replace("\n", " ")[:140]
         findings.append(f"{name} (conf={out.confidence:.2f}): {snippet}")
         if len(findings) >= 5:
             break

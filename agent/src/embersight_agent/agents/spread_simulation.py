@@ -569,6 +569,17 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     # 4. Compute confidence
     # ------------------------------------------------------------------ #
     confidence, confidence_driver = _mc_confidence(mc_result)
+    # The ensemble only measures how much the model disagrees with itself
+    # when its inputs are jiggled. It cannot be more trustworthy than those
+    # inputs, so cap it at the weaker of the weather and terrain confidences
+    # (floor 0.2). A live run showed 94% on a calm, assumed-wind forecast.
+    input_conf = max(0.2, min(weather_out.confidence, terrain_out.confidence))
+    if confidence > input_conf:
+        confidence = input_conf
+        confidence_driver = (
+            f"capped by input quality (weather {weather_out.confidence:.2f}, "
+            f"terrain {terrain_out.confidence:.2f}); ensemble: {confidence_driver}"
+        )
 
     # ------------------------------------------------------------------ #
     # 5. GeoJSON cones for downstream agents

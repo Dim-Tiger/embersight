@@ -134,6 +134,15 @@ def test_narrative_states_wind_as_mph_from_cardinal(monkeypatch):
     assert out.payload["fuel_model"] == "GR2"
 
 
+def test_confidence_cannot_exceed_input_quality():
+    state = _state()
+    state.outputs["weather_wind"].confidence = 0.35
+    state.outputs["terrain_fuel"].confidence = 0.22
+    out = asyncio.run(spread_simulation.run(state))["outputs"]["spread_simulation"]
+    assert out.confidence <= 0.22 + 1e-9
+    assert "capped by input quality" in out.confidence_driver
+
+
 def test_missing_weather_is_labelled_as_assumed():
     out = asyncio.run(spread_simulation.run(_state(weather_payload={})))
     out = out["outputs"]["spread_simulation"]

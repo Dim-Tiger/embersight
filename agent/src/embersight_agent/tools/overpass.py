@@ -58,7 +58,7 @@ RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
 # Wall-clock cap for one query including retries, and how long to skip the
 # network after a query has exhausted every mirror. Without these, five
 # queries against dead servers took ~10 minutes before routing gave up.
-CALL_BUDGET_S = 45.0
+CALL_BUDGET_S = 40.0
 DOWN_FOR_S = 120.0
 _down_until = 0.0
 CACHE_TTL_S = float(os.environ.get("EMBERSIGHT_OVERPASS_TTL_HOURS", "6")) * 3600
@@ -155,13 +155,16 @@ async def _post(query: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict[str, Any
         started = time.monotonic()
         async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
             for attempt in range(MAX_ATTEMPTS):
-                if time.monotonic() - started > CALL_BUDGET_S:
+                remaining = CALL_BUDGET_S - (time.monotonic() - started)
+                if remaining < 5.0:
                     errors.append(f"gave up after {CALL_BUDGET_S:.0f} s")
                     break
                 url = urls[attempt % len(urls)]
                 response: httpx.Response | None = None
                 try:
-                    response = await client.post(url, data={"data": query})
+                    response = await client.post(
+                        url, data={"data": query}, timeout=min(timeout, remaining)
+                    )
                     if response.status_code in RETRYABLE_STATUS:
                         raise httpx.HTTPStatusError(
                             f"HTTP {response.status_code}",

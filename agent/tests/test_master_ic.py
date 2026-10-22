@@ -63,6 +63,13 @@ def test_unknown_structure_count_is_not_an_empty_cone():
     assert _spread_vs_values(state) == []
 
 
+def test_key_findings_drop_internal_agent_tags():
+    state = _state()
+    state.outputs["weather_wind"].narrative = "[weather_wind] PROPOSE something"
+    findings = master_ic._deterministic_key_findings(state)
+    assert findings[0] == "weather_wind (conf=0.80): PROPOSE something"
+
+
 def test_deterministic_draft_never_uses_forbidden_verbs():
     draft = master_ic._deterministic_synthesis(_state(), "ICS-201", [])
     assert master_ic._forbidden_hits(str(draft)) == []

@@ -31,8 +31,10 @@ def cardinal_16(deg: float) -> str:
 
 
 def wind_phrase(speed_mph: Any, from_deg: Any) -> str:
-    """'15 mph from ESE (101°)'. Tolerates missing parts."""
+    """'15 mph from ESE (115°)', or 'calm'. Tolerates missing parts."""
     try:
+        if round(float(speed_mph)) == 0:
+            return "calm"  # a direction means nothing without wind
         speed = f"{float(speed_mph):.0f} mph"
     except (TypeError, ValueError):
         speed = "unknown speed"

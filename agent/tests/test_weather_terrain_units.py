@@ -43,6 +43,8 @@ def test_cardinal_16(deg, label):
 def test_wind_phrase_is_mph_from_cardinal():
     assert wind_phrase(14.8, 115) == "15 mph from ESE (115°)"
     assert wind_phrase(None, None) == "unknown speed from an unknown direction"
+    # Live DOME run printed "wind 0 mph from W (270°)".
+    assert wind_phrase(0.2, 270) == "calm"
 
 
 @pytest.mark.parametrize(
