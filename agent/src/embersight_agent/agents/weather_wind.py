@@ -245,6 +245,8 @@ def _deterministic_narrative(fused: dict[str, Any]) -> str:
                 f"No live wind available: spread modelling uses an ASSUMED {wind} "
                 "planning default, not an observation."
             )
+        elif str(sources.get("wind_dir_deg", "")).endswith("(calm)"):
+            parts.append(f"Current wind calm (source: {sources.get('wind_speed_mph')}).")
         else:
             parts.append(f"Current wind {wind} (source: {sources.get('wind_speed_mph')}).")
         other = [k for k in assumed if k not in ("wind_speed_mph", "wind_dir_deg")]
@@ -378,6 +380,32 @@ def _flat_wx_keys(
     flat: dict[str, Any] = {"fuel_moisture": {}}  # no fuel-moisture pipeline yet
     sources: dict[str, str] = {}
     assumed: list[str] = []
+
+    # Wind speed and direction must come from the SAME source: a speed from
+    # one feed with a direction from another describes no real wind. A calm
+    # report (0 mph, no direction, as NWS sends it) is a valid observation;
+    # its direction is irrelevant, so it is not "assumed".
+    speeds = dict(candidates.pop("wind_speed_mph"))
+    directions = dict(candidates.pop("wind_dir_deg"))
+    wind = None
+    for src, speed in speeds.items():
+        if speed is None:
+            continue
+        if directions.get(src) is not None:
+            wind = (src, float(speed), float(directions[src]), src)
+            break
+        if float(speed) == 0.0:
+            wind = (src, 0.0, _PLANNING_DEFAULTS["wind_dir_deg"], f"{src} (calm)")
+            break
+    if wind is None:
+        flat["wind_speed_mph"] = _PLANNING_DEFAULTS["wind_speed_mph"]
+        flat["wind_dir_deg"] = _PLANNING_DEFAULTS["wind_dir_deg"]
+        sources["wind_speed_mph"] = sources["wind_dir_deg"] = "planning_default"
+        assumed += ["wind_speed_mph", "wind_dir_deg"]
+    else:
+        flat["wind_speed_mph"], flat["wind_dir_deg"] = wind[1], wind[2]
+        sources["wind_speed_mph"], sources["wind_dir_deg"] = wind[0], wind[3]
+
     for key, options in candidates.items():
         chosen = next(((src, val) for src, val in options if val is not None), None)
         if chosen is None:

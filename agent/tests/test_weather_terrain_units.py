@@ -74,6 +74,26 @@ def test_nws_hourly_forecast_is_used_before_defaults():
     assert flat["sources"]["wind_dir_deg"] == "nws_hourly"
 
 
+def test_calm_nws_report_is_an_observation_not_an_assumption():
+    """Live DOME run: NWS said '0 mph' with no direction, and the narrative
+    claimed an 'ASSUMED 0 mph from W' wind."""
+    calm = {"forecast": {"properties": {"periods": [{"windSpeed": "0 mph", "windDirection": ""}]}}}
+    flat = weather_wind._flat_wx_keys({}, [], None, {"stations": []}, calm)
+    assert flat["wind_speed_mph"] == 0.0
+    assert flat["assumed_inputs"] == ["temp_f", "rh_pct"]
+    assert flat["sources"]["wind_dir_deg"] == "nws_hourly (calm)"
+    text = weather_wind._deterministic_narrative({"flat": flat, "confidence": 0.35})
+    assert "Current wind calm" in text and "ASSUMED 0 mph" not in text
+
+
+def test_wind_speed_and_direction_come_from_one_source():
+    # RAWS has a speed but no direction; NWS has both. Do not mix them.
+    raws = {"stations": [{"latest": {"wind_speed": {"value": 30.0}}}]}
+    flat = weather_wind._flat_wx_keys({}, [], None, raws, NWS_FORECAST)
+    assert (flat["wind_speed_mph"], flat["wind_dir_deg"]) == (10.0, 247.5)
+    assert flat["sources"]["wind_speed_mph"] == flat["sources"]["wind_dir_deg"] == "nws_hourly"
+
+
 def test_rtma_beats_nws():
     rtma = {"wind_speed_mph": 22.0, "wind_direction_deg": 45.0, "temp_f": 88.0, "rh_pct": 9.0}
     flat = weather_wind._flat_wx_keys(rtma, [], None, {"stations": []}, NWS_FORECAST)
