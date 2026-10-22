@@ -1,6 +1,8 @@
 "use client";
 
+import { useIncidents, useWind } from "@/lib/queries";
 import { useStore } from "@/lib/store";
+import { cardinal, formatWind } from "@/lib/units";
 import { Wind } from "lucide-react";
 import { AgentActivityBanner } from "./AgentActivityBanner";
 import { AgentCard, MetricGrid } from "./AgentCard";
@@ -31,8 +33,18 @@ type RawsSummary = {
 export function WeatherTab() {
   const output = useStore((s) => s.agentOutputs.weather_wind);
   const status = useStore((s) => s.agentStatuses.weather_wind ?? "pending");
+  const selectedIncidentId = useStore((s) => s.selectedIncidentId);
+  const { data: incidents } = useIncidents();
+  const incident = incidents?.find((i) => i.id === selectedIncidentId);
+  // Same Open-Meteo grid the map draws, so the tab and the map agree.
+  const { data: windGrid } = useWind(
+    incident?.lat ?? null,
+    incident?.lon ?? null,
+  );
 
   const payload = (output?.payload ?? {}) as {
+    wind_speed_mph?: number;
+    wind_dir_deg?: number;
     red_flag?: RedFlag | null;
     critical_window?: CriticalWindow | null;
     raws_summary?: RawsSummary;
@@ -52,6 +64,51 @@ export function WeatherTab() {
   const alerts = payload.nws_alerts ?? [];
 
   const metrics: { label: string; value: string | number; hint?: string }[] = [];
+
+  // Observed surface wind at the incident from the map's Open-Meteo grid
+  // (nearest grid point), with its source and sample time.
+  if (windGrid?.vectors?.length && incident) {
+    let best = windGrid.vectors[0];
+    let bestD = Infinity;
+    for (const v of windGrid.vectors) {
+      const d = (v.lat - incident.lat) ** 2 + (v.lon - incident.lon) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    }
+    const sampled = new Date(windGrid.sampled_at);
+    const at = Number.isNaN(sampled.getTime())
+      ? ""
+      : ` · ${sampled.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+    const gust =
+      windGrid.gust_max_ms != null
+        ? ` · area gusts ${Math.round(windGrid.gust_max_ms * 2.23694)} mph`
+        : "";
+    metrics.push({
+      label: "Wind now",
+      value: formatWind(best.speed, best.direction),
+      hint: `Open-Meteo 10 m${at}${gust}`,
+    });
+  }
+
+  // The agent's spread-model inputs. When RTMA, HRRR and RAWS all came back
+  // empty the agent falls back to fixed defaults (15 mph from W), so say so
+  // instead of presenting them as observations.
+  const rtma = payload.rtma_now ?? {};
+  const noLiveSource =
+    !payload.hrrr_hourly?.length &&
+    (raws.station_count ?? 0) === 0 &&
+    Object.entries(rtma).every(([k, v]) => k === "valid_time" || v == null);
+  if (payload.wind_speed_mph != null && payload.wind_dir_deg != null) {
+    metrics.push({
+      label: "Model input wind",
+      value: `${Math.round(payload.wind_speed_mph)} mph from ${cardinal(payload.wind_dir_deg)}`,
+      hint: noLiveSource
+        ? "default value: no RTMA/HRRR/RAWS data"
+        : "used by the spread model",
+    });
+  }
   if (critical) {
     if (critical.wind_speed_mph != null)
       metrics.push({
@@ -59,7 +116,7 @@ export function WeatherTab() {
         value: `${Math.round(Number(critical.wind_speed_mph))} mph`,
         hint:
           critical.wind_direction_deg != null
-            ? `from ${Math.round(Number(critical.wind_direction_deg))}°`
+            ? `from ${cardinal(Number(critical.wind_direction_deg))} (${Math.round(Number(critical.wind_direction_deg))}°)`
             : undefined,
       });
     if (critical.rh_pct != null)

@@ -17,6 +17,7 @@ import {
 import { useInfraLayers } from "@/lib/infraQueries";
 import { useStore } from "@/lib/store";
 import { useTestMode } from "@/lib/testMode";
+import { cardinal, formatWind } from "@/lib/units";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import maplibregl from "maplibre-gl";
 import { WindParticleLayer, generateWindTexture } from "maplibre-gl-wind";
@@ -1927,7 +1928,7 @@ export function IncidentMap() {
       "display:flex;flex-direction:column;align-items:center;gap:2px;pointer-events:none;font:600 10px ui-sans-serif,system-ui;color:#f1f5f9;";
     el.innerHTML = `
       <div style="background:rgba(15,23,42,0.85);border:1px solid rgba(56,189,248,0.6);border-radius:999px;padding:2px 8px;backdrop-filter:blur(4px);white-space:nowrap;">
-        wind ${speedMs.toFixed(1)} m/s → ${Math.round(toDeg)}°
+        wind ${formatWind(speedMs, fromDeg)}
       </div>
       <svg width="42" height="42" viewBox="-21 -21 42 42" style="transform:rotate(${toDeg}deg);filter:drop-shadow(0 0 4px rgba(0,0,0,0.6));">
         <path d="M 0 -16 L 6 8 L 0 4 L -6 8 Z" fill="#38bdf8" stroke="#0c1220" stroke-width="1.5" stroke-linejoin="round" />
@@ -2307,6 +2308,14 @@ function buildPerimeterCone(
   return { type: "Polygon", coordinates: [convexHull(swept)] };
 }
 
+/** Local clock time ("2:05 PM") for a feed timestamp, or "" if unparseable. */
+function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
 function fmtInt(n: number | undefined | null): string {
   if (n == null || !Number.isFinite(n)) return "—";
   return Math.round(n).toLocaleString();
@@ -2437,7 +2446,7 @@ function buildStagingPopupHtml(
       : "";
   const windLine =
     wind && wind.from_deg != null
-      ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">wind from ${Number(wind.from_deg).toFixed(0)}°${wind.speed_mph != null ? ` @ ${Number(wind.speed_mph).toFixed(0)} mph` : ""}</div>`
+      ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">wind from ${cardinal(Number(wind.from_deg))} (${Number(wind.from_deg).toFixed(0)}°)${wind.speed_mph != null ? ` @ ${Number(wind.speed_mph).toFixed(0)} mph` : ""}</div>`
       : "";
   return `<div style="font-size:11px;line-height:1.4;color:#e2e8f0;background:#1e293b;padding:8px 10px;border-radius:6px;border:1px solid #22c55e66;min-width:220px">
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
@@ -2724,12 +2733,16 @@ function Legend({
             <span>Streamlines — direction & speed</span>
           </div>
           {center && (
-            <div>
-              {center.speed.toFixed(1)} m/s ·{" "}
-              {Math.round(center.direction)}°
-              {wind?.gust_max_ms
-                ? ` · gust ${wind.gust_max_ms.toFixed(0)} m/s`
-                : ""}
+            <div
+              title={`${center.speed.toFixed(1)} m/s from ${Math.round(center.direction)}° (Open-Meteo, 10 m)`}
+            >
+              {formatWind(center.speed, center.direction, wind?.gust_max_ms)}
+              {wind?.sampled_at && fmtClock(wind.sampled_at) && (
+                <span className="text-smoke-400">
+                  {" "}
+                  · Open-Meteo {fmtClock(wind.sampled_at)}
+                </span>
+              )}
             </div>
           )}
         </div>

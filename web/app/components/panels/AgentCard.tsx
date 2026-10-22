@@ -53,7 +53,7 @@ export function AgentCard({
               {streamError}
             </div>
             <div className="mt-1 text-[10px] text-red-300/70">
-              Use &ldquo;Re-run stream&rdquo; in the Agent activity panel once the service is back.
+              Use &ldquo;Re-brief&rdquo; in the Agent activity panel once the service is back.
             </div>
           </div>
         )}
