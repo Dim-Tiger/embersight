@@ -1,11 +1,11 @@
 "use client";
 
-import { postResume } from "@/lib/queries";
 import { useStore } from "@/lib/store";
 import { FileText } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Markdown } from "@/app/components/Markdown";
 import { AgentActivityBanner } from "./AgentActivityBanner";
+import { DecisionControls } from "./ApprovalQueue";
 
 // The Master IC sends `sections` as an object keyed by ICS field
 // (incident_name, current_situation, planned_actions, current_org_chart...
@@ -51,7 +51,6 @@ export type DissentEntry = {
 export function IAPDraft() {
   const pending = useStore((s) => s.pendingInterrupts);
   const masterOut = useStore((s) => s.agentOutputs.master_ic);
-  const remove = useStore((s) => s.removeInterrupt);
   const streamError = useStore((s) => s.errorMessage);
 
   const view = useMemo(() => {
@@ -67,8 +66,7 @@ export function IAPDraft() {
         draft,
         dissent: (payload.dissent_log as DissentEntry[] | undefined) ?? [],
         pending: true,
-        threadId: fromInterrupt.thread_id,
-        interruptId: fromInterrupt.interrupt.id,
+        item: fromInterrupt,
         confidence: (payload.confidence as number | undefined) ?? null,
       } as const;
     }
@@ -79,28 +77,10 @@ export function IAPDraft() {
       draft: committed && Object.keys(committed).length ? committed : null,
       dissent: (out.dissent_log as DissentEntry[] | undefined) ?? [],
       pending: false,
-      threadId: null,
-      interruptId: null,
+      item: null,
       confidence: masterOut?.confidence ?? null,
     } as const;
   }, [pending, masterOut]);
-
-  const [busy, setBusy] = useState(false);
-  const [decisionError, setDecisionError] = useState<string | null>(null);
-
-  async function respond(decision: "approved" | "edited" | "rejected") {
-    if (!view.threadId) return;
-    setBusy(true);
-    setDecisionError(null);
-    try {
-      await postResume(view.threadId, { decision, actor: "ic@example.com" });
-      remove(view.interruptId ?? undefined, view.threadId);
-    } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   const draft = view.draft;
 
@@ -125,42 +105,17 @@ export function IAPDraft() {
           icon={<FileText className="h-5 w-5" />}
         />
 
-        {view.pending && (
-          <div className="flex items-center justify-between rounded border border-ember-700/60 bg-ember-900/30 px-3 py-2 text-xs text-ember-200">
-            <span>
-              ⚠ Pending IC approval
+        {view.pending && view.item && (
+          <div className="rounded border border-ember-700/60 bg-ember-900/20 px-3 py-2">
+            <div className="text-xs font-semibold text-ember-200">
+              DRAFT pending your approval
               {view.confidence != null
                 ? ` · synthesis confidence ${Math.round(view.confidence * 100)}%`
                 : ""}
-            </span>
-            <div className="flex gap-1.5">
-              <ActionButton
-                disabled={busy}
-                onClick={() => respond("approved")}
-                variant="primary"
-              >
-                Approve
-              </ActionButton>
-              <ActionButton
-                disabled={busy}
-                onClick={() => respond("edited")}
-              >
-                Edit
-              </ActionButton>
-              <ActionButton
-                disabled={busy}
-                onClick={() => respond("rejected")}
-                variant="danger"
-              >
-                Reject
-              </ActionButton>
             </div>
+            {/* The whole form is on screen here, so it counts as reviewed. */}
+            <DecisionControls item={view.item} reviewed />
           </div>
-        )}
-        {decisionError && (
-          <p role="alert" className="text-[11px] text-red-300">
-            {decisionError}. Nothing was approved or rejected; try again.
-          </p>
         )}
 
         {!draft && streamError ? (
@@ -211,7 +166,7 @@ function FormView({
             </span>
           )}
         </div>
-        <div className="mt-1 flex gap-3 text-[10px] text-smoke-500">
+        <div className="mt-1 flex gap-3 text-[10px] text-smoke-400">
           {draft.status && <span>status: {draft.status}</span>}
           {draft.synthesis_mode && <span>mode: {draft.synthesis_mode}</span>}
           {draft.drafted_at && (
@@ -305,7 +260,7 @@ function FormView({
                   </Markdown>
                 )}
                 {a.special_instructions && (
-                  <Markdown className="mt-1 text-[11px] italic text-smoke-500">
+                  <Markdown className="mt-1 text-[11px] italic text-smoke-400">
                     {a.special_instructions}
                   </Markdown>
                 )}
@@ -346,7 +301,7 @@ function FormView({
                   <Markdown className="text-smoke-300">{d.concern}</Markdown>
                 )}
                 {d.rationale && (
-                  <Markdown className="text-smoke-500">{d.rationale}</Markdown>
+                  <Markdown className="text-smoke-400">{d.rationale}</Markdown>
                 )}
               </li>
             ))}
@@ -460,32 +415,4 @@ function SectionValue({ value }: { value: unknown }) {
     );
   }
   return <span className="text-[12px] text-smoke-200">{String(value)}</span>;
-}
-
-function ActionButton({
-  children,
-  onClick,
-  disabled,
-  variant = "default",
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  variant?: "default" | "primary" | "danger";
-}) {
-  const styles =
-    variant === "primary"
-      ? "bg-ember-600 hover:bg-ember-500 text-white"
-      : variant === "danger"
-        ? "bg-smoke-800 hover:bg-red-900 text-smoke-200"
-        : "bg-smoke-800 hover:bg-smoke-700 text-smoke-200";
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={`rounded px-2 py-0.5 text-[11px] font-semibold transition-colors disabled:opacity-50 ${styles}`}
-    >
-      {children}
-    </button>
-  );
 }
