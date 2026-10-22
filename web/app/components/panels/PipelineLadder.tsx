@@ -38,49 +38,52 @@ export function PipelineLadder() {
 
   return (
     <section className="flex h-full min-h-0 flex-col">
-      <header className="flex items-center justify-between border-b border-smoke-700 bg-smoke-800/60 px-4 py-2">
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-smoke-200">
+      {/* Two rows so the status text never squeezes the title or the
+          Re-brief button into wrapping at the 360 px ops column. The SSE
+          chunk/frame counters are diagnostics, so they live in a tooltip. */}
+      <header
+        className="border-b border-smoke-700 bg-smoke-800/60 px-4 py-1.5"
+        title={
+          streaming || done
+            ? `SSE diagnostics: ${chunkCount} chunks · ${frameCount} frames`
+            : undefined
+        }
+      >
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="whitespace-nowrap text-sm font-semibold text-smoke-200">
             Agent activity
           </h2>
-          {isConnecting && (
-            <span className="flex items-center gap-1 text-[10px] text-smoke-500">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-smoke-500" />
-              {connectionStatus}
-            </span>
-          )}
-          {streaming && doneCount > 0 && (
-            <span className="flex items-center gap-1 text-[10px] text-ember-400">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ember-400" />
-              {doneCount}/{AGENT_ORDER.length}
-              {runningName ? ` · ${AGENT_LABELS[runningName]}` : ""}
-            </span>
-          )}
-          {done && !streaming && (
-            <span className="text-[10px] text-smoke-400">
-              {doneCount}/{AGENT_ORDER.length} complete
-              {pendingCount > 0 && (
-                <span className="text-amber-300"> · paused for IC decision</span>
-              )}
-            </span>
-          )}
-          {(streaming || done) && (
-            <span
-              className="font-mono text-[9px] text-smoke-400"
-              title="SSE chunks / frames received (diagnostic)"
+          {(done || errorMessage) && selectedIncidentId && (
+            <button
+              onClick={requestRestart}
+              className="flex items-center gap-1 whitespace-nowrap rounded px-2 py-0.5 text-[11px] text-smoke-300 hover:bg-smoke-700 hover:text-smoke-200"
+              title="Run the whole briefing again for this incident"
             >
-              {chunkCount}c · {frameCount}f
-            </span>
+              <RefreshCw className="h-3 w-3" />
+              Re-brief
+            </button>
           )}
         </div>
-        {(done || errorMessage) && selectedIncidentId && (
-          <button
-            onClick={requestRestart}
-            className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-smoke-400 hover:bg-smoke-700 hover:text-smoke-200"
-          >
-            <RefreshCw className="h-3 w-3" />
-            Re-brief
-          </button>
+        {isConnecting && (
+          <div className="flex items-center gap-1 text-[10px] text-smoke-400">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-smoke-400" />
+            connecting ({connectionStatus})
+          </div>
+        )}
+        {streaming && doneCount > 0 && (
+          <div className="flex items-center gap-1 text-[10px] text-ember-400">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ember-400" />
+            {doneCount}/{AGENT_ORDER.length} done
+            {runningName ? ` · ${AGENT_LABELS[runningName]} working` : ""}
+          </div>
+        )}
+        {done && !streaming && (
+          <div className="text-[10px] text-smoke-400">
+            {doneCount}/{AGENT_ORDER.length} complete
+            {pendingCount > 0 && (
+              <span className="text-amber-300"> · paused for IC decision</span>
+            )}
+          </div>
         )}
       </header>
 

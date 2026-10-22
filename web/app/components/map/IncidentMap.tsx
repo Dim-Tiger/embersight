@@ -2132,6 +2132,7 @@ export function IncidentMap() {
         evacCount={evacFiltered?.features.length ?? 0}
         firmsCount={firms?.features?.length ?? 0}
         firmsUnavailable={firms?.unavailable ?? null}
+        routingDone={!!routingOutput}
         ingressCount={routingOutput?.payload?.primary_routes?.length ?? 0}
         egressCount={routingOutput?.payload?.egress_routes?.length ?? 0}
         infraVisibility={infraVisibility}
@@ -2574,6 +2575,7 @@ function Legend({
   evacCount,
   firmsCount,
   firmsUnavailable,
+  routingDone,
   ingressCount,
   egressCount,
   infraVisibility,
@@ -2601,6 +2603,7 @@ function Legend({
   evacCount: number;
   firmsCount: number;
   firmsUnavailable: string | null;
+  routingDone: boolean;
   ingressCount: number;
   egressCount: number;
   infraVisibility: Record<string, boolean>;
@@ -2854,8 +2857,10 @@ function Legend({
         </div>
       )}
       {showRoutes && ingressCount + egressCount === 0 && (
-        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-500">
-          waiting on routing_staging agent…
+        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-400">
+          {routingDone
+            ? "The Routing & Staging agent returned no routes (see Resources)."
+            : "Waiting on the Routing & Staging agent…"}
         </div>
       )}
 
