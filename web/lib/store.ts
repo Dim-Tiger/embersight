@@ -462,12 +462,14 @@ export const INTERRUPT_AGENT: Record<
 };
 
 /**
- * Agents that are paused on a human decision. LangGraph emits
- * on_chain_start for the node, then the node calls interrupt() and the
- * stream ends without an on_chain_end, so the agent's status stays
- * "running" forever. Once the stream has closed, a "running" agent with a
- * pending interrupt is really "awaiting IC approval", and the UI should say
- * so instead of spinning.
+ * Agents that are paused on a human decision: every agent that owns a
+ * pending interrupt, once the stream has closed. Two backend shapes lead
+ * here. Older graphs call interrupt() inside the agent's node, so LangGraph
+ * emits on_chain_start and never on_chain_end and the status stays
+ * "running". Newer graphs finish the agent's node (master_ic reports
+ * decision "pending_ic_approval") and pause in a separate approval node.
+ * Either way the UI should say "awaiting your approval", not spin or show
+ * "done".
  */
 export function useAwaitingAgents(): ReadonlySet<string> {
   // Select a primitive so the hook only re-renders when the answer changes.

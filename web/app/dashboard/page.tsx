@@ -1,7 +1,12 @@
 "use client";
 
 import { useIncidents } from "@/lib/queries";
-import { AGENT_ORDER, type AgentStatus, useStore } from "@/lib/store";
+import {
+  AGENT_ORDER,
+  type AgentStatus,
+  useAwaitingAgents,
+  useStore,
+} from "@/lib/store";
 import { useTestMode } from "@/lib/testMode";
 import { useTheme } from "@/lib/theme";
 import { formatStarted } from "@/lib/units";
@@ -369,10 +374,9 @@ function NavItem({
 }) {
   const statuses = useStore((s) => s.agentStatuses);
   // After the stream closes, a "running" agent is paused on an IC decision.
-  const paused = useStore(
-    (s) => !s.streaming && s.pendingInterrupts.length > 0,
-  );
+  const awaitingAgents = useAwaitingAgents();
   const agents = TAB_AGENTS[tab] ?? [];
+  const paused = agents.some((a) => awaitingAgents.has(a));
 
   const { combined, doneCount, runningCount } = useMemo(() => {
     let done = 0;
@@ -386,7 +390,8 @@ function NavItem({
     }
     let combined: AgentStatus | "awaiting" = "pending";
     if (error > 0) combined = "error";
-    else if (running > 0) combined = paused ? "awaiting" : "running";
+    else if (paused) combined = "awaiting";
+    else if (running > 0) combined = "running";
     else if (agents.length > 0 && done === agents.length) combined = "done";
     return { combined, doneCount: done, runningCount: running };
   }, [agents, statuses, paused]);

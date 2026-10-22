@@ -55,10 +55,11 @@ export function AgentActivityBanner({
 
   const combined: BannerStatus = useMemo(() => {
     if (agents.some((a) => statuses[a] === "error")) return "error";
-    const running = agents.filter((a) => statuses[a] === "running");
-    if (running.length > 0) {
-      return running.every((a) => awaiting.has(a)) ? "awaiting" : "running";
-    }
+    // Paused on an IC decision. Old backends leave the agent "running"
+    // (interrupt inside the node); newer ones finish the synthesis node
+    // and pause in a separate approval node, so the agent is "done".
+    if (agents.some((a) => awaiting.has(a))) return "awaiting";
+    if (agents.some((a) => statuses[a] === "running")) return "running";
     if (agents.length > 0 && agents.every((a) => statuses[a] === "done"))
       return "done";
     return "pending";
@@ -225,7 +226,7 @@ export function AgentActivityBanner({
                 key={a}
                 name={a}
                 status={
-                  statuses[a] === "running" && awaiting.has(a)
+                  awaiting.has(a) && statuses[a] !== "error"
                     ? "awaiting"
                     : (statuses[a] ?? "pending")
                 }

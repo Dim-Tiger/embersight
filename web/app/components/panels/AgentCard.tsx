@@ -29,7 +29,14 @@ export function AgentCard({
   const paused = useStore(
     (s) => !s.streaming && s.pendingInterrupts.length > 0,
   );
-  const awaiting = paused && status === "running";
+  // Old backends: the node is still "running" inside interrupt(). New
+  // backends: the synthesis node finished with decision
+  // "pending_ic_approval" and a separate node waits for the IC.
+  const awaiting =
+    paused &&
+    (status === "running" ||
+      (output?.payload as { decision?: string } | undefined)?.decision ===
+        "pending_ic_approval");
   const queued = paused && status === "pending" && !hasStreamError;
   return (
     <section className="rounded-md border border-smoke-700 bg-smoke-800/40">

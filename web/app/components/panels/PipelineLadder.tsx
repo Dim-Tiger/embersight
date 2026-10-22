@@ -103,7 +103,7 @@ export function PipelineLadder() {
             {AGENT_ORDER.map((agent) => {
               const raw = statuses[agent] ?? "pending";
               const status =
-                raw === "running" && awaiting.has(agent) ? "awaiting" : raw;
+                awaiting.has(agent) && raw !== "error" ? "awaiting" : raw;
               const out = outputs[agent];
               // Agents that never started while the graph is paused run
               // only after the IC decides, so say "queued" instead of a
