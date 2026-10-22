@@ -443,15 +443,20 @@ function BriefingAttention({
     | undefined;
   if (rf) {
     const until = fmtClock(rf.expires as string | undefined);
+    const expiresMs = rf.expires ? Date.parse(String(rf.expires)) : NaN;
+    // An alert whose end time has passed must not read as "in effect".
+    const expired = Number.isFinite(expiresMs) && expiresMs <= Date.now();
     items.push({
       id: "red-flag",
-      level: "critical",
+      level: expired ? "warning" : "critical",
       title: String(rf.event ?? "Red Flag conditions forecast"),
       detail:
         rf.source === "derived_hrrr" || rf.source === "derived_raws"
           ? `Forecast meets Red Flag criteria: RH ${rf.rh_pct ?? "?"}%, wind ${rf.wind_speed_mph ?? "?"} mph, ${rf.temp_f ?? "?"} °F.`
           : until
-            ? `In effect until ${until}.`
+            ? expired
+              ? `Alert end time ${until} has passed; check NWS for an extension.`
+              : `In effect until ${until}.`
             : "Active NWS alert for this location.",
       action: { label: "Open Weather", onClick: () => setActiveTab("Weather") },
     });
