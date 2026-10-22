@@ -156,7 +156,12 @@ export async function postResume(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ thread_id: threadId, decision }),
   });
-  if (!r.ok || !r.body) throw new Error(`resume ${r.status}`);
+  if (!r.ok || !r.body) {
+    const detail = await r.text().catch(() => "");
+    throw new Error(
+      `Decision not sent (agent service ${r.status}${detail ? `: ${detail.slice(0, 120)}` : ""})`,
+    );
+  }
   // Pump the resumed SSE through the same store handlers. We fire-and-forget
   // so the approval button returns immediately; continuation events keep
   // flowing into the dashboard as the graph advances post-interrupt.

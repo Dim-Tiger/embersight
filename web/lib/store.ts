@@ -183,7 +183,7 @@ export type Store = {
   appendChat: (m: ChatMessage) => void;
   setPendingUserQuery: (q: string | null) => void;
   upsertInterrupt: (i: PendingInterrupt) => void;
-  removeInterrupt: (id?: string) => void;
+  removeInterrupt: (id?: string, threadId?: string) => void;
   toggleInfra: (id: string) => void;
   setInfra: (id: string, on: boolean) => void;
   acceptEvacZone: (zone: AcceptedEvacZone) => void;
@@ -347,10 +347,16 @@ export const useStore = create<Store>((set) => ({
     set((s) => ({
       infraVisibility: { ...s.infraVisibility, [id]: on },
     })),
-  removeInterrupt: (id) =>
+  // Match on thread AND id: interrupts without an id would otherwise all
+  // match `undefined` and one approval would clear every such card.
+  removeInterrupt: (id, threadId) =>
     set((s) => ({
       pendingInterrupts: s.pendingInterrupts.filter(
-        (x) => x.interrupt.id !== id,
+        (x) =>
+          !(
+            x.interrupt.id === id &&
+            (threadId == null || x.thread_id === threadId)
+          ),
       ),
     })),
   acceptEvacZone: (zone) =>

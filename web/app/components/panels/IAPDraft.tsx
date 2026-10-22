@@ -69,13 +69,17 @@ export function IAPDraft() {
   }, [pending, masterOut]);
 
   const [busy, setBusy] = useState(false);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
 
   async function respond(decision: "approved" | "edited" | "rejected") {
     if (!view.threadId) return;
     setBusy(true);
+    setDecisionError(null);
     try {
       await postResume(view.threadId, { decision, actor: "ic@example.com" });
-      remove(view.interruptId ?? undefined);
+      remove(view.interruptId ?? undefined, view.threadId);
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -135,6 +139,11 @@ export function IAPDraft() {
               </ActionButton>
             </div>
           </div>
+        )}
+        {decisionError && (
+          <p role="alert" className="text-[11px] text-red-300">
+            {decisionError}. Nothing was approved or rejected; try again.
+          </p>
         )}
 
         {!draft && streamError ? (
