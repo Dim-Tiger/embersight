@@ -148,7 +148,7 @@ function InterruptCard({ item, d }: { item: PendingInterrupt; d: Described }) {
     <article
       className={`border-b border-l-4 border-b-smoke-700 px-4 py-3 ${TONE_BORDER[d.tone]}`}
     >
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <span
           className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${TONE_CHIP[d.tone]}`}
         >
@@ -359,7 +359,7 @@ export function DecisionControls({
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="e.g. engines already committed on the north flank"
-              className="mt-1 w-full rounded bg-smoke-900 px-2 py-1 text-[11px] font-normal text-smoke-200 placeholder:text-smoke-400 focus:outline-none focus:ring-1 focus:ring-red-500"
+              className="mt-1 w-full rounded border border-smoke-600 bg-smoke-900 px-2 py-1 text-[11px] font-normal text-smoke-200 placeholder:text-smoke-400 focus:outline-none focus:ring-1 focus:ring-red-500"
             />
           </label>
           <div className="flex gap-1.5">
@@ -412,7 +412,7 @@ export function DecisionControls({
         </p>
       )}
 
-      <div className="mt-1.5 flex items-center justify-between gap-2">
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <span className="text-[10px] text-smoke-400">
           Approving records your decision; nothing is dispatched.
         </span>
@@ -489,7 +489,7 @@ function IapEditor({
         value={text}
         onChange={(e) => setText(e.target.value)}
         rows={5}
-        className="w-full rounded bg-smoke-900 px-2 py-1 text-[11px] leading-snug text-smoke-200 focus:outline-none focus:ring-1 focus:ring-ember-500"
+        className="w-full rounded border border-smoke-600 bg-smoke-900 px-2 py-1 text-[11px] leading-snug text-smoke-200 focus:outline-none focus:ring-1 focus:ring-ember-500"
       />
     </EditorShell>
   );
@@ -549,7 +549,7 @@ function ResourceEditor({
                   }));
                 }}
                 aria-label={`Quantity of ${line.type}`}
-                className="w-14 rounded bg-smoke-900 px-1.5 py-0.5 text-right text-[11px] text-smoke-100 focus:outline-none focus:ring-1 focus:ring-ember-500"
+                className="w-14 rounded border border-smoke-600 bg-smoke-900 px-1.5 py-0.5 text-right text-[11px] text-smoke-100 focus:outline-none focus:ring-1 focus:ring-ember-500"
               />
             </label>
           )),
@@ -584,7 +584,7 @@ function EvacEditor({
       <select
         value={status}
         onChange={(e) => setStatus(e.target.value)}
-        className="w-full rounded bg-smoke-900 px-2 py-1 text-[11px] text-smoke-200 focus:outline-none focus:ring-1 focus:ring-ember-500"
+        className="w-full rounded border border-smoke-600 bg-smoke-900 px-2 py-1 text-[11px] text-smoke-200 focus:outline-none focus:ring-1 focus:ring-ember-500"
       >
         <option value="ORDER">Evacuation ORDER</option>
         <option value="WARNING">Evacuation WARNING</option>
