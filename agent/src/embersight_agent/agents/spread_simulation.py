@@ -19,10 +19,8 @@ from typing import Any
 
 from ..hitl import audit_entry, decision_kind, request_human_decision
 from ..state import AgentOutput, AgentState, CitationBundle, Dataset, Model
-
-# Average residents per residential structure — same default the evac tool uses
-# so the population number on the cone matches the evac intel agent's math.
-_HOUSEHOLD_SIZE = 2.5
+from ..tools.pyretechnics_spread import fuel_preset
+from ..units import containment_fraction, containment_label, wind_phrase
 
 AGENT_NAME = "spread_simulation"
 _PROMPT_PATH = pathlib.Path(__file__).parent.parent / "prompts" / "spread_simulation.md"
@@ -124,22 +122,25 @@ def _extract_weather(weather_output: AgentOutput | None) -> dict:
         return {}
     p = weather_output.payload or {}
     cw = p.get("critical_window") or {}
+    # weather_wind lists any flat key it had to fill with a planning default.
+    assumed = list(p.get("assumed_inputs") or [])
 
-    wind_speed = cw.get("wind_speed_mph")
-    if wind_speed is None:
-        wind_speed = p.get("wind_speed_mph", 15.0)
-
-    # critical_window uses HRRR's wind_direction_deg; flat path uses wind_dir_deg.
-    wind_dir = cw.get("wind_direction_deg")
-    if wind_dir is None:
-        wind_dir = p.get("wind_dir_deg", 270.0)
+    def _pick(cw_key: str, flat_key: str, default: float) -> float:
+        for value in (cw.get(cw_key), p.get(flat_key)):
+            if value is not None:
+                return float(value)
+        if flat_key not in assumed:
+            assumed.append(flat_key)
+        return default
 
     return {
-        "wind_speed_mph": float(wind_speed),
-        "wind_dir_deg": float(wind_dir),  # MET "FROM" convention
+        "wind_speed_mph": _pick("wind_speed_mph", "wind_speed_mph", 15.0),
+        # critical_window uses HRRR's wind_direction_deg; flat uses wind_dir_deg.
+        "wind_dir_deg": _pick("wind_direction_deg", "wind_dir_deg", 270.0),  # FROM
         "fuel_moisture": p.get("fuel_moisture", {}),
-        "rh_pct": float(cw.get("rh_pct", p.get("rh_pct", 20.0))),
-        "temp_f": float(cw.get("temp_f", p.get("temp_f", 90.0))),
+        "rh_pct": _pick("rh_pct", "rh_pct", 20.0),
+        "temp_f": _pick("temp_f", "temp_f", 90.0),
+        "assumed_inputs": assumed,
         "_source": "critical_window" if cw else "flat",
     }
 
@@ -172,10 +173,16 @@ def _extract_terrain_fuel(terrain_output: AgentOutput | None) -> dict:
         if classes:
             code = classes[0].get("code")
 
+    assumed = list(p.get("assumed_inputs") or [])
+    for key in ("fuel_model", "slope_pct", "aspect_deg"):
+        if (key == "fuel_model" and not code) or (key != "fuel_model" and p.get(key) is None):
+            if key not in assumed:
+                assumed.append(key)
     return {
         "fuel_model": code or "GS2",
         "slope_pct": float(p.get("slope_pct", 15.0)),
         "aspect_deg": float(p.get("aspect_deg", 225.0)),
+        "assumed_inputs": assumed,
     }
 
 
@@ -440,93 +447,49 @@ def _wkt_bbox(polygon_wkt: str) -> tuple[float, float, float, float] | None:
         return None
 
 
-async def _gather_cone_impact(polygon_wkt: str, bbox: tuple[float, float, float, float]) -> dict:
-    """Run all six spatial queries in parallel and roll them up.
+async def _gather_cone_impact(polygon_wkt: str) -> dict:
+    """Values at risk inside the swept 24h cone.
 
-    Mirrors the values_at_risk fan-out but is computed against the actual
-    spread cone the agent just produced so the cone label is consistent
-    with the geometry it describes.
+    Uses the exact same queries and rollup as the values_at_risk agent, so
+    the cone label on the map and the Values-at-Risk card always agree on
+    people vs residences, and an unavailable layer shows as unknown (None)
+    in both places instead of 0.
     """
-    from ..tools.buildings import query_ms_buildings, query_usa_structures
-    from ..tools.evac import estimate_population
-    from ..tools.infra import (
-        query_critical_facilities,
-        query_hospitals,
-        query_schools,
-        query_transmission_lines,
+    from .values_at_risk import _gather_tallies, _rollup  # noqa: PLC0415
+
+    tallies = await _gather_tallies(polygon_wkt)
+    return _rollup(tallies, polygon_wkt)
+
+
+def _impact_sentence(impact: dict) -> str:
+    """One IC-facing sentence; unknown counts say 'unavailable', not 0."""
+    from .values_at_risk import fmt_count, population_phrase  # noqa: PLC0415
+
+    return (
+        f"Projected 24h cone exposure: {population_phrase(impact)}, "
+        f"{fmt_count(impact.get('residential_count'), 'residences')}, "
+        f"{fmt_count(impact.get('hospitals_count'), 'hospitals')}, "
+        f"{fmt_count(impact.get('schools_count'), 'schools')}, "
+        f"{fmt_count(impact.get('critical_facilities_total'), 'critical facilities')}. "
     )
-
-    loop = asyncio.get_running_loop()
-    tasks = {
-        "ms_buildings": loop.run_in_executor(None, query_ms_buildings, polygon_wkt),
-        "usa_structures": loop.run_in_executor(None, query_usa_structures, polygon_wkt),
-        "hospitals": loop.run_in_executor(None, query_hospitals, bbox),
-        "schools": loop.run_in_executor(None, query_schools, bbox),
-        "transmission": loop.run_in_executor(None, query_transmission_lines, bbox),
-        "critical_facilities": loop.run_in_executor(None, query_critical_facilities, bbox),
-        "population_est": loop.run_in_executor(None, estimate_population, polygon_wkt),
-    }
-    raw: dict[str, Any] = {}
-    for key, fut in tasks.items():
-        try:
-            raw[key] = await fut
-        except Exception as exc:  # noqa: BLE001
-            raw[key] = {"error": f"task:{exc}"}
-
-    ms = raw.get("ms_buildings") or {}
-    usa = raw.get("usa_structures") or {}
-    hospitals = [h for h in (raw.get("hospitals") or []) if isinstance(h, dict) and "error" not in h]
-    schools = [s for s in (raw.get("schools") or []) if isinstance(s, dict) and "error" not in s]
-    lines = [ln for ln in (raw.get("transmission") or []) if isinstance(ln, dict) and "error" not in ln]
-    critical = raw.get("critical_facilities") or {}
-    by_occ = (usa.get("by_occupancy") or {}) if isinstance(usa, dict) else {}
-
-    residential = int(by_occ.get("Residential", 0) or 0)
-    # Two population estimators; take the larger as a defensible upper bound for
-    # the cone label (footprint-density vs. residential-occupancy * household).
-    pop_from_residential = int(round(residential * _HOUSEHOLD_SIZE))
-    pop_from_density = (
-        int(raw.get("population_est", 0))
-        if not isinstance(raw.get("population_est"), dict)
-        else 0
-    )
-    population_estimate = max(pop_from_residential, pop_from_density)
-
-    return {
-        "population_estimate": population_estimate,
-        "structures_total": int(ms.get("count", 0)) if isinstance(ms, dict) else 0,
-        "residential_count": residential,
-        "commercial_count": int(by_occ.get("Commercial", 0) or 0),
-        "public_count": int(by_occ.get("Public", 0) or 0),
-        "industrial_count": int(by_occ.get("Industrial", 0) or 0),
-        "hospitals_count": len(hospitals),
-        "hospitals_total_beds": sum(int(h.get("beds", 0) or 0) for h in hospitals),
-        "schools_count": len(schools),
-        "schools_total_enrollment": sum(int(s.get("enrollment", 0) or 0) for s in schools),
-        "transmission_segments": len(lines),
-        "transmission_max_kv": max(
-            (float(ln.get("voltage_kv", 0) or 0) for ln in lines),
-            default=0.0,
-        ),
-        "critical_facilities_total": (
-            int(critical.get("total", 0)) if isinstance(critical, dict) else 0
-        ),
-    }
 
 
 def _impact_findings(impact: dict) -> list[str]:
     """Headline bullets used in the cone label and key_findings list."""
+    from .values_at_risk import fmt_count, population_phrase  # noqa: PLC0415
+
+    kv = impact.get("transmission_max_kv")
     return [
-        f"~{impact['population_estimate']:,} people in 24h cone",
-        f"{impact['residential_count']:,} residential structures "
-        f"({impact['structures_total']:,} total)",
-        f"{impact['hospitals_count']} hospitals "
-        f"({impact['hospitals_total_beds']:,} beds), "
-        f"{impact['schools_count']} schools "
-        f"({impact['schools_total_enrollment']:,} students)",
-        f"{impact['transmission_segments']} transmission segments "
-        f"(max {impact['transmission_max_kv']:.0f} kV), "
-        f"{impact['critical_facilities_total']} critical facilities",
+        f"{population_phrase(impact)} in 24h cone",
+        f"{fmt_count(impact.get('residential_count'), 'residential structures')} "
+        f"({fmt_count(impact.get('structures_total'), 'total')})",
+        f"{fmt_count(impact.get('hospitals_count'), 'hospitals')} "
+        f"({fmt_count(impact.get('hospitals_total_beds'), 'beds')}), "
+        f"{fmt_count(impact.get('schools_count'), 'schools')} "
+        f"({fmt_count(impact.get('schools_total_enrollment'), 'students')})",
+        f"{fmt_count(impact.get('transmission_segments'), 'transmission segments')}"
+        + (f" (max {kv:.0f} kV)" if kv is not None else "")
+        + f", {fmt_count(impact.get('critical_facilities_total'), 'critical facilities')}",
     ]
 
 
@@ -561,6 +524,19 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     weather = _extract_weather(weather_out)
     terrain = _extract_terrain_fuel(terrain_out)
     fm = _fuel_moisture(weather)
+    assumed_inputs = weather.get("assumed_inputs", []) + terrain.get("assumed_inputs", [])
+    preset = fuel_preset(terrain.get("fuel_model", "GS2"))
+
+    # ------------------------------------------------------------------ #
+    # 1b. Containment gate
+    # ------------------------------------------------------------------ #
+    # The model below grows a free-burning ellipse from the ignition point.
+    # It knows nothing about control lines, so for a fully contained fire
+    # its cone is not a forecast. Publishing it would hand values_at_risk
+    # and evacuation_intelligence a phantom threat to act on.
+    contained = containment_fraction(state.incident)
+    if contained is not None and contained >= 1.0:
+        return {"outputs": {AGENT_NAME: _contained_output(incident_name)}}
 
     # ------------------------------------------------------------------ #
     # 2. Build base inputs for Monte Carlo
@@ -572,7 +548,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     wind_from_deg = weather.get("wind_dir_deg", 270.0)
     wind_to_deg = (wind_from_deg + 180.0) % 360.0
     base_inputs = {
-        "fuel_model": terrain.get("fuel_model", "GS2"),
+        "fuel_model": preset.code,
         "slope_pct": terrain.get("slope_pct", 15.0),
         "aspect_deg": terrain.get("aspect_deg", 225.0),
         "wind_speed_mph": weather.get("wind_speed_mph", 15.0),
@@ -631,12 +607,10 @@ async def run(state: AgentState) -> dict:  # noqa: C901
 
     impact_wkt = _cone_geojson_to_wkt(swept_cone_24h)
     if impact_wkt:
-        bbox = _wkt_bbox(impact_wkt)
-        if bbox is not None:
-            try:
-                cone_impact = await _gather_cone_impact(impact_wkt, bbox)
-            except Exception as exc:  # noqa: BLE001
-                cone_impact = {"error": f"impact_gather_failed:{exc}"}
+        try:
+            cone_impact = await _gather_cone_impact(impact_wkt)
+        except Exception as exc:  # noqa: BLE001
+            cone_impact = {"error": f"impact_gather_failed:{exc}"}
 
     # 24-hour p25 burn area (km²) — key metric
     burn_area_km2 = None
@@ -728,44 +702,48 @@ async def run(state: AgentState) -> dict:  # noqa: C901
     # ------------------------------------------------------------------ #
     # 8. LLM narrative
     # ------------------------------------------------------------------ #
-    impact_str = ""
-    if cone_impact and "error" not in cone_impact:
-        impact_str = (
-            f" | Cone impact: ~{cone_impact['population_estimate']:,} people, "
-            f"{cone_impact['residential_count']:,} residences, "
-            f"{cone_impact['hospitals_count']} hospitals, "
-            f"{cone_impact['schools_count']} schools, "
-            f"{cone_impact['critical_facilities_total']} critical facilities"
+    has_impact = bool(cone_impact) and "error" not in cone_impact
+    impact_sentence = _impact_sentence(cone_impact) if has_impact else ""
+    # Caveats the IC must see whichever narrator writes the text.
+    caveats: list[str] = []
+    if preset.substituted:
+        caveats.append(
+            f"Fuel model {preset.requested or 'unknown'} is not in EmberSight's "
+            f"simplified table; {preset.code} parameters were used."
         )
+    if assumed_inputs:
+        caveats.append(
+            "ASSUMED planning defaults (no live data) for: "
+            + ", ".join(sorted(set(assumed_inputs)))
+            + "."
+        )
+    if contained:
+        caveats.append(
+            f"Fire is {containment_label(contained)}; this is a free-spread "
+            "projection from the ignition point and does not model containment lines."
+        )
+    wind_text = wind_phrase(base_inputs["wind_speed_mph"], wind_from_deg)
     context_for_llm = (
         f"Incident: {incident_name} | Fuel: {base_inputs['fuel_model']} | "
-        f"Slope: {base_inputs['slope_pct']}% | Wind: {base_inputs['wind_speed_mph']} mph "
-        f"from {base_inputs['wind_dir_deg']}° | Dead 1h moisture: {fm['1h']}% | "
+        f"Slope: {base_inputs['slope_pct']}% | Wind: {wind_text} | "
+        f"Dead 1h moisture: {fm['1h']}% | "
         f"Head ROS mean: {meta.get('ros_fpm_mean', 0.0):.1f} fpm ± "
         f"{meta.get('ros_fpm_std', 0.0):.1f} fpm | "
         f"Flame length mean: {meta.get('flame_length_ft_mean', 0.0):.1f} ft | "
         f"24h p25 burn area: {burn_area_km2} km² | "
         f"Trigger breaches: {trigger_breaches} | "
         f"Confidence: {confidence:.2f} ({confidence_driver})"
-        f"{impact_str}"
+        + (f" | {impact_sentence}" if impact_sentence else "")
+        + (f" | Caveats (state them): {' '.join(caveats)}" if caveats else "")
     )
     llm_narrative = await _llm_narrate(context_for_llm)
 
     if not llm_narrative:
         ros_mph = meta.get("ros_fpm_mean", 0.0) * 60.0 / 5280.0
         ros_chains = meta.get("ros_fpm_mean", 0.0) * 60.0 / 66.0
-        impact_sentence = ""
-        if cone_impact and "error" not in cone_impact:
-            impact_sentence = (
-                f"Projected to expose ~{cone_impact['population_estimate']:,} people, "
-                f"{cone_impact['residential_count']:,} residences, "
-                f"{cone_impact['hospitals_count']} hospitals, "
-                f"{cone_impact['schools_count']} schools, and "
-                f"{cone_impact['critical_facilities_total']} critical facilities "
-                "inside the 24h cone. "
-            )
         llm_narrative = (
             f"SPREAD SIMULATION — {incident_name}: "
+            f"{base_inputs['fuel_model']} fuel, wind {wind_text}. "
             f"Head ROS {ros_chains:.1f} chains/hr ({ros_mph:.1f} mph), "
             f"flame length {meta.get('flame_length_ft_mean', 0.0):.0f} ft. "
             f"24-hour projected burn area (≥25% probability): "
@@ -783,6 +761,10 @@ async def run(state: AgentState) -> dict:  # noqa: C901
                 else "No trigger-point breaches detected in modelled envelope."
             )
         )
+    # Never let a caveat depend on the LLM remembering to say it.
+    for caveat in caveats:
+        if caveat not in llm_narrative:
+            llm_narrative = llm_narrative.rstrip() + " " + caveat
 
     # ------------------------------------------------------------------ #
     # 9. Key findings
@@ -816,10 +798,12 @@ async def run(state: AgentState) -> dict:  # noqa: C901
             Dataset(name="RAWS fuel moisture (via weather_wind subagent)"),
         ],
         models=[
-            Model(name="Rothermel surface-fire ROS", version="1972/Albini-1976"),
+            # Honest label: the ROS comes from EmberSight's simplified
+            # Rothermel-form fallback, not a pyretechnics run (see
+            # tools/pyretechnics_spread.calc_surface_ros).
             Model(
-                name=f"pyretechnics surface_fire ({pyro_ver})",
-                version=pyro_ver,
+                name="Simplified Rothermel-form surface ROS (EmberSight fallback)",
+                version=f"Scott & Burgan 2005 fuel params; pyretechnics {pyro_ver} not called",
             ),
             Model(name="Anderson elliptical cone", version="1983"),
             Model(name=f"Monte Carlo N={meta.get('n', 200)}"),
@@ -848,6 +832,11 @@ async def run(state: AgentState) -> dict:  # noqa: C901
             "swept_cone_24h": swept_cone_24h,
             "n_mc_samples": int(meta.get("n", 200)),
             "fuel_model": base_inputs["fuel_model"],
+            "fuel_model_requested": preset.requested,
+            "fuel_model_substituted": preset.substituted,
+            "assumed_inputs": sorted(set(assumed_inputs)),
+            "containment_fraction": contained,
+            "containment_gated": False,
             "wind_speed_mph": base_inputs["wind_speed_mph"],
             # Surface MET FROM convention in the payload (display contract);
             # the +180° fire-head TO direction lives inside base_inputs only.
@@ -866,8 +855,24 @@ async def run(state: AgentState) -> dict:  # noqa: C901
 
 
 # --------------------------------------------------------------------------- #
-# Low-confidence early-exit helper
+# Low-confidence early-exit helpers
 # --------------------------------------------------------------------------- #
+
+
+def _contained_output(incident_name: str) -> AgentOutput:
+    """A fully contained fire gets no free-spread cone (see run(), step 1b)."""
+    out = _low_confidence_output(
+        incident_name,
+        f"{incident_name} is reported 100% contained. No free-spread projection "
+        "is issued: the spread model grows an unconstrained ellipse from the "
+        "ignition point and cannot represent containment lines. RECOMMEND "
+        "re-running Spread Simulation if containment is lost or a slopover is "
+        "reported.",
+    )
+    out.payload.update({"containment_gated": True, "containment_fraction": 1.0})
+    out.confidence = 0.15
+    out.confidence_driver = "100% contained: projection withheld"
+    return out
 
 
 def _low_confidence_output(incident_name: str, reason: str) -> AgentOutput:
