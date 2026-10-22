@@ -214,7 +214,7 @@ export function IncidentMap() {
   const [showRoutes, setShowRoutes] = useState(true);
   const [basemap, setBasemap] = useState<Basemap>("dark");
   const [showCone, setShowCone] = useState(true);
-  const [legendCollapsed, setLegendCollapsed] = useState(false);
+  const [legendCollapsed, setLegendCollapsed] = useState(true);
   const [windLowZoom, setWindLowZoom] = useState(
     () => useStore.getState().mapViewport.zoom < WIND_LOW_ZOOM_THRESHOLD,
   );
@@ -572,6 +572,18 @@ export function IncidentMap() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIncidentId]);
+
+  // While the legend is open it covers ~260 px on the left of the map, so
+  // shift the map's centre (where the selected fire sits) to the right of
+  // it. Camera padding persists, so later flyTo calls respect it too.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    map.easeTo({
+      padding: { left: legendCollapsed ? 0 : 260, top: 0, right: 0, bottom: 0 },
+      duration: 300,
+    });
+  }, [legendCollapsed, mapLoaded]);
 
   // Enable the perimeter session whenever a fire is (re-)selected.
   useEffect(() => {
@@ -2620,14 +2632,26 @@ function Legend({
     // z-50 + isolate keeps the legend above the deck.gl wind overlay canvas,
     // which paints inside the maplibre container and would otherwise overlap
     // any sibling at z-20.
-    <div className="absolute bottom-3 left-3 z-50 isolate max-w-[260px] rounded-md bg-smoke-800/90 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
+    // Collapsed by default: open, it is ~700 px tall and used to cover the
+    // lower-left of the map, including the selected fire's popup. When
+    // open it scrolls inside the map instead of overflowing it, and the map
+    // pads its centre to the right (see the legend padding effect).
+    <div className="absolute bottom-3 left-3 z-50 isolate flex max-h-[calc(100%-1.5rem)] w-[248px] flex-col rounded-md bg-smoke-800/95 text-[11px] text-smoke-200 shadow-lg backdrop-blur">
       <button
         type="button"
         onClick={() => setCollapsed(!collapsed)}
-        className="flex w-full items-center justify-between gap-2 rounded-t-md px-3 py-2 text-left text-smoke-200 hover:bg-smoke-700/60"
+        className="flex w-full flex-shrink-0 items-center justify-between gap-2 rounded-t-md px-3 py-2 text-left text-smoke-200 hover:bg-smoke-700/60"
         aria-expanded={!collapsed}
+        aria-controls="map-legend-body"
       >
-        <span className="font-semibold">Legend</span>
+        <span className="min-w-0">
+          <span className="block font-semibold">Legend &amp; layers</span>
+          {collapsed && center && (
+            <span className="block truncate text-[10px] text-smoke-300">
+              Wind {formatWind(center.speed, center.direction, wind?.gust_max_ms)}
+            </span>
+          )}
+        </span>
         <span
           className="text-smoke-400"
           aria-hidden
@@ -2641,7 +2665,7 @@ function Legend({
         </span>
       </button>
       {collapsed ? null : (
-      <div className="px-3 pb-3">
+      <div id="map-legend-body" className="min-h-0 overflow-y-auto px-3 pb-3">
       <div className="mb-1 font-semibold text-smoke-200">Basemap</div>
       <div className="mb-2 inline-flex overflow-hidden rounded border border-smoke-700">
         <button
@@ -2869,7 +2893,7 @@ function Legend({
           Critical infrastructure
         </div>
         {!infraEnabled ? (
-          <div className="italic text-smoke-500">
+          <div className="italic text-smoke-400">
             Select an incident to load nearby facilities (25 km AOI).
           </div>
         ) : (
@@ -2886,7 +2910,7 @@ function Legend({
         )}
       </div>
 
-      <div className="mt-2 text-[10px] text-smoke-500">
+      <div className="mt-2 text-[10px] text-smoke-400">
         Sources: NIFC · CalOES · Open-Meteo · NASA FIRMS · OSM/OSMnx · HIFLD · NCES · FEMA
       </div>
       </div>
