@@ -36,3 +36,14 @@ const config: Config = {
 };
 
 export default config;
+
+// Appended: the dashboard uses text-ember-300 (28 places), bg-ember-300,
+// text-ember-100 and ring-ember-800, but those shades were never defined, so
+// Tailwind generated no CSS for them and headings like "Why" / "Impact" and
+// the chat agent name fell back to the inherited colour. Values are the
+// Tailwind orange scale the other ember shades already follow. Added at the
+// end of the file to stay clear of the smoke-palette change in PR #40.
+const ember = (config.theme?.extend?.colors as Record<string, Record<string, string>>).ember;
+ember["100"] = "#ffedd5";
+ember["300"] = "#fdba74";
+ember["800"] = "#9a3412";
