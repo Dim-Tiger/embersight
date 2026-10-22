@@ -39,6 +39,7 @@ from ..state import (
     Model,
 )
 from ..units import containment_fraction, containment_label
+from .provenance import narrator_model
 
 AGENT_NAME = "resource_recommendation"
 LLM_MODEL = "claude-haiku-4-5"
@@ -486,6 +487,7 @@ async def run(state: AgentState) -> dict[str, Any]:
     confidence, confidence_driver = _confidence_for(missing)
 
     recommendation = await _llm_recommendation(state, context)
+    used_llm = recommendation is not None
     if recommendation is None:
         recommendation = _stub_recommendation(state, context)
 
@@ -494,7 +496,7 @@ async def run(state: AgentState) -> dict[str, Any]:
             Dataset(name="CAL FIRE Incident Mobilization Guide", version="2024"),
             Dataset(name="NWCG Resource Typing (PMS 200)", version="2024"),
         ],
-        models=[Model(name=LLM_MODEL, version="anthropic")],
+        models=[narrator_model(LLM_MODEL, used_llm)],
         reasoning_trace_id=str(uuid.uuid4()),
     )
 

@@ -39,6 +39,7 @@ from ..hitl import decision_kind as normalise_decision
 from ..state import AgentOutput, AgentState, CitationBundle, Dataset, Model
 from ..tools import evac as evac_tools
 from ..tools import zone_catalog
+from .provenance import narrator_model
 
 log = logging.getLogger(__name__)
 
@@ -1155,7 +1156,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
                 url="https://github.com/microsoft/USBuildingFootprints",
             ),
         ],
-        models=[Model(name=LLM_MODEL, version="haiku-4.5")],
+        models=[narrator_model(LLM_MODEL, used_llm=llm_calls > 0)],
         reasoning_trace_id=str(uuid.uuid4()),
     )
 

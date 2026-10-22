@@ -34,6 +34,7 @@ from ..state import (
     Model,
 )
 from ..tools.overpass import endpoints as overpass_endpoints
+from .provenance import narrator_model
 from ..tools.overpass import (
     OVERPASS,
     get_fire_stations,
@@ -573,7 +574,7 @@ def _stub_output(state: AgentState, reason: str) -> AgentOutput:
         confidence_driver=f"degraded: {reason}",
         citation_bundle=CitationBundle(
             datasets=[Dataset(name="OSM Overpass (unavailable)", version="-")],
-            models=[Model(name=MODEL_NAME, version="2025-10")],
+            models=[narrator_model(MODEL_NAME, used_llm=False)],
             reasoning_trace_id=str(uuid.uuid4()),
         ),
     )
@@ -975,7 +976,7 @@ async def run(state: AgentState) -> dict:
                     version="incidents.fire.ca.gov",
                 ),
             ],
-            models=[Model(name=MODEL_NAME, version="2025-10")],
+            models=[narrator_model(MODEL_NAME, used_llm=bool(llm_text))],
             reasoning_trace_id=str(uuid.uuid4()),
         ),
     )

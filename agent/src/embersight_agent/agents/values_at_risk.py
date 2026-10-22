@@ -39,6 +39,7 @@ from ..tools.evac import (
     DEFAULT_BUILDING_DENSITY_PER_KM2 as DENSITY_BUILDINGS_PER_KM2,
 )
 from ..tools.evac import DEFAULT_HOUSEHOLD_SIZE, estimate_population
+from .provenance import narrator_model
 from ..tools.infra import (
     query_critical_facilities,
     query_hospitals,
@@ -502,14 +503,15 @@ def _confidence(tallies: dict[str, Any], roll: dict[str, Any]) -> tuple[float, s
 
 async def _llm_narrative(
     roll: dict[str, Any], cone_source: str, incident: Incident | None
-) -> str:
+) -> tuple[str, bool]:
+    """(narrative, written_by_llm)."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        return _fallback_narrative(roll, cone_source, incident)
+        return _fallback_narrative(roll, cone_source, incident), False
     try:
         from langchain_anthropic import ChatAnthropic  # noqa: PLC0415
         from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
     except Exception:  # noqa: BLE001
-        return _fallback_narrative(roll, cone_source, incident)
+        return _fallback_narrative(roll, cone_source, incident), False
 
     system_prompt = _load_prompt()
     inc_name = incident.name if incident else "unknown incident"
@@ -531,10 +533,18 @@ async def _llm_narrative(
             [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)],
         )
         if text and text.strip():
-            return text.strip()
+            # The LLM can drop the "PARTIAL inventory" caveat; keep it.
+            caveat = "PARTIAL inventory" if roll.get("unavailable") else ""
+            if caveat and caveat not in text:
+                text = (
+                    "PARTIAL inventory: " + ", ".join(roll["unavailable"])
+                    + " did not respond, so those counts are unknown, not zero. "
+                    + text
+                )
+            return text.strip(), True
     except Exception as exc:  # noqa: BLE001 — fall back to deterministic text
         log.warning("values_at_risk LLM narrative failed: %s", exc)
-    return _fallback_narrative(roll, cone_source, incident)
+    return _fallback_narrative(roll, cone_source, incident), False
 
 
 # --------------------------------------------------------------------------- #
@@ -542,7 +552,7 @@ async def _llm_narrative(
 # --------------------------------------------------------------------------- #
 
 
-def _citations(tallies: dict[str, Any]) -> CitationBundle:
+def _citations(tallies: dict[str, Any], used_llm: bool = False) -> CitationBundle:
     """Build the CitationBundle from the actual responses we got."""
     errors = {k: _has_error(v) for k, v in tallies.items()}
     datasets = [
@@ -599,7 +609,7 @@ def _citations(tallies: dict[str, Any]) -> CitationBundle:
             ds.version = (ds.version or "") + " (errored)"
     return CitationBundle(
         datasets=datasets,
-        models=[Model(name=LLM_MODEL_ID, version="2025-10-01")],
+        models=[narrator_model(LLM_MODEL_ID, used_llm)],
         reasoning_trace_id=str(uuid.uuid4()),
     )
 
@@ -629,7 +639,7 @@ async def run(state: AgentState) -> dict:
 
     tallies = await _gather_tallies(polygon_wkt)
     roll = _rollup(tallies, polygon_wkt)
-    narrative = await _llm_narrative(roll, cone_source, state.incident)
+    narrative, used_llm = await _llm_narrative(roll, cone_source, state.incident)
     findings = _key_findings(roll)
     confidence, driver = _confidence(tallies, roll)
 
@@ -646,7 +656,7 @@ async def run(state: AgentState) -> dict:
         },
         confidence=confidence,
         confidence_driver=driver,
-        citation_bundle=_citations(tallies),
+        citation_bundle=_citations(tallies, used_llm),
     )
     return {"outputs": {AGENT_NAME: output}}
 

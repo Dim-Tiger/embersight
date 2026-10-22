@@ -96,6 +96,34 @@ def test_wind_speed_and_direction_come_from_one_source():
     assert flat["sources"]["wind_speed_mph"] == flat["sources"]["wind_dir_deg"] == "nws_hourly"
 
 
+def test_open_meteo_is_used_before_nws_and_defaults():
+    """Ops run: spread used the 15 mph @ 270° default while the dashboard's
+    Open-Meteo layer showed a real 9 mph SW wind."""
+    from embersight_agent.tools import open_meteo
+
+    om = open_meteo.parse_current({"current": {
+        "time": "2026-10-22T07:00", "wind_speed_10m": 9.0, "wind_direction_10m": 225,
+        "temperature_2m": 61.0, "relative_humidity_2m": 40}})
+    flat = weather_wind._flat_wx_keys({}, [], None, {"stations": []}, NWS_FORECAST, om)
+    assert (flat["wind_speed_mph"], flat["wind_dir_deg"]) == (9.0, 225.0)
+    assert flat["sources"]["wind_speed_mph"] == "open_meteo"
+    assert flat["assumed_inputs"] == []
+
+
+def test_open_meteo_parser_tolerates_errors():
+    from embersight_agent.tools import open_meteo
+
+    assert open_meteo.parse_current({"error": True, "reason": "bad"}) == {}
+    assert open_meteo.parse_current(None) == {}
+
+
+def test_offline_citations_name_the_deterministic_narrator():
+    state = AgentState(incident=Incident(id="w", name="Wx Fire", lat=34.5, lon=-119.7))
+    out = asyncio.run(weather_wind.run(state))["outputs"]["weather_wind"]
+    names = [m.name for m in out.citation_bundle.models]
+    assert names == ["deterministic template (no LLM call)"]
+
+
 def test_rtma_beats_nws():
     rtma = {"wind_speed_mph": 22.0, "wind_direction_deg": 45.0, "temp_f": 88.0, "rh_pct": 9.0}
     flat = weather_wind._flat_wx_keys(rtma, [], None, {"stations": []}, NWS_FORECAST)

@@ -37,6 +37,7 @@ from ..state import (
     Model,
 )
 from ..units import wind_phrase
+from .provenance import narrator_model
 
 AGENT_NAME = "weather_wind"
 log = logging.getLogger(__name__)
@@ -321,11 +322,13 @@ def _flat_wx_keys(
     critical: dict[str, Any] | None,
     raws: dict[str, Any],
     nws_forecast: Any = None,
+    open_meteo: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project the richest source into the flat keys spread_simulation expects.
 
     Source preference per key: RTMA now → HRRR f=0 → critical window →
-    latest RAWS → NWS hourly forecast → planning default. Every key that
+    latest RAWS → Open-Meteo current (what the dashboard's wind layer shows)
+    → NWS hourly forecast → planning default. Every key that
     falls through to a default is named in ``assumed_inputs`` and its
     source is recorded in ``sources``, so a made-up number can never pass
     for an observation.
@@ -346,6 +349,7 @@ def _flat_wx_keys(
         }
         break
     nws_now = _nws_current_hour(nws_forecast)
+    om = open_meteo or {}
 
     candidates = {
         "wind_speed_mph": [
@@ -353,6 +357,7 @@ def _flat_wx_keys(
             ("hrrr_f0", hrrr0.get("wind_speed_mph")),
             ("hrrr_critical_window", crit.get("wind_speed_mph")),
             ("raws", raws_latest.get("wind_speed_mph")),
+            ("open_meteo", om.get("wind_speed_mph")),
             ("nws_hourly", nws_now.get("wind_speed_mph")),
         ],
         "wind_dir_deg": [
@@ -360,6 +365,7 @@ def _flat_wx_keys(
             ("hrrr_f0", hrrr0.get("wind_direction_deg")),
             ("hrrr_critical_window", crit.get("wind_direction_deg")),
             ("raws", raws_latest.get("wind_dir_deg")),
+            ("open_meteo", om.get("wind_dir_deg")),
             ("nws_hourly", nws_now.get("wind_dir_deg")),
         ],
         "temp_f": [
@@ -367,6 +373,7 @@ def _flat_wx_keys(
             ("hrrr_f0", hrrr0.get("temp_f")),
             ("hrrr_critical_window", crit.get("temp_f")),
             ("raws", raws_latest.get("temp_f")),
+            ("open_meteo", om.get("temp_f")),
             ("nws_hourly", nws_now.get("temp_f")),
         ],
         "rh_pct": [
@@ -374,6 +381,7 @@ def _flat_wx_keys(
             ("hrrr_f0", hrrr0.get("rh_pct")),
             ("hrrr_critical_window", crit.get("rh_pct")),
             ("raws", raws_latest.get("rh_pct")),
+            ("open_meteo", om.get("rh_pct")),
             ("nws_hourly", nws_now.get("rh_pct")),
         ],
     }
@@ -426,23 +434,25 @@ def _flat_wx_keys(
 
 
 async def _gather_inputs(lat: float, lon: float) -> dict[str, Any]:
-    """Pull NWS + RAWS + HRRR + RTMA in parallel.
+    """Pull NWS + Open-Meteo + RAWS + HRRR + RTMA in parallel.
 
     Imports are deferred so a graph-import smoke test doesn't require the
     science group to be installed.
     """
-    from ..tools import herbie_wx, nws, synoptic_raws
+    from ..tools import herbie_wx, nws, open_meteo, synoptic_raws
 
     bbox = synoptic_raws.bbox_around(lat, lon, 50.0)
 
     forecast_task = nws.get_forecast(lat, lon)
+    open_meteo_task = open_meteo.get_current(lat, lon)
     alerts_task = nws.get_active_alerts(lat, lon)
     raws_task = synoptic_raws.get_raws_observations(bbox, lookback_hours=24)
     hrrr_task = asyncio.to_thread(herbie_wx.get_hrrr_forecast, lat, lon, 24)
     rtma_task = asyncio.to_thread(herbie_wx.get_rtma_analysis, lat, lon)
 
-    forecast, alerts, raws, hrrr, rtma = await asyncio.gather(
+    forecast, om_now, alerts, raws, hrrr, rtma = await asyncio.gather(
         forecast_task,
+        open_meteo_task,
         alerts_task,
         raws_task,
         hrrr_task,
@@ -457,6 +467,7 @@ async def _gather_inputs(lat: float, lon: float) -> dict[str, Any]:
 
     return {
         "nws_forecast": _coerce(forecast, {"forecast": None}),
+        "open_meteo": {} if isinstance(om_now, Exception) else om_now,
         "nws_alerts": (
             [] if isinstance(alerts, Exception) else alerts
         ),
@@ -642,7 +653,9 @@ async def run(state: AgentState) -> dict:
     }
 
     # Flat top-level keys for downstream consumers (spread_simulation).
-    flat = _flat_wx_keys(rtma, hrrr_hourly, critical, raws, inputs["nws_forecast"])
+    flat = _flat_wx_keys(
+        rtma, hrrr_hourly, critical, raws, inputs["nws_forecast"], inputs.get("open_meteo")
+    )
     fused["flat"] = flat
 
     llm_text = await _llm_narrative(fused)
@@ -661,6 +674,11 @@ async def run(state: AgentState) -> dict:
             Dataset(
                 name="NWS Active Alerts",
                 url=f"https://api.weather.gov/alerts/active?point={lat:.4f},{lon:.4f}",
+            ),
+            Dataset(
+                name="Open-Meteo current conditions",
+                url="https://open-meteo.com/",
+                timestamp=(inputs.get("open_meteo") or {}).get("valid_time"),
             ),
             Dataset(
                 name="NWS Hourly Forecast",
@@ -683,7 +701,7 @@ async def run(state: AgentState) -> dict:
             ),
         ],
         models=[
-            Model(name="claude-haiku-4-5", version="anthropic"),
+            narrator_model(_LLM_MODEL, used_llm=llm_text is not None),
         ],
         reasoning_trace_id=str(uuid.uuid4()),
     )
