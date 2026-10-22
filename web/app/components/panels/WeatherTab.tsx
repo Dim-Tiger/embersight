@@ -204,7 +204,7 @@ export function WeatherTab() {
                       <div className="text-smoke-400">{a.headline}</div>
                     )}
                     {a.severity && (
-                      <div className="text-[10px] text-smoke-500">
+                      <div className="text-[10px] text-smoke-400">
                         severity {a.severity}
                       </div>
                     )}
@@ -225,7 +225,7 @@ export function WeatherTab() {
                     className="truncate rounded bg-smoke-900/60 px-2 py-1"
                   >
                     <span className="text-ember-300">{s.stid}</span>{" "}
-                    <span className="text-smoke-500">{s.name}</span>
+                    <span className="text-smoke-400">{s.name}</span>
                   </li>
                 ))}
               </ul>

@@ -51,7 +51,7 @@ export function MessageInput() {
         title={placeholder}
         aria-label="Message to the AI Master IC"
         disabled={!incident || streaming || !briefingComplete}
-        className="flex-1 rounded bg-smoke-900 px-3 py-1.5 text-xs text-smoke-200 placeholder:text-smoke-500 focus:outline-none focus:ring-1 focus:ring-ember-500 disabled:opacity-50"
+        className="flex-1 rounded bg-smoke-900 px-3 py-1.5 text-xs text-smoke-200 placeholder:text-smoke-400 focus:outline-none focus:ring-1 focus:ring-ember-500 disabled:opacity-50"
       />
       <button
         type="submit"

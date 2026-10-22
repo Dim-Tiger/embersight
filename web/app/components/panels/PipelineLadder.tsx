@@ -89,7 +89,7 @@ export function PipelineLadder() {
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {idle && (
-          <div className="px-4 py-6 text-xs text-smoke-500">
+          <div className="px-4 py-6 text-xs text-smoke-400">
             Choose an incident to start the briefing.
           </div>
         )}

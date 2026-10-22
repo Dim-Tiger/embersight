@@ -201,7 +201,7 @@ export function AgentActivityBanner({
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
             <h2 className="text-sm font-semibold text-smoke-100">{title}</h2>
             {subtitle && (
-              <p className="text-[10px] uppercase tracking-widest text-smoke-500">
+              <p className="text-[10px] uppercase tracking-widest text-smoke-400">
                 {subtitle}
               </p>
             )}
@@ -268,7 +268,7 @@ export function AgentActivityBanner({
           {/* Live ticker */}
           {ticker.length > 0 && (
             <div className="mt-3 border-t border-smoke-700/60 pt-2">
-              <div className="mb-1 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-widest text-smoke-500">
+              <div className="mb-1 flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-widest text-smoke-400">
                 <Sparkles className="h-3 w-3" />
                 Live agent activity
               </div>
@@ -286,7 +286,7 @@ export function AgentActivityBanner({
                             ? "text-emerald-400"
                             : row.tone === "error"
                               ? "text-red-400"
-                              : "text-smoke-500"
+                              : "text-smoke-400"
                       }`}
                     >
                       {row.tone === "start"
@@ -297,7 +297,7 @@ export function AgentActivityBanner({
                             ? "✕"
                             : "·"}
                     </span>
-                    <span className="text-smoke-600">
+                    <span className="text-smoke-400">
                       {new Date(row.ts).toLocaleTimeString().slice(0, 8)}
                     </span>
                     <span className="truncate text-smoke-300">{row.label}</span>
@@ -309,7 +309,7 @@ export function AgentActivityBanner({
 
           {/* Empty / idle state */}
           {!selectedIncidentId && (
-            <p className="mt-2 text-[11px] italic text-smoke-500">
+            <p className="mt-2 text-[11px] italic text-smoke-400">
               Pick an active incident to dispatch the team.
             </p>
           )}
@@ -376,7 +376,7 @@ function AgentChip({
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-smoke-800 px-2 py-0.5 text-[10px] font-medium text-smoke-500 ring-1 ring-smoke-700">
+    <span className="inline-flex items-center gap-1 rounded-full bg-smoke-800 px-2 py-0.5 text-[10px] font-medium text-smoke-400 ring-1 ring-smoke-700">
       <CircleDashed className="h-2.5 w-2.5" />
       {label}
     </span>

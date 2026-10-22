@@ -30,18 +30,18 @@ export function LiveFeed() {
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-smoke-300">
           Live stream
         </h2>
-        <span className="text-[9px] text-smoke-500">{tail.length} events</span>
+        <span className="text-[9px] text-smoke-400">{tail.length} events</span>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-1">
         {tail.length === 0 ? (
-          <div className="py-2 text-[10px] italic text-smoke-600">
+          <div className="py-2 text-[10px] italic text-smoke-400">
             Waiting for events…
           </div>
         ) : (
           <ul className="space-y-0.5 font-mono text-[10px] text-smoke-400">
             {tail.map((t, i) => (
               <li key={i} className="truncate">
-                <span className="text-smoke-600">
+                <span className="text-smoke-400">
                   {new Date(t.ts).toLocaleTimeString().slice(0, 8)}
                 </span>{" "}
                 {t.label}

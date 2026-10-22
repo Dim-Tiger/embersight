@@ -109,7 +109,7 @@ export function AgentCard({
               </Markdown>
             )}
             {output.confidence_driver && (
-              <p className="text-[10px] text-smoke-500">
+              <p className="text-[10px] text-smoke-400">
                 Confidence driver: {output.confidence_driver}
               </p>
             )}
@@ -117,7 +117,7 @@ export function AgentCard({
             {output.citation_bundle?.datasets &&
               output.citation_bundle.datasets.length > 0 && (
                 <details className="text-[10px] text-smoke-400">
-                  <summary className="cursor-pointer text-smoke-500">
+                  <summary className="cursor-pointer text-smoke-400">
                     Citations · {output.citation_bundle.datasets.length} sources
                   </summary>
                   <ul className="mt-1 space-y-0.5 pl-3">
@@ -136,7 +136,7 @@ export function AgentCard({
                           d.name || "(unnamed)"
                         )}
                         {d.version ? (
-                          <span className="text-smoke-500"> · {d.version}</span>
+                          <span className="text-smoke-400"> · {d.version}</span>
                         ) : null}
                       </li>
                     ))}
@@ -163,14 +163,14 @@ export function MetricGrid({
           key={it.label}
           className="rounded border border-smoke-700 bg-smoke-900/60 px-3 py-2"
         >
-          <div className="text-[9px] uppercase tracking-widest text-smoke-500">
+          <div className="text-[9px] uppercase tracking-widest text-smoke-400">
             {it.label}
           </div>
           <div className="mt-0.5 text-base font-semibold text-smoke-100">
             {it.value}
           </div>
           {it.hint && (
-            <div className="text-[10px] text-smoke-500">{it.hint}</div>
+            <div className="text-[10px] text-smoke-400">{it.hint}</div>
           )}
         </div>
       ))}
