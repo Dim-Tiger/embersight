@@ -213,7 +213,7 @@ export default function Page() {
             {incidentsEmpty && (
               <div className="mt-2 text-[10px] leading-relaxed text-smoke-400">
                 No active CA incidents reported.
-                <div className="text-[10px] text-smoke-500">
+                <div className="text-[10px] text-smoke-400">
                   Upstream feeds returned zero results.
                 </div>
               </div>
@@ -255,6 +255,11 @@ export default function Page() {
 
         {/* Nav Items */}
         <div className="flex-1 py-2">
+          {!selectedIncidentId && !sidebarCollapsed && (
+            <p className="px-4 pb-1 text-[11px] italic leading-snug text-smoke-400">
+              Choose an incident to open these views.
+            </p>
+          )}
           {NAV_ITEMS.map(({ tab, Icon, label }) => (
             <NavItem
               key={tab}
@@ -262,7 +267,8 @@ export default function Page() {
               label={label}
               Icon={Icon}
               active={activeTab === tab}
-              enabled={!!selectedIncidentId}
+              // Operations is the map itself and is always available.
+              enabled={tab === "Operations" || !!selectedIncidentId}
               collapsed={sidebarCollapsed}
               onClick={() => setActiveTab(tab)}
             />
@@ -396,8 +402,11 @@ function NavItem({
         active && enabled
           ? "border-r-2 border-ember-500 bg-ember-900/40 text-ember-200"
           : enabled
-            ? "text-smoke-400 hover:bg-smoke-700/50 hover:text-smoke-200"
-            : "cursor-not-allowed text-smoke-600"
+            ? "text-smoke-300 hover:bg-smoke-700/50 hover:text-smoke-100"
+            : // Disabled until an incident is chosen. smoke-600 on the
+              // sidebar was ~1.4:1 and read as missing; smoke-400 keeps
+              // AA contrast while the italic hint below says why.
+              "cursor-not-allowed text-smoke-400"
       }`}
     >
       <span className="relative flex flex-shrink-0 items-center justify-center">
@@ -589,6 +598,9 @@ function OperationsView({
   error: Error | null;
   empty: boolean;
 }) {
+  // When a decision is waiting, the approval queue is the most important
+  // thing on screen, so it takes the larger share of the right column.
+  const hasPending = useStore((s) => s.pendingInterrupts.length > 0);
   return (
     <div className="grid h-full min-h-0 grid-cols-[1fr_360px] grid-rows-[minmax(0,1fr)] gap-px bg-smoke-700">
       <div className="relative min-h-0 bg-smoke-900">
@@ -603,8 +615,9 @@ function OperationsView({
       <aside
         className="grid min-h-0 gap-px bg-smoke-700"
         style={{
-          gridTemplateRows:
-            "minmax(120px, 22%) minmax(0, 1fr) minmax(80px, 36%)",
+          gridTemplateRows: hasPending
+            ? "minmax(96px, 18%) minmax(120px, 1fr) minmax(220px, 52%)"
+            : "minmax(120px, 22%) minmax(0, 1fr) minmax(80px, 30%)",
         }}
       >
         <div className="min-h-0 overflow-hidden bg-smoke-900">
