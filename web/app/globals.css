@@ -41,3 +41,43 @@ body {
 .maplibregl-popup-tip {
   display: none !important;
 }
+
+/* Severity tokens for the triage UI (components/ui/Severity.tsx).
+   Each bg/fg pair passes WCAG AA (>= 7:1) on its own, so a severity chip
+   reads the same whether the panel behind it is dark or light. The "edge"
+   colour is only used for borders and accents, never as the only carrier
+   of meaning: every severity also has an icon and a word. */
+:root {
+  --sev-critical-bg: #7f1d1d;
+  --sev-critical-fg: #fff1f2;
+  --sev-critical-edge: #f87171;
+  --sev-warning-bg: #713f12;
+  --sev-warning-fg: #fefce8;
+  --sev-warning-edge: #fbbf24;
+  --sev-info-bg: #0c4a6e;
+  --sev-info-fg: #f0f9ff;
+  --sev-info-edge: #38bdf8;
+  --sev-ok-bg: #064e3b;
+  --sev-ok-fg: #ecfdf5;
+  --sev-ok-edge: #34d399;
+  --sev-degraded-bg: #3f3f46;
+  --sev-degraded-fg: #fafafa;
+  --sev-degraded-edge: #a1a1aa;
+}
+html.light {
+  --sev-critical-bg: #fee2e2;
+  --sev-critical-fg: #7f1d1d;
+  --sev-critical-edge: #dc2626;
+  --sev-warning-bg: #fef3c7;
+  --sev-warning-fg: #713f12;
+  --sev-warning-edge: #d97706;
+  --sev-info-bg: #e0f2fe;
+  --sev-info-fg: #0c4a6e;
+  --sev-info-edge: #0284c7;
+  --sev-ok-bg: #d1fae5;
+  --sev-ok-fg: #064e3b;
+  --sev-ok-edge: #059669;
+  --sev-degraded-bg: #e4e4e7;
+  --sev-degraded-fg: #27272a;
+  --sev-degraded-edge: #71717a;
+}
