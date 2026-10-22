@@ -2130,6 +2130,7 @@ export function IncidentMap() {
         wind={wind}
         evacCount={evacFiltered?.features.length ?? 0}
         firmsCount={firms?.features?.length ?? 0}
+        firmsUnavailable={firms?.unavailable ?? null}
         ingressCount={routingOutput?.payload?.primary_routes?.length ?? 0}
         egressCount={routingOutput?.payload?.egress_routes?.length ?? 0}
         infraVisibility={infraVisibility}
@@ -2556,6 +2557,7 @@ function Legend({
   wind,
   evacCount,
   firmsCount,
+  firmsUnavailable,
   ingressCount,
   egressCount,
   infraVisibility,
@@ -2582,6 +2584,7 @@ function Legend({
   wind: WindGrid | undefined;
   evacCount: number;
   firmsCount: number;
+  firmsUnavailable: string | null;
   ingressCount: number;
   egressCount: number;
   infraVisibility: Record<string, boolean>;
@@ -2758,10 +2761,15 @@ function Legend({
           className="h-3 w-3 accent-ember-500"
         />
         <span className="font-medium">
-          VIIRS hotspots ({firmsCount})
+          VIIRS hotspots ({firmsUnavailable ? "off" : firmsCount})
         </span>
       </label>
-      {showFirms && (
+      {showFirms && firmsUnavailable && (
+        <div className="ml-5 mt-0.5 text-[10px] italic text-smoke-400">
+          Feed unavailable ({firmsUnavailable})
+        </div>
+      )}
+      {showFirms && !firmsUnavailable && (
         <div className="ml-5 mt-1 flex items-center gap-1.5 text-[10px] text-smoke-400">
           <span
             className="h-2 w-12 rounded-sm"

@@ -102,12 +102,17 @@ export function useWind(lat: number | null, lon: number | null) {
   });
 }
 
+/** FIRMS hotspots plus an `unavailable` reason when the feed is off. */
+export type FirmsResult = GeoJSON.FeatureCollection & { unavailable?: string };
+
 export function useFirms(days = 1) {
   return useQuery({
     queryKey: ["firms", days],
-    queryFn: async (): Promise<GeoJSON.FeatureCollection | null> => {
+    queryFn: async (): Promise<FirmsResult> => {
       const r = await fetch(`/api/firms?days=${days}`);
-      if (!r.ok) return null;
+      if (!r.ok) {
+        return { type: "FeatureCollection", features: [], unavailable: `feed error ${r.status}` };
+      }
       return r.json();
     },
     refetchInterval: 10 * 60_000,
