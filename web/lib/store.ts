@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { create } from "zustand";
 
 import { INFRA_LAYERS } from "@/lib/infraLayers";
@@ -448,6 +449,38 @@ export const AGENT_ORDER = [
 ] as const;
 
 export type AgentName = (typeof AGENT_ORDER)[number];
+
+/** Which agent pauses the graph for each interrupt type. */
+export const INTERRUPT_AGENT: Record<
+  PendingInterrupt["interrupt"]["type"],
+  AgentName
+> = {
+  iap_approval: "master_ic",
+  resource_recommendation: "resource_recommendation",
+  evac_zone_change: "evacuation_intelligence",
+  trigger_point_violation: "spread_simulation",
+};
+
+/**
+ * Agents that are paused on a human decision. LangGraph emits
+ * on_chain_start for the node, then the node calls interrupt() and the
+ * stream ends without an on_chain_end, so the agent's status stays
+ * "running" forever. Once the stream has closed, a "running" agent with a
+ * pending interrupt is really "awaiting IC approval", and the UI should say
+ * so instead of spinning.
+ */
+export function useAwaitingAgents(): ReadonlySet<string> {
+  // Select a primitive so the hook only re-renders when the answer changes.
+  const key = useStore((s) => {
+    if (s.streaming) return "";
+    return s.pendingInterrupts
+      .map((p) => INTERRUPT_AGENT[p.interrupt.type])
+      .filter(Boolean)
+      .sort()
+      .join(",");
+  });
+  return useMemo(() => new Set(key ? key.split(",") : []), [key]);
+}
 
 export const AGENT_LABELS: Record<string, string> = {
   orchestrator: "Orchestrator",

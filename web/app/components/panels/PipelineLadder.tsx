@@ -1,6 +1,11 @@
 "use client";
 
-import { AGENT_LABELS, AGENT_ORDER, useStore } from "@/lib/store";
+import {
+  AGENT_LABELS,
+  AGENT_ORDER,
+  useAwaitingAgents,
+  useStore,
+} from "@/lib/store";
 import { RefreshCw } from "lucide-react";
 import { useMemo } from "react";
 
@@ -16,6 +21,8 @@ export function PipelineLadder() {
   const selectedIncidentId = useStore((s) => s.selectedIncidentId);
   const requestRestart = useStore((s) => s.requestRestart);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const awaiting = useAwaitingAgents();
+  const pendingCount = useStore((s) => s.pendingInterrupts.length);
 
   const doneCount = useMemo(
     () => AGENT_ORDER.filter((a) => statuses[a] === "done").length,
@@ -52,10 +59,16 @@ export function PipelineLadder() {
           {done && !streaming && (
             <span className="text-[10px] text-smoke-400">
               {doneCount}/{AGENT_ORDER.length} complete
+              {pendingCount > 0 && (
+                <span className="text-amber-300"> · paused for IC decision</span>
+              )}
             </span>
           )}
           {(streaming || done) && (
-            <span className="font-mono text-[9px] text-smoke-600">
+            <span
+              className="font-mono text-[9px] text-smoke-400"
+              title="SSE chunks / frames received (diagnostic)"
+            >
               {chunkCount}c · {frameCount}f
             </span>
           )}
@@ -85,8 +98,15 @@ export function PipelineLadder() {
         {!idle && (
           <ol className="divide-y divide-smoke-700/50">
             {AGENT_ORDER.map((agent) => {
-              const status = statuses[agent] ?? "pending";
+              const raw = statuses[agent] ?? "pending";
+              const status =
+                raw === "running" && awaiting.has(agent) ? "awaiting" : raw;
               const out = outputs[agent];
+              // Agents that never started while the graph is paused run
+              // only after the IC decides, so say "queued" instead of a
+              // blank row that looks stuck.
+              const queued =
+                raw === "pending" && done && !streaming && pendingCount > 0;
               return (
                 <li
                   key={agent}
@@ -103,14 +123,29 @@ export function PipelineLadder() {
                           ? "text-smoke-200"
                           : status === "running"
                             ? "text-ember-300"
-                            : "text-smoke-500"
+                            : status === "awaiting"
+                              ? "text-amber-200"
+                              : "text-smoke-400"
                       }`}
                     >
                       {AGENT_LABELS[agent]}
                     </span>
+                    {status === "awaiting" && (
+                      <span className="ml-auto text-[10px] font-medium text-amber-300">
+                        awaiting your approval
+                      </span>
+                    )}
+                    {queued && (
+                      <span className="ml-auto text-[10px] text-smoke-400">
+                        runs after IC decision
+                      </span>
+                    )}
                     {out?.confidence != null && status === "done" && (
-                      <span className="ml-auto text-[10px] text-smoke-500">
-                        {Math.round(out.confidence * 100)}%
+                      <span
+                        className="ml-auto text-[10px] text-smoke-400"
+                        title="Agent self-reported confidence"
+                      >
+                        {Math.round(out.confidence * 100)}% conf
                       </span>
                     )}
                   </div>
@@ -127,13 +162,20 @@ export function PipelineLadder() {
 function StatusDot({
   status,
 }: {
-  status: "pending" | "running" | "done" | "error";
+  status: "pending" | "running" | "done" | "error" | "awaiting";
 }) {
+  // Done is green everywhere else (nav dots, agent chips); orange here made
+  // finished and running rows look alike.
   if (status === "done") {
     return (
-      <span className="flex h-3 w-3 items-center justify-center rounded-full bg-ember-900/60 ring-1 ring-ember-500/60">
-        <span className="h-1 w-1 rounded-full bg-ember-400" />
+      <span className="flex h-3 w-3 items-center justify-center rounded-full bg-emerald-900/60 ring-1 ring-emerald-500/70">
+        <span className="h-1 w-1 rounded-full bg-emerald-400" />
       </span>
+    );
+  }
+  if (status === "awaiting") {
+    return (
+      <span className="h-3 w-3 rounded-full bg-amber-400/30 ring-1 ring-amber-400" />
     );
   }
   if (status === "running") {
