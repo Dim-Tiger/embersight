@@ -417,6 +417,15 @@ def _llm_proposal(
         return None
 
 
+def _zone_population(zone: dict) -> tuple[int, str]:
+    """(population, method). Use the zone's published population when the
+    catalog has one; otherwise fall back to the area-density estimate."""
+    published = zone.get("population_static")
+    if isinstance(published, int) and published >= 0:
+        return published, "zone_catalog"
+    return evac_tools.estimate_population(zone["polygon_wkt"]), "area_density_estimate"
+
+
 def _confidence(
     have_spread: bool,
     have_values: bool,
@@ -881,7 +890,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         overlaps = cand["overlaps"]
         adjacent_to_order = cand["adjacent_to_order"]
 
-        population = evac_tools.estimate_population(zone["polygon_wkt"])
+        population, population_method = _zone_population(zone)
         egress = evac_tools.compute_evacuation_routes_clear(
             zone["polygon_wkt"],
             road_graph,
@@ -922,6 +931,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
                 "effective_overlaps": effective_overlaps,
                 "adjacent_to_order": adjacent_to_order,
                 "population": population,
+                "population_method": population_method,
                 "egress": egress,
                 "use_llm": use_llm,
             }
@@ -963,6 +973,7 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         effective_overlaps = cand["effective_overlaps"]
         adjacent_to_order = cand["adjacent_to_order"]
         population = cand["population"]
+        population_method = cand["population_method"]
         egress = cand["egress"]
         llm_out = cand.get("llm_out") if cand.get("use_llm") else None
 
@@ -1010,13 +1021,15 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         ).isoformat()
 
         polygon_geojson = _wkt_to_geojson(zone["polygon_wkt"])
-        residential_count = 0
-        try:
+        # Prefer the zone's published structure count. Otherwise back it out
+        # of the population. (This used to divide by an undefined name inside
+        # a bare except, so every envelope reported 0 residences.)
+        if isinstance(zone.get("structures_static"), int):
+            residential_count = zone["structures_static"]
+        else:
             residential_count = max(
-                0, int(round(population / DEFAULT_HOUSEHOLD_SIZE))
+                0, int(round(population / evac_tools.DEFAULT_HOUSEHOLD_SIZE))
             )
-        except Exception:  # noqa: BLE001
-            residential_count = 0
 
         # Structured "why" — assembled from the model's one-liner + the
         # signals that drove the proposal. The IC card formats these as
@@ -1065,6 +1078,9 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
             "impact": impact,
             "polygon_geojson": polygon_geojson,
             "population_estimate": population,
+            # "zone_catalog" = the county's published figure; anything else
+            # is EmberSight's area-density ESTIMATE and the card should say so.
+            "population_method": population_method,
             "egress_status": egress,
             "overlaps": overlaps,
             "adjacent_to_active_evac_zone": adjacent_to_order,

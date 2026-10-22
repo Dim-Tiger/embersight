@@ -220,15 +220,16 @@ def _geojson_geom_to_wkt(geom: dict) -> str | None:
     if g_type == "Polygon":
         return _ring_to_wkt(coords)
     if g_type == "MultiPolygon":
-        # Take the largest outer ring as primary. (For the agent's
-        # overlap math an outer-ring approximation is sufficient — we
-        # don't need true multipolygon semantics. Future pass should
-        # union all parts via shapely.)
-        try:
-            largest = max(coords, key=lambda parts: len(parts[0]) if parts else 0)
-            return _ring_to_wkt(largest)
-        except (ValueError, IndexError):
-            return _ring_to_wkt(coords[0])
+        # Keep every part. Taking just one (the old behaviour, which picked
+        # the part with the most vertices, not the largest) dropped islands
+        # and split zones from the overlap math entirely.
+        parts = [p for p in coords if p]
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return _ring_to_wkt(parts[0])
+        bodies = [_ring_to_wkt(p)[len("POLYGON "):] for p in parts]
+        return "MULTIPOLYGON (" + ", ".join(bodies) + ")"
     return None
 
 
@@ -316,11 +317,15 @@ def _parse_feature_esri_geojson(
         or props.get("Zone_ID")
         or props.get("ZoneID")
         or props.get("zone_id")
-        or props.get("OBJECTID")
-        or props.get("FID")
     )
     if zid is None:
-        return None
+        # A row number is only unique inside one layer. Namespace it by
+        # source so county A's OBJECTID 1 does not overwrite county B's
+        # when fetch_static_zones_in_bbox dedupes by zone_id.
+        oid = props.get("OBJECTID", props.get("FID"))
+        if oid is None:
+            return None
+        zid = f"{src_key}:{oid}"
 
     name = (
         props.get("ZONE_NAME")

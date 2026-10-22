@@ -126,11 +126,12 @@ def _feature_to_zone(feature: dict) -> dict | None:
         if geom.get("type") == "Polygon":
             wkt = _ring_to_wkt(coords)
         elif geom.get("type") == "MultiPolygon":
-            # Take the largest ring set as primary; keep the rest as a
-            # comma-separated list inside a single POLYGON for our
-            # downstream simple overlap math. (Spread cone overlay only
-            # needs an outer ring approximation.)
-            wkt = _ring_to_wkt(coords[0])
+            # Keep every part (the old code kept only the first one).
+            from .zone_catalog import _geojson_geom_to_wkt  # noqa: PLC0415
+
+            wkt = _geojson_geom_to_wkt(geom)
+            if not wkt:
+                return None
         else:
             return None
 
