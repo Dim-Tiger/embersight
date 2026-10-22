@@ -87,16 +87,21 @@ def build_briefing_graph() -> StateGraph:
 
     g.add_edge(START, "orchestrator")
 
+    # A list of start nodes in add_edge() is a JOIN: the target runs once,
+    # after ALL of them finish. Separate add_edge(a, x) / add_edge(b, x)
+    # calls are independent triggers instead, so x runs after EACH of them.
+    # That difference is why master_ic used to run twice: once as soon as
+    # routing_staging finished (before values_at_risk, resource
+    # recommendation and evacuation intelligence existed), and the first
+    # run's interrupt() paused the graph before those agents ever started.
+
     # weather/terrain fan out from the orchestrator; routing waits on
     # weather (wind direction → upwind-favoured staging + egress reranking)
     # AND terrain (real AOI mean elevation + slope feed the scoring axes).
     for n in ("weather_wind", "terrain_fuel"):
         g.add_edge("orchestrator", n)
-    g.add_edge("weather_wind", "routing_staging")
-    g.add_edge("terrain_fuel", "routing_staging")
-
-    g.add_edge("weather_wind", "spread_simulation")
-    g.add_edge("terrain_fuel", "spread_simulation")
+    g.add_edge(["weather_wind", "terrain_fuel"], "routing_staging")
+    g.add_edge(["weather_wind", "terrain_fuel"], "spread_simulation")
 
     # values_at_risk runs after spread_simulation so it can intersect the
     # swept 24h cone (same polygon painted on the map). Without spread output
@@ -106,9 +111,10 @@ def build_briefing_graph() -> StateGraph:
     g.add_edge("values_at_risk", "resource_recommendation")
     g.add_edge("values_at_risk", "evacuation_intelligence")
 
-    g.add_edge("resource_recommendation", "master_ic")
-    g.add_edge("evacuation_intelligence", "master_ic")
-    g.add_edge("routing_staging", "master_ic")
+    g.add_edge(
+        ["resource_recommendation", "evacuation_intelligence", "routing_staging"],
+        "master_ic",
+    )
 
     g.add_edge("master_ic", END)
     return g
