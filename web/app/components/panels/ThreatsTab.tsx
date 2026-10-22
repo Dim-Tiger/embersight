@@ -15,6 +15,9 @@ import {
   VALUES_SOURCES,
   failedValuesSources,
   flameLengthBand,
+  peopleExposed,
+  spreadContainment,
+  valuesPartial,
   fmtInt,
   fmtNum,
   km2ToAcres,
@@ -62,15 +65,21 @@ export function ThreatsTab() {
   const sp = (spread?.payload ?? {}) as SpreadPayload;
   const r = vp.rollup ?? {};
   const failed = new Set(failedValuesSources(vp));
-  const failMsg = (key: string) =>
-    failed.has(key) ? `${VALUES_SOURCES[key]} source failed on this run` : null;
+  // A count is unknown when the backend sent null (its layer failed) or,
+  // for older payloads, when its source failed and it came back as 0.
+  const failMsg = (key: string, value: number | null | undefined) =>
+    value === null || (failed.has(key) && !value)
+      ? `${VALUES_SOURCES[key] ?? key} unavailable on this run`
+      : null;
+  const contained = spreadContainment(sp);
+  const people = peopleExposed(vp, sp);
+  const partial = valuesPartial(vp, values?.narrative);
 
   const attention = threatAttention({ values, spread, terrain });
   const cone = coneSourceLabel(vp.cone_source);
   const occupancy = Object.entries(r.structures_by_occupancy ?? {}).sort(
     (a, b) => b[1] - a[1],
   );
-  const impact = sp.cone_impact && !sp.cone_impact.error ? sp.cone_impact : null;
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -85,7 +94,11 @@ export function ThreatsTab() {
           <AgentStatusRow
             agents={THREAT_AGENTS}
             gaps={{
-              values_at_risk: failed.size ? `${failed.size} of 6 data sources failed` : null,
+              values_at_risk: partial
+                ? failed.size
+                  ? `partial inventory: ${failed.size} of 6 data sources unavailable`
+                  : "partial inventory"
+                : null,
               terrain_fuel: terrain ? terrainDataGap(tp) : null,
               spread_simulation: sp.cone_impact?.error ?? null,
             }}
@@ -100,7 +113,9 @@ export function ThreatsTab() {
         {/* ---------------- Exposure ---------------- */}
         <section className="space-y-3 rounded-md border border-smoke-700 bg-smoke-800/40 p-4">
           <SectionLabel right="Values at Risk agent">
-            Exposure inside the 24 h projected cone
+            {contained.kind === "contained"
+              ? "Exposure near the fire (no spread cone: contained)"
+              : "Exposure inside the 24 h projected cone"}
           </SectionLabel>
           <AgentGate
             agent="values_at_risk"
@@ -116,43 +131,63 @@ export function ThreatsTab() {
               <StatTile
                 label="People (est.)"
                 icon={<Users className="h-3.5 w-3.5" aria-hidden />}
-                value={impact?.population_estimate != null ? `~${fmtInt(impact.population_estimate)}` : "—"}
+                value={people.value != null ? `~${fmtInt(people.value)}` : "—"}
                 unit="people"
-                // Same number the Spread report quotes. The agent takes the
-                // larger of homes × 2.5 people and a building-density model.
-                hint="Spread agent estimate: homes × 2.5 or building density, whichever is larger"
-                unavailable={impact ? null : spread ? "Spread exposure query unavailable" : "Waiting for Spread Simulation"}
+                level={people.method.rough ? "degraded" : undefined}
+                // The method comes from the agent (population_method), so a
+                // rough area-density guess is never presented as a count.
+                hint={
+                  <>
+                    {people.method.rough && (
+                      <SeverityBadge level="degraded" word="Rough estimate" />
+                    )}{" "}
+                    {people.method.text}
+                    {people.source ? ` · ${people.source}` : ""}
+                  </>
+                }
+                unavailable={
+                  people.value != null
+                    ? null
+                    : spread || values
+                      ? "Population unavailable on this run"
+                      : "Waiting for the agents"
+                }
               />
               <StatTile
                 label="Structures"
                 icon={<Home className="h-3.5 w-3.5" aria-hidden />}
                 value={fmtInt(r.structures_total)}
                 unit="buildings"
-                level={(r.structures_total ?? 0) > 0 ? "warning" : undefined}
+                level={(r.structures_total ?? 0) > 0 && contained.kind !== "contained" ? "warning" : undefined}
                 hint={
                   <>
-                    {failed.has("usa_structures")
-                      ? "Homes: unknown (occupancy source failed)"
+                    {r.residential_count == null || (failed.has("usa_structures") && !r.residential_count)
+                      ? "Homes: unknown (occupancy source unavailable)"
                       : `${fmtInt(r.residential_count)} homes`}
                     {r.total_footprint_sqm
                       ? ` · ${fmtInt(r.total_footprint_sqm)} m² footprint`
                       : ""}
                   </>
                 }
-                unavailable={failMsg("ms_buildings")}
+                unavailable={
+                  r.structures_total === null ||
+                  (failed.has("ms_buildings") && failed.has("usa_structures") && !r.structures_total)
+                    ? "Building layers unavailable on this run"
+                    : null
+                }
               />
               <StatTile
                 label="Hospitals"
                 icon={<Hospital className="h-3.5 w-3.5" aria-hidden />}
                 value={fmtInt(r.hospitals_count)}
                 unit={r.hospitals_count === 1 ? "hospital" : "hospitals"}
-                level={(r.hospitals_count ?? 0) > 0 ? "critical" : undefined}
+                level={(r.hospitals_count ?? 0) > 0 ? (contained.kind === "contained" ? "warning" : "critical") : undefined}
                 hint={
                   (r.hospitals_count ?? 0) > 0
                     ? `${fmtInt(r.hospitals_total_beds)} beds`
-                    : "None found in cone"
+                    : "None found"
                 }
-                unavailable={failMsg("hospitals")}
+                unavailable={failMsg("hospitals", r.hospitals_count)}
               />
               <StatTile
                 label="Schools"
@@ -163,9 +198,9 @@ export function ThreatsTab() {
                 hint={
                   (r.schools_count ?? 0) > 0
                     ? `${fmtInt(r.schools_total_enrollment)} enrolled`
-                    : "None found in cone"
+                    : "None found"
                 }
-                unavailable={failMsg("schools")}
+                unavailable={failMsg("schools", r.schools_count)}
               />
               <StatTile
                 label="Transmission"
@@ -174,11 +209,13 @@ export function ThreatsTab() {
                 unit="line segments"
                 level={(r.transmission_segments ?? 0) > 0 ? "warning" : undefined}
                 hint={
-                  (r.transmission_segments ?? 0) > 0
+                  (r.transmission_segments ?? 0) > 0 && r.transmission_max_kv
                     ? `Up to ${fmtInt(r.transmission_max_kv)} kV`
-                    : "None found in cone"
+                    : (r.transmission_segments ?? 0) > 0
+                      ? "Voltage not reported"
+                      : "None found"
                 }
-                unavailable={failMsg("transmission")}
+                unavailable={failMsg("transmission", r.transmission_segments)}
               />
               <StatTile
                 label="Critical facilities"
@@ -186,8 +223,14 @@ export function ThreatsTab() {
                 value={fmtInt(r.critical_facilities_total)}
                 unit="facilities"
                 level={(r.critical_facilities_total ?? 0) > 0 ? "warning" : undefined}
-                hint={(r.critical_facilities_total ?? 0) > 0 ? "HIFLD critical infrastructure" : "None found in cone"}
-                unavailable={failMsg("critical_facilities")}
+                hint={
+                  (r.critical_facilities_partial?.length ?? 0) > 0
+                    ? `Partial: ${r.critical_facilities_partial!.join(", ")} unavailable`
+                    : (r.critical_facilities_total ?? 0) > 0
+                      ? "HIFLD critical infrastructure"
+                      : "None found"
+                }
+                unavailable={failMsg("critical_facilities", r.critical_facilities_total)}
               />
             </div>
 
@@ -268,7 +311,7 @@ export function ThreatsTab() {
             {failed.size > 0 && (
               <p className="text-[12px] text-smoke-200">
                 <SeverityBadge level="degraded" /> Failed sources:{" "}
-                {[...failed].map((k) => VALUES_SOURCES[k]).join(", ")}
+                {[...failed].map((k) => VALUES_SOURCES[k] ?? k).join(", ")}
               </p>
             )}
             {vp.key_findings && <KeyFindings items={nonZeroFindings(vp.key_findings)} />}
@@ -329,6 +372,19 @@ function SpreadSection({ sp }: { sp: SpreadPayload }) {
     (a, b) => (a.horizon_h ?? 0) - (b.horizon_h ?? 0),
   );
   const breaches = sp.trigger_breaches ?? [];
+  const containment = spreadContainment(sp);
+
+  if (containment.kind === "contained") {
+    return (
+      <GateNotice>
+        <SeverityBadge level="info" word="Contained" />{" "}
+        <span className="font-semibold">No spread projection.</span> The fire is reported
+        100% contained, and the model grows an unconstrained ellipse from the ignition point,
+        so it cannot represent containment lines. RECOMMEND re-running Spread Simulation if
+        containment is lost or a slopover is reported.
+      </GateNotice>
+    );
+  }
 
   if (fl == null && ros == null && area == null) {
     return (
@@ -341,6 +397,22 @@ function SpreadSection({ sp }: { sp: SpreadPayload }) {
 
   return (
     <>
+      {containment.kind === "partial" && (
+        <GateNotice tone="warning">
+          <SeverityBadge level="warning" word={`${containment.pct}% contained`} /> Free-spread
+          projection from the ignition point. It ignores containment lines, so treat the cone
+          as an upper bound on the uncontained flanks.
+        </GateNotice>
+      )}
+      {((sp.assumed_inputs?.length ?? 0) > 0 || sp.fuel_model_substituted) && (
+        <GateNotice tone="degraded">
+          <SeverityBadge level="degraded" word="Assumed inputs" />{" "}
+          {(sp.assumed_inputs?.length ?? 0) > 0
+            ? `Ran on default values for: ${sp.assumed_inputs!.join(", ")}. `
+            : ""}
+          {sp.fuel_model_substituted ? `Fuel model ${sp.fuel_model ?? "?"} was substituted for the mapped one.` : ""}
+        </GateNotice>
+      )}
       <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
         <StatTile
           label="Flame length"

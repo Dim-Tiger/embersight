@@ -18,23 +18,36 @@ import type { Severity } from "./Severity";
 // Payload shapes (subset of what each agent emits)
 // --------------------------------------------------------------------------
 
+// Counts are `null` when the layer behind them failed ("unknown"), which
+// is different from 0 ("looked, found none"). Every reader must keep the
+// two apart.
+type Count = number | null;
+
 export type ValuesRollup = {
-  structures_total?: number;
-  total_footprint_sqm?: number;
+  structures_total?: Count;
+  total_footprint_sqm?: Count;
   structures_by_occupancy?: Record<string, number>;
-  residential_count?: number;
-  commercial_count?: number;
-  public_count?: number;
-  industrial_count?: number;
-  hospitals_count?: number;
-  hospitals_total_beds?: number;
+  residential_count?: Count;
+  commercial_count?: Count;
+  public_count?: Count;
+  industrial_count?: Count;
+  /** People exposed, and how that number was produced. */
+  population_estimate?: Count;
+  population_method?: string;
+  population_note?: string;
+  hospitals_count?: Count;
+  hospitals_total_beds?: Count;
   named_hospitals?: Array<{ name?: string; beds?: number }>;
-  schools_count?: number;
-  schools_total_enrollment?: number;
+  schools_count?: Count;
+  schools_total_enrollment?: Count;
   named_schools?: Array<{ name?: string; enrollment?: number }>;
-  transmission_segments?: number;
-  transmission_max_kv?: number;
-  critical_facilities_total?: number;
+  transmission_segments?: Count;
+  transmission_max_kv?: Count;
+  critical_facilities_total?: Count;
+  /** Critical-facility sub-layers that failed while others answered. */
+  critical_facilities_partial?: string[];
+  /** Layers (tallies keys) that failed on this run. */
+  unavailable?: string[];
 };
 
 export type ValuesPayload = {
@@ -44,15 +57,8 @@ export type ValuesPayload = {
   tallies?: Record<string, unknown>;
 };
 
-export type ConeImpact = {
-  population_estimate?: number;
-  structures_total?: number;
-  residential_count?: number;
-  hospitals_count?: number;
-  schools_count?: number;
-  critical_facilities_total?: number;
-  error?: string;
-};
+/** Spread's exposure for its own cone: the same rollup shape as VAR. */
+export type ConeImpact = ValuesRollup & { error?: string };
 
 export type SpreadPayload = {
   key_findings?: string[];
@@ -78,9 +84,50 @@ export type SpreadPayload = {
   cone_impact?: ConeImpact | null;
   n_mc_samples?: number;
   fuel_model?: string;
+  fuel_model_substituted?: boolean;
   wind_speed_mph?: number;
   wind_dir_deg?: number;
+  /** Inputs that fell back to defaults (labelled ASSUMED by the agent). */
+  assumed_inputs?: string[];
+  /** 0–1. A fully contained fire gets no projection (containment_gated). */
+  containment_fraction?: number | null;
+  containment_gated?: boolean;
 };
+
+export type Containment =
+  | { kind: "contained" }
+  | { kind: "partial"; pct: number }
+  | { kind: "open" }
+  | { kind: "unknown" };
+
+/** Read the spread agent's containment state. */
+export function spreadContainment(sp: SpreadPayload): Containment {
+  if (sp.containment_gated) return { kind: "contained" };
+  const f = sp.containment_fraction;
+  if (typeof f !== "number") return { kind: "unknown" };
+  if (f >= 1) return { kind: "contained" };
+  if (f > 0) return { kind: "partial", pct: Math.round(f * 100) };
+  return { kind: "open" };
+}
+
+/** Plain-language label for how the people-exposed number was produced. */
+export function populationMethodLabel(method?: string, note?: string): {
+  text: string;
+  rough: boolean;
+} {
+  switch (method) {
+    case "residential_structures":
+      return { text: "Counted residences × 2.5 people", rough: false };
+    case "area_density_estimate":
+      return { text: "ROUGH ESTIMATE: area × typical density (no structure data)", rough: true };
+    case "zone_catalog":
+      return { text: "Published evacuation-zone population", rough: false };
+    case "unavailable":
+      return { text: "Population unavailable", rough: true };
+    default:
+      return { text: note ?? "Method not reported", rough: false };
+  }
+}
 
 export type TerrainPayload = {
   fuel_model?: string | { error?: string };
@@ -196,14 +243,28 @@ function sourceErrored(v: unknown): boolean {
     const first = v[0] as Record<string, unknown> | undefined;
     return !!(first && typeof first === "object" && first.error);
   }
-  if (typeof v === "object") return !!(v as Record<string, unknown>).error;
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return !!o.error || (!!o.errors && Object.keys(o.errors as object).length > 0);
+  }
   return false;
 }
 
-/** Keys of values-at-risk sources that errored on this run. */
+/** Keys of values-at-risk sources that errored on this run. Reads the
+ * agent's own `rollup.unavailable` list when present, and the raw tallies
+ * as a fallback for older payloads. */
 export function failedValuesSources(vp: ValuesPayload): string[] {
   const t = vp.tallies ?? {};
-  return Object.keys(VALUES_SOURCES).filter((k) => sourceErrored(t[k]));
+  const fromTallies = Object.keys(VALUES_SOURCES).filter((k) => sourceErrored(t[k]));
+  return [...new Set([...(vp.rollup?.unavailable ?? []), ...fromTallies])];
+}
+
+/** True when VAR itself says its inventory is partial. */
+export function valuesPartial(vp: ValuesPayload, narrative?: string): boolean {
+  return (
+    failedValuesSources(vp).length > 0 ||
+    /^\s*(\[[\w_]+\]\s*)?PARTIAL inventory/i.test(narrative ?? "")
+  );
 }
 
 /** LANDFIRE returns -9999 (nodata) as a "class" when the raster is empty. */
@@ -279,6 +340,36 @@ export function agentMissing(status: AgentStatus | undefined, runFinished: boole
 // Threats: attention items
 // --------------------------------------------------------------------------
 
+/**
+ * People exposed and how the number was made. Prefers VAR's rollup (newer
+ * backend: one shared rollup with `population_method`), then the spread
+ * agent's cone_impact, so every card quotes the same figure.
+ */
+export function peopleExposed(
+  vp: ValuesPayload,
+  sp: SpreadPayload,
+): { value: number | null; method: { text: string; rough: boolean }; source: string } {
+  const r = vp.rollup;
+  if (r && r.population_method) {
+    return {
+      value: r.population_estimate ?? null,
+      method: populationMethodLabel(r.population_method, r.population_note),
+      source: "Values at Risk",
+    };
+  }
+  const ci = sp.cone_impact && !sp.cone_impact.error ? sp.cone_impact : null;
+  if (ci) {
+    return {
+      value: ci.population_estimate ?? null,
+      method: ci.population_method
+        ? populationMethodLabel(ci.population_method, ci.population_note)
+        : { text: "Spread agent estimate (method not reported)", rough: false },
+      source: "Spread Simulation",
+    };
+  }
+  return { value: null, method: populationMethodLabel("unavailable"), source: "" };
+}
+
 export function threatAttention(args: {
   values?: AgentOutput;
   spread?: AgentOutput;
@@ -310,39 +401,74 @@ export function threatAttention(args: {
   }
 
   // 2. Structures inside the 24 h projected cone.
+  const containment = spreadContainment(sp);
   if (args.values) {
-    const structuresUnknown = failed.includes("ms_buildings");
-    const people = sp.cone_impact && !sp.cone_impact.error ? sp.cone_impact.population_estimate : undefined;
+    // null = the layer failed (newer payloads); older payloads only tell us
+    // through the failed-source list.
+    const structuresUnknown =
+      r.structures_total === null ||
+      (failed.includes("ms_buildings") && failed.includes("usa_structures"));
+    const people = peopleExposed(vp, sp);
+    // Without a spread cone VAR counts a small circle around the ignition.
+    // Those buildings are near the fire, not in a projected path, so they
+    // cannot be "critical" on their own.
+    const fallbackArea = (vp.cone_source ?? "").startsWith("default-radius");
+    const radius = fallbackArea ? (vp.cone_source ?? "").replace("default-radius-", "") : "";
+    const area = fallbackArea
+      ? `within ${radius} of the ignition (no spread cone)`
+      : "inside the 24 h projected spread cone";
     if (structuresUnknown) {
       items.push({
         id: "structures",
         level: "degraded",
         title: "Structure count unavailable",
-        detail: "Building-footprint source failed. Do not read this as zero; re-brief or check the county parcel layer.",
+        detail: "Building layers failed. Do not read this as zero; re-brief or check the county parcel layer.",
       });
     } else {
       const total = r.structures_total ?? 0;
-      const homes = r.residential_count ?? 0;
-      const level: Severity =
-        (r.hospitals_count ?? 0) > 0 || (r.schools_count ?? 0) > 0 || homes >= 250
+      const homes = r.residential_count;
+      let level: Severity =
+        (r.hospitals_count ?? 0) > 0 || (r.schools_count ?? 0) > 0 || (homes ?? 0) >= 250
           ? "critical"
           : total > 0
             ? "warning"
-            : "ok";
+            : failed.length > 0
+              ? "info"
+              : "ok";
+      if (containment.kind === "contained") level = "info";
+      else if (fallbackArea && level === "critical") level = "warning";
       items.push({
         id: "structures",
         level,
         value: fmtInt(total),
         unit: "structures",
-        title: "inside the 24 h projected spread cone",
+        title: area,
         detail: [
-          failed.includes("usa_structures") ? "homes: unknown (occupancy source failed)" : `${fmtInt(homes)} homes`,
-          people != null ? `~${fmtInt(people)} people (est.)` : null,
+          homes == null ? "homes: unknown (occupancy source failed)" : `${fmtInt(homes)} homes`,
+          people.value != null
+            ? `~${fmtInt(people.value)} people (${people.method.rough ? "rough estimate" : "est."})`
+            : null,
         ]
           .filter(Boolean)
           .join(" · "),
       });
     }
+  }
+
+  // 2b. Containment: say plainly when there is no projection, and that a
+  // partial-containment projection ignores the control lines.
+  if (containment.kind === "contained") {
+    items.push({
+      id: "contained",
+      // The headline fact for a contained fire: keep it in view even when
+      // data gaps would otherwise outrank an info card.
+      pinned: true,
+      level: "info",
+      title: "Contained: no spread projection",
+      detail:
+        "The fire is reported 100% contained, so no free-spread cone is issued. Re-run Spread Simulation if containment is lost or a slopover is reported.",
+      summary: "Contained: no spread projection",
+    });
   }
 
   // 3. Highest-consequence named asset.
@@ -379,7 +505,7 @@ export function threatAttention(args: {
 
   // 4. Fire behaviour at the head.
   const fl = sp.flame_length_ft;
-  if (typeof fl === "number" && fl > 0) {
+  if (typeof fl === "number" && fl > 0 && containment.kind !== "contained") {
     const band = flameLengthBand(fl);
     const ros = sp.head_ros_chains_per_hr;
     items.push({
@@ -389,17 +515,30 @@ export function threatAttention(args: {
       unit: "ft flame length",
       title: band.meaning,
       summary: `${fmtNum(fl, 0)} ft flames at the head`,
-      detail:
+      detail: [
         typeof ros === "number"
           ? `Head spreading ${fmtNum(ros, 1)} chains/h (${fmtNum((ros * 66) / 5280, 1)} mph).`
-          : undefined,
+          : null,
+        containment.kind === "partial"
+          ? `Free-spread model: ignores containment lines (fire ${containment.pct}% contained).`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
     });
   }
 
   // 5. Remaining data gaps (one item, so gaps never crowd out real threats).
   const gaps: string[] = [];
-  const otherFailed = failed.filter((k) => k !== "ms_buildings");
-  if (otherFailed.length) gaps.push(`${otherFailed.map((k) => VALUES_SOURCES[k]).join(", ")} failed`);
+  const shownAbove =
+    r.structures_total === null ? new Set(["ms_buildings", "usa_structures"]) : new Set<string>();
+  const otherFailed = failed.filter((k) => !shownAbove.has(k));
+  if (otherFailed.length) {
+    gaps.push(`${otherFailed.map((k) => VALUES_SOURCES[k] ?? k).join(", ")} unavailable`);
+  }
+  if ((sp.assumed_inputs?.length ?? 0) > 0) {
+    gaps.push(`spread used ASSUMED ${sp.assumed_inputs!.join(", ")}`);
+  }
   const tGap = args.terrain ? terrainDataGap(tp) : null;
   if (tGap) gaps.push("fuel model unknown");
   if (sp.cone_impact?.error) gaps.push("spread-cone exposure query failed");
