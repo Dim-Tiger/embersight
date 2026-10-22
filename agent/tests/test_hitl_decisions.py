@@ -94,7 +94,7 @@ def _master_state() -> AgentState:
     )
 
 
-@pytest.mark.parametrize("decision", [{"decision": "approve"}, {}, {"decision": None}])
+@pytest.mark.parametrize("decision", [{"decision": "aprove"}, {}, {"decision": None}, "approved"])
 def test_master_ic_unrecognised_decision_is_not_approval(monkeypatch, decision):
     _capture(monkeypatch, master_ic, decision)
     patch = asyncio.run(master_ic.approve_iap(_master_state_with_pending_draft()))

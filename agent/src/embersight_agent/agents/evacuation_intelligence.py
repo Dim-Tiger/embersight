@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..hitl import audit_entry, request_human_decision
+from ..hitl import decision_kind as normalise_decision
 from ..state import AgentOutput, AgentState, CitationBundle, Dataset, Model
 from ..tools import evac as evac_tools
 from ..tools import zone_catalog
@@ -588,9 +589,11 @@ async def _run_synthetic_test_mode(
         decision = request_human_decision("evac_zone_change", envelope)
         audit_records.append(audit_entry("evac_zone_change", envelope, decision))
 
-        decision_kind = (decision or {}).get("decision", "rejected")
+        decision_kind = normalise_decision(decision)
         edits = (decision or {}).get("edits") or {}
-        edited_status = edits.get("proposed_status") if isinstance(edits, dict) else None
+        edited_status = (
+            str(edits.get("proposed_status") or "").upper() if isinstance(edits, dict) else None
+        )
         if decision_kind == "approved":
             final_status = z["status"]
             counts["approved"] += 1
@@ -1089,9 +1092,11 @@ async def run(state: AgentState) -> dict:  # noqa: C901 — orchestration is nat
         decision = request_human_decision("evac_zone_change", envelope)
         audit_records.append(audit_entry("evac_zone_change", envelope, decision))
 
-        decision_kind = (decision or {}).get("decision", "rejected")
+        decision_kind = normalise_decision(decision)
         edits = (decision or {}).get("edits") or {}
-        edited_status = edits.get("proposed_status") if isinstance(edits, dict) else None
+        edited_status = (
+            str(edits.get("proposed_status") or "").upper() if isinstance(edits, dict) else None
+        )
 
         if decision_kind == "approved":
             final_status = proposed_status

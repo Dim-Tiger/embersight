@@ -48,18 +48,33 @@ def request_human_decision(
 DecisionKind = Literal["approved", "edited", "rejected", "unrecognized"]
 
 
+_DECISION_SPELLINGS: dict[str, DecisionKind] = {
+    "approved": "approved", "approve": "approved",
+    "edited": "edited", "edit": "edited",
+    "rejected": "rejected", "reject": "rejected",
+}
+
+
 def decision_kind(decision: Any) -> DecisionKind:
     """Normalise a resume value to one of the three canonical decisions.
 
-    Anything else (a typo like "approve", an empty dict, a bare string)
-    comes back as "unrecognized". Callers must treat that as NOT approved:
-    a malformed resume should never publish a draft on the IC's behalf.
+    The ONE place agents read a resume value. Accepts both spellings
+    ("approved" / "approve", ...), any case. Anything else (a typo, an
+    empty dict, a bare string) comes back as "unrecognized", and callers
+    must treat that as NOT approved: a malformed resume never publishes a
+    draft on the IC's behalf.
+
+    Payload fields the web sends with each decision:
+      iap_approval            -> ``edited_draft`` (dict), ``reason``
+      resource_recommendation -> ``edits`` (partial recommendation), ``reason``
+      evac_zone_change        -> ``edits.proposed_status``, ``reason``
+      trigger_point_violation -> ``edits.cones``, ``reason``
     """
     if not isinstance(decision, dict):
         return "unrecognized"
     kind = decision.get("decision")
-    if kind in ("approved", "edited", "rejected"):
-        return kind
+    if isinstance(kind, str):
+        return _DECISION_SPELLINGS.get(kind.strip().lower(), "unrecognized")
     return "unrecognized"
 
 
