@@ -15,30 +15,55 @@ rejects it via `Command(resume=...)`.
 ```
 embersight/
   web/      Next.js 15 + React 19 dashboard (MapLibre + deck.gl + Tremor)
-  agent/    FastAPI + LangGraph agent service (Python 3.11+)
+  agent/    FastAPI + LangGraph agent service (Python 3.11+, see agent/README.md)
 ```
 
 ## 5-minute quickstart
 
 ### Prerequisites
 - Node 20+ and `pnpm`
-- Python 3.11+ and [`uv`](https://github.com/astral-sh/uv)
-- An Anthropic API key
+- [`uv`](https://github.com/astral-sh/uv) (it downloads the right Python for you)
+- Optional: an Anthropic API key. Without one every agent still runs and
+  writes a deterministic, template-based narrative; the key only switches the
+  narratives and the Master IC chat to Claude.
 
-### 1. Configure environment
+### 1. Configure environment (optional)
 ```bash
-cp .env.example .env
-# fill in ANTHROPIC_API_KEY at minimum
+cp .env.example .env            # read by the agent service
+cp .env.example web/.env.local  # read by the web app (FIRMS / Mapbox keys)
+# fill in ANTHROPIC_API_KEY, FIRMS_MAP_KEY, SYNOPTIC_TOKEN as available
 ```
+Everything has a working default: the web app talks to the agent at
+`http://localhost:8000`, and checkpoints go to `/tmp/embersight.db`.
 
 ### 2. Start the agent service (port 8000)
 ```bash
 cd agent
-uv sync
+uv sync --python 3.12
 uv run uvicorn embersight_agent.main:app --reload --port 8000
+curl localhost:8000/healthz   # {"ok": true, ...}
 ```
 
-### 3. Start the web app (port 3000)
+Python 3.11 through 3.14 all work for the default install. The optional
+`science` group (HRRR/RTMA via Herbie, RAWS via SynopticPy, OSMnx road
+routing, LANDFIRE helpers) needs Python 3.11 or 3.12, because `pyretechnics`
+pins `scipy~=1.12` and `numpy~=1.26`:
+
+```bash
+uv sync --python 3.12 --group science
+```
+
+Without it, weather falls back to the NWS hourly forecast and routing skips
+drive-time routes; each agent says so in its narrative and confidence.
+
+### 3. Run the tests (offline, about 5 seconds)
+```bash
+cd agent
+uv run pytest -q
+```
+The suite blocks all network access, so it needs no keys and no live feeds.
+
+### 4. Start the web app (port 3000)
 ```bash
 cd web
 pnpm install
