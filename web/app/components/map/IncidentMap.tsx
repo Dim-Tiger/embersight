@@ -665,8 +665,8 @@ export function IncidentMap() {
         .setLngLat(coords)
         .setHTML(
           `<div style="font-size:12px;line-height:1.5;color:#e2e8f0;background:#1e293b;padding:6px 8px;border-radius:6px;border:1px solid rgba(249,115,22,0.4)">
-            <strong style="color:#fb923c">${props.name}</strong><br/>
-            ${props.acres?.toLocaleString() ?? "?"} ac &middot; ${props.contained_pct ?? "?"}% contained
+            <strong style="color:#fb923c">${escapeHtml(String(props.name))}</strong><br/>
+            ${props.acres ? (props.acres < 1 ? "&lt;1" : Math.round(props.acres).toLocaleString()) : "?"} ac &middot; ${props.contained_pct ?? "?"}% contained
           </div>`,
         )
         .addTo(map);
@@ -2349,7 +2349,14 @@ function renderConeLabel(impact: ConeImpact | null): string {
       </div>
       <div style="border-top:1px solid rgba(240,171,252,0.3);margin:5px 0 4px 0"></div>
       <div>🏠 ${fmtInt(impact.residential_count)} residences
-        <span style="opacity:0.65">/ ${fmtInt(impact.structures_total)} total</span>
+        ${
+          // The structures query can be capped upstream, which produced
+          // "2,659 residences / 2,000 total". Only show a total that is
+          // at least the residential count.
+          (impact.structures_total ?? 0) >= (impact.residential_count ?? 0)
+            ? `<span style="opacity:0.65">/ ${fmtInt(impact.structures_total)} total</span>`
+            : ""
+        }
       </div>
       <div>🏥 ${fmtInt(impact.hospitals_count)} hospitals
         <span style="opacity:0.65">(${fmtInt(impact.hospitals_total_beds)} beds)</span>
