@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -28,7 +29,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..hitl import audit_entry, request_human_decision
+from ..hitl import audit_entry, decision_kind, request_human_decision
 from ..state import (
     AgentOutput,
     AgentState,
@@ -37,6 +38,7 @@ from ..state import (
     Incident,
     Model,
 )
+from ..units import containment_fraction, containment_label
 
 AGENT_NAME = "resource_recommendation"
 LLM_MODEL = "claude-haiku-4-5"
@@ -134,38 +136,51 @@ def _stub_recommendation(
     state: AgentState, context: dict[str, Any]
 ) -> ResourceRecommendation:
     incident = context.get("incident") or {}
-    acres = float(incident.get("acres") or 0.0)
+    total_acres = float(incident.get("acres") or 0.0)
+    # Size line-construction resources to the part of the fire that is still
+    # open. A 6,800-acre fire at 100% containment needs mop-up and patrol,
+    # not 135 initial-attack crews.
+    contained = containment_fraction(state.incident)
+    acres = total_acres * (1.0 - contained) if contained is not None else total_acres
+    containment_note = (
+        f"{containment_label(contained)}; sized to ~{acres:,.0f} uncontained "
+        f"of {total_acres:,.0f} ac"
+        if contained
+        else f"sized to {total_acres:,.0f} ac"
+    )
     var = context.get("values_at_risk") or {}
     terrain = context.get("terrain_fuel") or {}
     spread = context.get("spread_simulation") or {}
 
     # --- values-at-risk count (real upstream shape: payload.rollup.*) ---
+    # values_at_risk publishes rollup.structures_total / hospitals_count
+    # (see values_at_risk._rollup). The older names stay as fallbacks for
+    # hand-built test states.
     rollup = var.get("rollup") or {}
-    tallies = var.get("tallies") or {}
     structure_count = int(
-        rollup.get("structure_count")
-        or tallies.get("structures")
+        rollup.get("structures_total")
+        or rollup.get("structure_count")
         or var.get("structure_count")
-        or var.get("structures")
         or 0
     )
     has_hospital = bool(
-        rollup.get("hospitals")
-        or rollup.get("critical_facilities")
+        rollup.get("hospitals_count")
+        or rollup.get("hospitals")
         or var.get("hospitals")
-        or var.get("critical_facilities")
     )
 
     # --- fuel hazard (real upstream shape: terrain_fuel.fuel_model / slope_deg) ---
     fuel_model = (
         terrain.get("fuel_model") or terrain.get("fbfm40") or "unknown fuel model"
     )
-    slope_pct = float(
-        terrain.get("slope_pct")
-        or terrain.get("slope_deg")
-        or terrain.get("slope")
-        or 0.0
-    )
+    # terrain_fuel publishes percent. A bare slope_deg (older fixtures) is
+    # degrees and must be converted: 28° is 53%, not 28%.
+    if terrain.get("slope_pct") is not None:
+        slope_pct = float(terrain["slope_pct"])
+    elif terrain.get("slope_deg") is not None:
+        slope_pct = math.tan(math.radians(float(terrain["slope_deg"]))) * 100.0
+    else:
+        slope_pct = 0.0
     flame_length_ft = float(spread.get("flame_length_ft") or 0.0)
     if flame_length_ft >= 11.0 or slope_pct >= 40:
         fuel_hazard = "extreme"
@@ -359,7 +374,8 @@ def _stub_recommendation(
         ],
         rationale_summary=(
             f"Draft sized to spread cone ({cone_size_str}), "
-            f"values-at-risk ({var_str}), and fuel hazard ({fuel_str}). "
+            f"values-at-risk ({var_str}), fuel hazard ({fuel_str}), and "
+            f"fire size ({containment_note}). "
             f"RECOMMEND ONLY — IC approval required."
         ),
         expires_at=(datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
@@ -482,40 +498,30 @@ async def run(state: AgentState) -> dict[str, Any]:
         reasoning_trace_id=str(uuid.uuid4()),
     )
 
-    # Briefing-mode contract: emit the drafted recommendation as the agent
-    # output WITHOUT pausing on interrupt(). Otherwise the initial fan-out
-    # stalls at this node, master_ic never runs, the briefing never
-    # completes, and the Resources tab stays empty until the IC manually
-    # approves — which they often haven't done yet because the briefing
-    # isn't visible. The IC still owns the recommendation: chat-mode calls
-    # (consult_resource_recommendation) still go through the interrupt
-    # path because the user is actively engaged at that point.
+    # Briefing mode does NOT pause here (Shaurya's PR #43): with a pause the
+    # briefing stalled at this node and the Master IC never ran. The draft is
+    # still gated by a human, because master_ic carries these line items
+    # inside its iap_approval interrupt and the IC signs off on them with the
+    # IAP. No interrupt happened here, so the status says DRAFT and nothing
+    # goes in the audit log: there is no human decision to record yet.
+    # Chat mode (consult_resource_recommendation) pauses on its own interrupt
+    # because the IC is actively asking for it.
+    envelope: dict[str, Any] | None = None
+    decision: dict[str, Any] = {}
     if state.mode == "briefing":
-        envelope = {
-            "type": "resource_recommendation",
-            "recommendation": recommendation.model_dump(),
-            "urgency": recommendation.urgency,
-            "expires_at": recommendation.expires_at,
-            "confidence": confidence,
-            "citations": citations.model_dump(),
-            "incident": state.incident.model_dump() if state.incident else None,
-        }
-        decision = {
-            "decision": "approved",
-            "actor": "briefing_auto",
-            "reason": "auto-drafted during initial briefing — pending IC review",
-        }
+        status = "draft_pending_iap_approval"
     else:
-        envelope, decision = submit_resource_recommendation(
+        envelope, raw_decision = submit_resource_recommendation(
             state, recommendation, confidence, citations
         )
+        # Fail closed: anything but approved / edited / rejected is held.
+        status = decision_kind(raw_decision)
+        decision = raw_decision if isinstance(raw_decision, dict) else {"raw": raw_decision}
 
-    decision = decision or {}
-    decision_kind = decision.get("decision", "approved")
     edits = decision.get("edits") or {}
     reason = decision.get("reason", "")
 
-    if decision_kind == "edited" and edits:
+    if status == "edited" and edits:
         try:
             recommendation = ResourceRecommendation.model_validate(
                 {**recommendation.model_dump(), **edits}
@@ -525,15 +531,15 @@ async def run(state: AgentState) -> dict[str, Any]:
             # raw edits still live verbatim in the audit_log entry.
             pass
 
-    if decision_kind == "rejected":
+    if status in ("rejected", "unrecognized"):
         payload: dict[str, Any] = {
-            "status": "rejected",
+            "status": status,
             "draft": recommendation.model_dump(),
             "reason": reason,
             "key_findings": [],
             "missing_inputs": missing,
         }
-        narrative = "0 units RECOMMENDED for approval, decision: rejected" + (
+        narrative = f"0 units RECOMMENDED, decision: {status}" + (
             f" — {reason}" if reason else ""
         )
         out_confidence = min(confidence, 0.3)
@@ -566,7 +572,7 @@ async def run(state: AgentState) -> dict[str, Any]:
             for item in flat_lines
         ]
         payload = {
-            "status": decision_kind,
+            "status": status,
             "recommendation": recommendation.model_dump(),
             "recommendations": recommendations_flat,
             "urgency": recommendation.urgency,
@@ -577,8 +583,10 @@ async def run(state: AgentState) -> dict[str, Any]:
             "unit_count": unit_count,
         }
         narrative = (
-            f"{unit_count} units RECOMMENDED for approval, "
-            f"decision: {decision_kind}"
+            f"DRAFT: {unit_count} units RECOMMENDED; the IC reviews them "
+            "with the IAP."
+            if envelope is None
+            else f"{unit_count} units RECOMMENDED, IC decision: {status}"
         )
         out_confidence = confidence
 
@@ -591,10 +599,10 @@ async def run(state: AgentState) -> dict[str, Any]:
         citation_bundle=citations,
     )
 
-    return {
-        "outputs": {AGENT_NAME: output},
-        "audit_log": [audit_entry("resource_recommendation", envelope, decision)],
-    }
+    patch: dict[str, Any] = {"outputs": {AGENT_NAME: output}}
+    if envelope is not None:
+        patch["audit_log"] = [audit_entry("resource_recommendation", envelope, decision)]
+    return patch
 
 
 # --------------------------------------------------------------------------- #
@@ -671,10 +679,10 @@ def _build_mock_state() -> AgentState:
                 "cone_source": "spread_simulation.cones.24h",
                 "bbox": [-121.20, 39.35, -121.05, 39.48],
                 "rollup": {
-                    "structure_count": 312,
-                    "hospitals": 1,
-                    "schools": 3,
-                    "critical_facilities": ["Memorial Hospital"],
+                    "structures_total": 312,
+                    "hospitals_count": 1,
+                    "schools_count": 3,
+                    "critical_facilities_total": 1,
                 },
                 "tallies": {"structures": 312, "parcels": 198, "roads_km": 24.5},
                 "key_findings": [
@@ -708,7 +716,10 @@ def _build_mock_state() -> AgentState:
             },
         ),
     }
-    return AgentState(incident=incident, operational_period=1, outputs=outputs)
+    # Chat mode, so the smoke run exercises the interrupt() path.
+    return AgentState(
+        incident=incident, operational_period=1, mode="chat", outputs=outputs
+    )
 
 
 def _smoke() -> None:
