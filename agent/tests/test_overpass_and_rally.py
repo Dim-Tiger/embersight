@@ -77,6 +77,17 @@ def test_attempts_are_bounded(fake, sleeps):
     assert all(s <= overpass.MAX_BACKOFF_S for s in sleeps)
 
 
+def test_circuit_breaker_skips_the_network_after_a_full_outage(fake, sleeps):
+    f = fake([("timeout", None, {})] * 10)
+    with pytest.raises(overpass.OverpassUnavailable):
+        asyncio.run(overpass._post(QUERY))
+    tried = len(f.urls)
+    other = overpass._build_query(BBOX, {"amenity": ["parking"]})
+    with pytest.raises(overpass.OverpassUnavailable, match="marked down"):
+        asyncio.run(overpass._post(other))
+    assert len(f.urls) == tried, "no requests while the breaker is open"
+
+
 def test_bad_request_is_not_retried(fake, sleeps):
     f = fake([(400, {"remark": "syntax"}, {})])
     with pytest.raises(overpass.OverpassUnavailable):

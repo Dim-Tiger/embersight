@@ -42,4 +42,10 @@ def no_network(monkeypatch, tmp_path):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("EMBERSIGHT_OVERPASS_CACHE", str(tmp_path / "overpass"))
     monkeypatch.setenv("EMBERSIGHT_ZONES_CACHE", str(tmp_path / "zones"))
+
+    # Reset the Overpass circuit breaker so one test's outage can't leak
+    # into the next.
+    from embersight_agent.tools import overpass
+
+    monkeypatch.setattr(overpass, "_down_until", 0.0)
     yield

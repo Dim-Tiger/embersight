@@ -14,7 +14,9 @@ This module enforces that for every caller:
 * **User-Agent** on every request.
 * **Bounded retry with backoff.** 429 / 502 / 503 / 504 / timeouts are
   retried after ``Retry-After`` (or an exponential delay), rotating to the
-  next mirror, up to ``MAX_ATTEMPTS`` tries in total.
+  next mirror, up to ``MAX_ATTEMPTS`` tries and ``CALL_BUDGET_S`` seconds.
+  After a full outage the network is skipped for ``DOWN_FOR_S`` so the next
+  queries fail fast instead of each waiting out the same dead servers.
 * **On-disk cache** keyed by the exact query text. A fresh copy (younger
   than ``CACHE_TTL_S``) is served without touching the network, and if
   every mirror fails a stale copy of any age is served instead, so a repeat
@@ -53,6 +55,12 @@ USER_AGENT = "EmberSight/0.2 (wildfire incident decision support; +https://githu
 MAX_ATTEMPTS = 4
 MAX_BACKOFF_S = 8.0
 RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+# Wall-clock cap for one query including retries, and how long to skip the
+# network after a query has exhausted every mirror. Without these, five
+# queries against dead servers took ~10 minutes before routing gave up.
+CALL_BUDGET_S = 45.0
+DOWN_FOR_S = 120.0
+_down_until = 0.0
 CACHE_TTL_S = float(os.environ.get("EMBERSIGHT_OVERPASS_TTL_HOURS", "6")) * 3600
 
 
@@ -122,7 +130,16 @@ async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+def _serve_stale_or_raise(query: str, errors: list[str]) -> dict[str, Any]:
+    stale = _read_cache(query, max_age_s=None)
+    if stale is not None:
+        log.warning("Overpass unavailable (%s); serving stale cached result", "; ".join(errors))
+        return stale
+    raise OverpassUnavailable("; ".join(errors) or "no Overpass endpoint configured")
+
+
 async def _post(query: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict[str, Any]:
+    global _down_until
     cached = _read_cache(query, max_age_s=CACHE_TTL_S)
     if cached is not None:
         return cached
@@ -131,8 +148,16 @@ async def _post(query: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict[str, Any
     urls = endpoints()
     errors: list[str] = []
     async with _lock():
+        # Circuit breaker: right after every mirror failed, don't spend
+        # another minute rediscovering that for each of the next queries.
+        if time.monotonic() < _down_until:
+            return _serve_stale_or_raise(query, ["Overpass marked down after recent failures"])
+        started = time.monotonic()
         async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
             for attempt in range(MAX_ATTEMPTS):
+                if time.monotonic() - started > CALL_BUDGET_S:
+                    errors.append(f"gave up after {CALL_BUDGET_S:.0f} s")
+                    break
                 url = urls[attempt % len(urls)]
                 response: httpx.Response | None = None
                 try:
@@ -146,20 +171,21 @@ async def _post(query: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict[str, Any
                     response.raise_for_status()
                     data = response.json()
                     _write_cache(query, data)
+                    _down_until = 0.0
                     return data
                 except (httpx.TransportError, httpx.HTTPStatusError, ValueError) as exc:
                     status = response.status_code if response is not None else None
                     errors.append(f"{url} -> {status or type(exc).__name__}")
                     retryable = status is None or status in RETRYABLE_STATUS
-                    if not retryable or attempt == MAX_ATTEMPTS - 1:
+                    if not retryable:
+                        # Our query is wrong (e.g. 400); the servers are fine.
+                        return _serve_stale_or_raise(query, errors)
+                    if attempt == MAX_ATTEMPTS - 1:
                         break
                     await _sleep(_retry_after_s(response, attempt))
+        _down_until = time.monotonic() + DOWN_FOR_S
 
-    stale = _read_cache(query, max_age_s=None)
-    if stale is not None:
-        log.warning("Overpass unavailable (%s); serving stale cached result", "; ".join(errors))
-        return stale
-    raise OverpassUnavailable("; ".join(errors) or "no Overpass endpoint configured")
+    return _serve_stale_or_raise(query, errors)
 
 
 def _bbox_clause(bbox: tuple[float, float, float, float]) -> str:
