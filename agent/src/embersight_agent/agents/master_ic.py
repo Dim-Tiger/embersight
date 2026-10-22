@@ -226,22 +226,23 @@ def _detect_dissent(state: AgentState) -> list[dict[str, Any]]:
     spread = outputs.get("spread_simulation")
     values = outputs.get("values_at_risk")
     if spread is not None and values is not None:
-        spread_txt = _payload_text(spread)
-        values_txt = _payload_text(values)
-        spread_high = any(
-            tok in spread_txt
-            for tok in ("high risk", "high-risk", '"high"', "severe", "critical")
+        sp = spread.payload or {}
+        # Read the numbers both agents actually publish. The old keyword
+        # scan matched "critical" in every spread payload (the
+        # critical_facilities_total key) and looked for a structures_count
+        # key that values_at_risk never emits, so this check could not fire
+        # correctly.
+        ros = sp.get("head_ros_chains_per_hr") or 0.0
+        area = sp.get("burn_area_24h_km2_p25") or 0.0
+        spread_high = (
+            float(ros) >= 10.0
+            or float(area) >= 5.0
+            or str(sp.get("risk_level", "")).lower() == "high"
         )
-        values_empty = any(
-            tok in values_txt
-            for tok in (
-                "no structures",
-                "zero structures",
-                '"structures_count": 0',
-                "structures_count: 0",
-                "no values at risk",
-                "no values-at-risk",
-            )
+        rollup = (values.payload or {}).get("rollup") or {}
+        values_empty = rollup.get("structures_total") == 0 or (
+            "structures_count" in (values.payload or {})
+            and (values.payload or {}).get("structures_count") == 0
         )
         if spread_high and values_empty:
             dissents.append(
