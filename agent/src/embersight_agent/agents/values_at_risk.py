@@ -34,6 +34,10 @@ from ..state import (
     Model,
 )
 from ..tools.buildings import query_ms_buildings, query_usa_structures
+from ..tools.evac import (
+    DEFAULT_BUILDING_DENSITY_PER_KM2 as DENSITY_BUILDINGS_PER_KM2,
+)
+from ..tools.evac import DEFAULT_HOUSEHOLD_SIZE, estimate_population
 from ..tools.infra import (
     query_critical_facilities,
     query_hospitals,
@@ -136,23 +140,35 @@ def _spread_cone(state: AgentState) -> tuple[Any, str]:
 # Tool fan-out
 # --------------------------------------------------------------------------- #
 
+# The six layers we query, in citation order. "Core" layers drive the
+# structure and population numbers; losing one makes the headline unknown.
+SOURCES: tuple[str, ...] = (
+    "ms_buildings",
+    "usa_structures",
+    "hospitals",
+    "schools",
+    "transmission",
+    "critical_facilities",
+)
+CORE_SOURCES = frozenset({"ms_buildings", "usa_structures"})
 
-async def _gather_tallies(
-    polygon_wkt: str, bbox: tuple[float, float, float, float]
-) -> dict[str, Any]:
-    """Run the five spatial queries in parallel (each on a worker thread
-    because the underlying HTTPX calls are synchronous)."""
+
+async def _gather_tallies(polygon_wkt: str) -> dict[str, Any]:
+    """Run the six spatial queries in parallel against the polygon itself
+    (each on a worker thread because the HTTP calls are synchronous)."""
     loop = asyncio.get_running_loop()
     coros = {
         "ms_buildings": loop.run_in_executor(None, query_ms_buildings, polygon_wkt),
         "usa_structures": loop.run_in_executor(
             None, query_usa_structures, polygon_wkt
         ),
-        "hospitals": loop.run_in_executor(None, query_hospitals, bbox),
-        "schools": loop.run_in_executor(None, query_schools, bbox),
-        "transmission": loop.run_in_executor(None, query_transmission_lines, bbox),
+        "hospitals": loop.run_in_executor(None, query_hospitals, polygon_wkt),
+        "schools": loop.run_in_executor(None, query_schools, polygon_wkt),
+        "transmission": loop.run_in_executor(
+            None, query_transmission_lines, polygon_wkt
+        ),
         "critical_facilities": loop.run_in_executor(
-            None, query_critical_facilities, bbox
+            None, query_critical_facilities, polygon_wkt
         ),
     }
     results: dict[str, Any] = {}
@@ -165,11 +181,20 @@ async def _gather_tallies(
 
 
 def _has_error(result: Any) -> bool:
-    if isinstance(result, dict) and result.get("error"):
+    """True when a layer failed, fully or partly.
+
+    Tools report failure three ways: ``{"error": ...}``, ``[{"error": ...}]``,
+    or (critical facilities) ``{"errors": {sub_layer: msg}}``.
+    """
+    if isinstance(result, dict) and (result.get("error") or result.get("errors")):
         return True
     if isinstance(result, list) and result and isinstance(result[0], dict):
         return bool(result[0].get("error"))
     return False
+
+
+def errored_sources(tallies: dict[str, Any]) -> list[str]:
+    return [k for k in SOURCES if _has_error(tallies.get(k))]
 
 
 # --------------------------------------------------------------------------- #
@@ -177,25 +202,70 @@ def _has_error(result: Any) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _rollup(tallies: dict[str, Any]) -> dict[str, Any]:
+def _clean(rows: Any) -> list[dict[str, Any]]:
+    return [r for r in (rows or []) if isinstance(r, dict) and "error" not in r]
+
+
+def _population(
+    residential: int | None, polygon_wkt: str | None
+) -> tuple[int | None, str, str]:
+    """Population exposed, with the method that produced it.
+
+    Prefer counted residential structures x average household size. Only
+    when the structure layer is unavailable fall back to a flat area-density
+    guess, and say so: that number is a planning placeholder, not a count.
+    """
+    if residential is not None:
+        return (
+            int(round(residential * DEFAULT_HOUSEHOLD_SIZE)),
+            "residential_structures",
+            f"{residential:,} residential structures x "
+            f"{DEFAULT_HOUSEHOLD_SIZE} people (USA Structures)",
+        )
+    if polygon_wkt:
+        est = estimate_population(polygon_wkt)
+        return (
+            est,
+            "area_density_estimate",
+            "ROUGH ESTIMATE: structure data unavailable, so area x "
+            f"{DENSITY_BUILDINGS_PER_KM2:.0f} buildings/km² x "
+            f"{DEFAULT_HOUSEHOLD_SIZE} people",
+        )
+    return None, "unavailable", "population unavailable"
+
+
+def _rollup(tallies: dict[str, Any], polygon_wkt: str | None = None) -> dict[str, Any]:
+    """Fuse the six layers into one tally.
+
+    A count from a layer that failed is ``None`` ("unknown"), never 0, so a
+    feed outage cannot read as "nothing at risk". ``unavailable`` lists the
+    failed layers.
+    """
+    errored = set(errored_sources(tallies))
     ms = tallies.get("ms_buildings") or {}
     usa = tallies.get("usa_structures") or {}
-    hospitals = tallies.get("hospitals") or []
-    schools = tallies.get("schools") or []
-    transmission = tallies.get("transmission") or []
     critical = tallies.get("critical_facilities") or {}
 
-    hospitals_clean = [
-        h for h in hospitals if isinstance(h, dict) and "error" not in h
-    ]
-    schools_clean = [
-        s for s in schools if isinstance(s, dict) and "error" not in s
-    ]
-    lines_clean = [
-        ln for ln in transmission if isinstance(ln, dict) and "error" not in ln
-    ]
+    hospitals_clean = _clean(tallies.get("hospitals"))
+    schools_clean = _clean(tallies.get("schools"))
+    lines_clean = _clean(tallies.get("transmission"))
 
-    by_occ = (usa.get("by_occupancy") or {}) if isinstance(usa, dict) else {}
+    usa_ok = "usa_structures" not in errored and isinstance(usa, dict)
+    ms_ok = "ms_buildings" not in errored and isinstance(ms, dict)
+    by_occ = (usa.get("by_occupancy") or {}) if usa_ok else {}
+
+    if ms_ok:
+        structures_total: int | None = int(ms.get("count", 0) or 0)
+    elif usa_ok:
+        structures_total = int(usa.get("total", 0) or 0)
+    else:
+        structures_total = None
+
+    def _occ(name: str) -> int | None:
+        return int(by_occ.get(name, 0) or 0) if usa_ok else None
+
+    residential = _occ("Residential")
+    population, pop_method, pop_note = _population(residential, polygon_wkt)
 
     # Named facilities — included in the payload so downstream agents and
     # the Master IC can reference specific places by name instead of
@@ -229,55 +299,105 @@ def _rollup(tallies: dict[str, Any]) -> dict[str, Any]:
         key=lambda s: -s["enrollment"],
     )[:5]
 
+    hosp_ok = "hospitals" not in errored
+    school_ok = "schools" not in errored
+    lines_ok = "transmission" not in errored
+    crit_sub_errors = (critical.get("errors") or {}) if isinstance(critical, dict) else {}
+    crit_all_failed = isinstance(critical, dict) and (
+        bool(critical.get("error")) or len(crit_sub_errors) >= 3
+    )
+
     return {
-        "structures_total": ms.get("count", 0) if isinstance(ms, dict) else 0,
+        "structures_total": structures_total,
         "total_footprint_sqm": (
-            ms.get("total_footprint_sqm", 0.0) if isinstance(ms, dict) else 0.0
+            float(ms.get("total_footprint_sqm", 0.0) or 0.0) if ms_ok else None
         ),
         "structures_by_occupancy": by_occ,
-        "residential_count": by_occ.get("Residential", 0),
-        "commercial_count": by_occ.get("Commercial", 0),
-        "public_count": by_occ.get("Public", 0),
-        "industrial_count": by_occ.get("Industrial", 0),
-        "hospitals_count": len(hospitals_clean),
-        "hospitals_total_beds": sum(int(h.get("beds", 0)) for h in hospitals_clean),
+        "residential_count": residential,
+        "commercial_count": _occ("Commercial"),
+        "public_count": _occ("Public"),
+        "industrial_count": _occ("Industrial"),
+        "population_estimate": population,
+        "population_method": pop_method,
+        "population_note": pop_note,
+        "hospitals_count": len(hospitals_clean) if hosp_ok else None,
+        "hospitals_total_beds": (
+            sum(int(h.get("beds", 0) or 0) for h in hospitals_clean) if hosp_ok else None
+        ),
         "named_hospitals": named_hospitals,
-        "schools_count": len(schools_clean),
-        "schools_total_enrollment": sum(
-            int(s.get("enrollment", 0)) for s in schools_clean
+        "schools_count": len(schools_clean) if school_ok else None,
+        "schools_total_enrollment": (
+            sum(int(s.get("enrollment", 0) or 0) for s in schools_clean)
+            if school_ok
+            else None
         ),
         "named_schools": named_schools,
-        "transmission_segments": len(lines_clean),
-        "transmission_max_kv": max(
-            (float(ln.get("voltage_kv", 0) or 0) for ln in lines_clean),
-            default=0.0,
+        "transmission_segments": len(lines_clean) if lines_ok else None,
+        "transmission_max_kv": (
+            max((float(ln.get("voltage_kv", 0) or 0) for ln in lines_clean), default=0.0)
+            if lines_ok
+            else None
         ),
         "critical_facilities_total": (
-            critical.get("total", 0) if isinstance(critical, dict) else 0
+            None
+            if crit_all_failed
+            else int(critical.get("total", 0) or 0)
+            if isinstance(critical, dict)
+            else None
         ),
+        "critical_facilities_partial": sorted(crit_sub_errors),
+        "unavailable": sorted(errored),
     }
 
 
+def fmt_count(value: Any, unit: str = "") -> str:
+    """'1,234 residences' or 'residences unavailable' for a None count."""
+    if value is None:
+        return f"{unit} unavailable".strip() if unit else "unavailable"
+    try:
+        text = f"{int(value):,}"
+    except (TypeError, ValueError):
+        return f"{unit} unavailable".strip() if unit else "unavailable"
+    return f"{text} {unit}".strip()
+
+
+def population_phrase(roll: dict[str, Any]) -> str:
+    pop = roll.get("population_estimate")
+    if pop is None:
+        return "population unavailable"
+    if roll.get("population_method") == "area_density_estimate":
+        return f"~{pop:,} people (rough area-density estimate; no structure data)"
+    return f"~{pop:,} people (from counted residences)"
+
+
 def _key_findings(roll: dict[str, Any]) -> list[str]:
-    return [
+    findings = []
+    if roll.get("unavailable"):
+        findings.append(
+            "PARTIAL inventory — unavailable: " + ", ".join(roll["unavailable"])
+        )
+    kv = roll.get("transmission_max_kv")
+    findings += [
+        population_phrase(roll),
         (
-            f"{roll['residential_count']:,} residential structures "
-            f"({roll['structures_total']:,} total in cone)"
+            f"{fmt_count(roll['residential_count'], 'residential structures')} "
+            f"({fmt_count(roll['structures_total'], 'total in cone')})"
         ),
         (
-            f"{roll['hospitals_count']} hospitals "
-            f"({roll['hospitals_total_beds']:,} beds)"
+            f"{fmt_count(roll['hospitals_count'], 'hospitals')} "
+            f"({fmt_count(roll['hospitals_total_beds'], 'beds')})"
         ),
         (
-            f"{roll['schools_count']} schools "
-            f"({roll['schools_total_enrollment']:,} enrollment)"
+            f"{fmt_count(roll['schools_count'], 'schools')} "
+            f"({fmt_count(roll['schools_total_enrollment'], 'enrollment')})"
         ),
         (
-            f"{roll['transmission_segments']} transmission segments "
-            f"(max {roll['transmission_max_kv']:.0f} kV)"
+            f"{fmt_count(roll['transmission_segments'], 'transmission segments')}"
+            + (f" (max {kv:.0f} kV)" if kv is not None else "")
         ),
-        f"{roll['critical_facilities_total']} critical facilities",
+        fmt_count(roll["critical_facilities_total"], "critical facilities"),
     ]
+    return findings
 
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +420,8 @@ def _fallback_narrative(
     named_h = roll.get("named_hospitals") or []
     named_s = roll.get("named_schools") or []
     hosp_phrase = (
-        f"{roll['hospitals_count']} hospitals ({roll['hospitals_total_beds']:,} beds"
+        f"{fmt_count(roll['hospitals_count'], 'hospitals')} "
+        f"({fmt_count(roll['hospitals_total_beds'], 'beds')}"
         + (
             "; highest-capacity: "
             + ", ".join(f"{h['name']} ({h['beds']} beds)" for h in named_h[:3])
@@ -310,27 +431,71 @@ def _fallback_narrative(
         + ")"
     )
     school_phrase = (
-        f"{roll['schools_count']} schools "
-        f"({roll['schools_total_enrollment']:,} enrollment"
+        f"{fmt_count(roll['schools_count'], 'schools')} "
+        f"({fmt_count(roll['schools_total_enrollment'], 'enrollment')}"
         + (
-            "; largest: "
-            + ", ".join(f"{s['name']}" for s in named_s[:3])
+            "; largest: " + ", ".join(f"{s['name']}" for s in named_s[:3])
             if named_s
             else ""
         )
         + ")"
     )
+    caveat = ""
+    if roll.get("unavailable"):
+        caveat = (
+            "PARTIAL inventory: "
+            + ", ".join(roll["unavailable"])
+            + " did not respond, so those counts are unknown, not zero. "
+        )
+    kv = roll.get("transmission_max_kv")
     return (
-        f"Values-at-Risk inventory for {inc} (cone source: {cone_source}). "
+        f"{caveat}Values-at-Risk inventory for {inc} (cone source: {cone_source}): "
+        f"{population_phrase(roll)}. "
         f"PROPOSE prioritizing protection of "
-        f"{roll['residential_count']:,} residential structures, "
+        f"{fmt_count(roll['residential_count'], 'residential structures')}, "
         f"{hosp_phrase}, and {school_phrase}. "
-        f"{roll['transmission_segments']} transmission segments "
-        f"(up to {roll['transmission_max_kv']:.0f} kV) "
-        f"and {roll['critical_facilities_total']} critical facilities "
+        f"{fmt_count(roll['transmission_segments'], 'transmission segments')}"
+        + (f" (up to {kv:.0f} kV)" if kv is not None else "")
+        + f" and {fmt_count(roll['critical_facilities_total'], 'critical facilities')} "
         "are exposed. RECOMMEND coordinating with utility owners on "
         "de-energization and verifying CMS hospital evacuation plans."
     )
+
+
+def _confidence(tallies: dict[str, Any], roll: dict[str, Any]) -> tuple[float, str]:
+    """0.9 minus 0.1 per failed layer, with two caps.
+
+    * A core layer (buildings / occupancy) failed: the headline structure and
+      population numbers are unknown, so cap at 0.5.
+    * Any layer failed AND everything that did answer is zero: an empty
+      result built on a partial picture is not an all-clear, so cap at 0.4.
+    """
+    errored = errored_sources(tallies)
+    confidence = max(0.1, 0.9 - 0.1 * len(errored))
+    if not errored:
+        return confidence, (
+            "all 6 data sources returned; counts are for the cone polygon "
+            "(USA Structures / MS Building Footprints)"
+        )
+    drivers = [f"{len(errored)}/6 data sources errored ({', '.join(errored)})"]
+    if CORE_SOURCES & set(errored):
+        confidence = min(confidence, 0.5)
+        drivers.append("structure counts unknown")
+    counts = [
+        roll.get(k)
+        for k in (
+            "structures_total",
+            "residential_count",
+            "hospitals_count",
+            "schools_count",
+            "transmission_segments",
+            "critical_facilities_total",
+        )
+    ]
+    if all(not c for c in counts if c is not None):
+        confidence = min(confidence, 0.4)
+        drivers.append("zero counts from a partial picture are not an all-clear")
+    return confidence, "; ".join(drivers)
 
 
 async def _llm_narrative(
@@ -460,20 +625,11 @@ async def run(state: AgentState) -> dict:
         else:
             bbox = (-0.1, -0.1, 0.1, 0.1)
 
-    tallies = await _gather_tallies(polygon_wkt, bbox)
-    roll = _rollup(tallies)
+    tallies = await _gather_tallies(polygon_wkt)
+    roll = _rollup(tallies, polygon_wkt)
     narrative = await _llm_narrative(roll, cone_source, state.incident)
     findings = _key_findings(roll)
-
-    errors = sum(1 for v in tallies.values() if _has_error(v))
-    confidence = max(0.1, 0.9 - 0.1 * errors)
-    if errors:
-        driver = (
-            f"{errors}/6 data sources errored — "
-            "confidence reduced 0.1 per source"
-        )
-    else:
-        driver = "all 6 data sources returned; MS Building Footprints vintage 2024-Q4"
+    confidence, driver = _confidence(tallies, roll)
 
     output = AgentOutput(
         agent=AGENT_NAME,

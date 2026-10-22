@@ -48,6 +48,11 @@ CALEVACS_VERSION = "CalOES Hosted View / FeatureServer layer 0"
 # 2.5 as a deliberately conservative round number.
 DEFAULT_HOUSEHOLD_SIZE = 2.5
 
+# Flat building density used ONLY when no structure data is available for a
+# polygon. It is a regional WUI planning figure, not a measurement, so every
+# number derived from it must be labelled as an estimate.
+DEFAULT_BUILDING_DENSITY_PER_KM2 = 220.0
+
 
 # --------------------------------------------------------------------------- #
 # Zone fetch
@@ -369,12 +374,17 @@ def _polygon_area_km2(polygon_wkt: str) -> float:
 def estimate_population(
     polygon_wkt: str,
     *,
-    building_density_per_km2: float = 220.0,
+    building_density_per_km2: float = DEFAULT_BUILDING_DENSITY_PER_KM2,
     household_size: float = DEFAULT_HOUSEHOLD_SIZE,
 ) -> int:
-    """Estimate population inside a zone polygon.
+    """ROUGH population estimate inside a polygon from its area alone.
 
-    Strategy: building-footprint density × average household size. The
+    This does not look at any buildings: it is area x a fixed building
+    density x household size. Callers must label the result as an estimate
+    and prefer a real count (USA Structures residences, or a zone's
+    published population) whenever one exists.
+
+    Strategy: flat building density × average household size. The
     default density (220 buildings/km²) matches the Microsoft Building
     Footprints California regional average for non-urban / WUI areas;
     real fire-front zones in California are usually WUI rather than
