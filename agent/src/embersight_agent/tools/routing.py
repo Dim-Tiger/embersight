@@ -354,22 +354,38 @@ def _feature_latlon(feature: dict[str, Any]) -> tuple[float, float] | None:
     return None
 
 
-def _incident_distance_score(inc_km: float) -> float:
-    """Smooth tent: 0 at standoff, peak at _INC_PEAK_KM, 0 at _INC_FALLOFF_KM.
+def standoff_km(acres: float | None) -> float:
+    """Minimum staging distance from the ignition point, in km.
+
+    The distance is measured from the incident POINT, so a fixed 2 km would
+    put staging inside a large fire. Add the radius of a circle with the
+    fire's area: 2 km beyond the edge of an equivalent round fire. A
+    6,800-acre fire (about 27 km²) gets ~5 km instead of 2.
+    """
+    try:
+        area_km2 = max(0.0, float(acres or 0.0)) * 0.00404686
+    except (TypeError, ValueError):
+        area_km2 = 0.0
+    return _SAFE_STANDOFF_KM + math.sqrt(area_km2 / math.pi)
+
+
+def _incident_distance_score(inc_km: float, standoff: float = _SAFE_STANDOFF_KM) -> float:
+    """Smooth tent: 0 at standoff, peak 3 km past it, 0 another 10 km out.
 
     Replaces the original discontinuous (0 → 0.7 at the standoff boundary).
     Inside the safety standoff we still hard-zero — staging adjacent to the
-    fire front is unsafe regardless of every other axis.
+    fire front is unsafe regardless of every other axis. With the default
+    2 km standoff this is the original 2 / 5 / 15 km tent.
     """
-    if inc_km < _SAFE_STANDOFF_KM:
+    peak = standoff + (_INC_PEAK_KM - _SAFE_STANDOFF_KM)
+    falloff = standoff + (_INC_FALLOFF_KM - _SAFE_STANDOFF_KM)
+    if inc_km < standoff:
         return 0.0
-    if inc_km <= _INC_PEAK_KM:
+    if inc_km <= peak:
         # Linear rise 0 → 1 from standoff to peak.
-        span = _INC_PEAK_KM - _SAFE_STANDOFF_KM
-        return (inc_km - _SAFE_STANDOFF_KM) / span if span > 0 else 1.0
-    if inc_km <= _INC_FALLOFF_KM:
-        span = _INC_FALLOFF_KM - _INC_PEAK_KM
-        return 1.0 - (inc_km - _INC_PEAK_KM) / span if span > 0 else 0.0
+        return (inc_km - standoff) / (peak - standoff)
+    if inc_km <= falloff:
+        return 1.0 - (inc_km - peak) / (falloff - peak)
     return 0.0
 
 
@@ -398,7 +414,7 @@ def _wind_score(
     to the candidate and compare it to the wind FROM direction:
 
     - 0° offset  → candidate is directly upwind          → score 1.0
-    - 90° offset → candidate is crosswind (flank)        → score 0.55
+    - 90° offset → candidate is crosswind (flank)        → score 0.5
     - 180° off   → candidate is directly downwind (bad)  → score 0.0
     """
     if wind_from_deg is None or not math.isfinite(wind_from_deg):
@@ -446,13 +462,15 @@ def score_staging_candidate_detailed(
     *,
     slope_pct: float | None = None,
     wind_from_deg: float | None = None,
+    standoff: float = _SAFE_STANDOFF_KM,
 ) -> dict[str, Any]:
     """Composite 0..1 staging-area score with per-component breakdown.
 
     Components (each in 0..1, weighted to sum 1.0):
 
-    - **incident distance** — smooth tent: 0 inside the 2 km safety
-      standoff, linear rise to a peak at 5 km, linear decay to 0 at 15 km.
+    - **incident distance** — smooth tent: 0 inside the safety standoff
+      (2 km, more for large fires, see ``standoff_km``), linear rise to a
+      peak 3 km past it, linear decay to 0 another 10 km out.
     - **water proximity** — nearest water feature; ≤8 km maps to 1..0.
     - **fire-station proximity** — nearest fire station within 12 km maps
       to 1..0 (was 10 — relaxed since stations are sparse in rural AOIs).
@@ -461,11 +479,11 @@ def score_staging_candidate_detailed(
       used as a comms-LOS proxy. Only contributes meaningfully when real
       DEM data is wired (e.g. from terrain_fuel.elevation_m.mean).
     - **slope** — gentle ground (≤8%) scores 1.0; decays to 0 at 25%.
-    - **wind alignment** — upwind candidate scores 1.0; crosswind 0.55;
+    - **wind alignment** — upwind candidate scores 1.0; crosswind 0.5;
       downwind 0.0. Neutral 0.5 if wind unknown.
     """
     inc_km = _haversine_km(loc_latlon, incident_latlon)
-    incident_score = _incident_distance_score(inc_km)
+    incident_score = _incident_distance_score(inc_km, standoff)
 
     water_km = _nearest_km(loc_latlon, water)
     water_score = (
@@ -519,6 +537,7 @@ def score_staging_candidate_detailed(
         },
         "raw": {
             "incident_km": round(inc_km, 3),
+            "standoff_km": round(standoff, 2),
             "water_km": round(water_km, 3) if math.isfinite(water_km) else None,
             "station_km": round(station_km, 3) if math.isfinite(station_km) else None,
             "paved_km": round(paved_km, 3) if math.isfinite(paved_km) else None,

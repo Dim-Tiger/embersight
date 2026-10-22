@@ -32,6 +32,7 @@ from ..state import (
     Dataset,
     Model,
 )
+from ..tools.overpass import endpoints as overpass_endpoints
 from ..tools.overpass import (
     OVERPASS,
     get_fire_stations,
@@ -45,6 +46,7 @@ from ..tools.routing import (
     get_road_network,
     road_density_per_km2,
     score_staging_candidate_detailed,
+    standoff_km,
 )
 
 AGENT_NAME = "routing_staging"
@@ -195,6 +197,7 @@ def _pick_candidate_locations(
     water: list[dict[str, Any]],
     incident: tuple[float, float],
     max_n: int = _MAX_CANDIDATES,
+    standoff: float = 2.0,
 ) -> list[dict[str, Any]]:
     """Keep paved features that respect the safety standoff and sit
     within the AOI. Records nearest-water distance for downstream scoring
@@ -207,7 +210,7 @@ def _pick_candidate_locations(
         if loc is None:
             continue
         dist_inc = _haversine_km(loc, incident)
-        if dist_inc < 2.0 or dist_inc > AOI_RADIUS_KM:
+        if dist_inc < standoff or dist_inc > AOI_RADIUS_KM:
             continue
         nearest_water = math.inf
         for w in water:
@@ -234,7 +237,7 @@ def _pick_candidate_locations(
             # Penalize the safety-standoff edge so the very-close-but-safe
             # candidates don't dominate over slightly-farther ones with
             # actual headroom (matches the smooth tent in scoring).
-            abs((c["dist_incident_km"] or 99) - 5.0),
+            abs((c["dist_incident_km"] or 99) - (standoff + 3.0)),
             c["nearest_water_km"] if c["nearest_water_km"] is not None else 99,
         )
     )
@@ -624,7 +627,10 @@ async def run(state: AgentState) -> dict:
             "outputs": {AGENT_NAME: _stub_output(state, "all Overpass calls failed")}
         }
 
-    candidates = _pick_candidate_locations(paved, water, incident_latlon)
+    standoff = standoff_km(incident.acres)
+    candidates = _pick_candidate_locations(
+        paved, water, incident_latlon, standoff=standoff
+    )
 
     # Road graph + per-candidate routes (sync OSMnx work, offloaded).
     road_graph: Any = None
@@ -670,6 +676,7 @@ async def run(state: AgentState) -> dict:
             incident_latlon=incident_latlon,
             slope_pct=aoi_slope_pct,
             wind_from_deg=wind_from_deg,
+            standoff=standoff,
         )
         enriched.append(
             {
@@ -857,6 +864,7 @@ async def run(state: AgentState) -> dict:
         "graph_error": graph_error,
         "osm_failures": osm_failures,
         "road_density_km_per_km2": round(road_density, 2),
+        "staging_standoff_km": round(standoff, 2),
         "wind": {
             "from_deg": wind_from_deg,
             "speed_mph": wind_speed_mph,
@@ -893,7 +901,7 @@ async def run(state: AgentState) -> dict:
     else:
         narrative = (
             f"[{AGENT_NAME}] SUGGEST manual staging selection — no paved area "
-            f"in the 25 km AOI satisfied the 2 km safety standoff."
+            f"in the 25 km AOI satisfied the {standoff:.1f} km safety standoff."
         )
 
     key_findings: list[str] = []
@@ -946,7 +954,9 @@ async def run(state: AgentState) -> dict:
             datasets=[
                 Dataset(
                     name="OSM Overpass",
-                    version="overpass-api.de",
+                    version="public instances: " + ", ".join(
+                        u.split("/")[2] for u in overpass_endpoints()
+                    ),
                     url=OVERPASS,
                 ),
                 Dataset(
