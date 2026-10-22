@@ -3,7 +3,7 @@ name = "embersight-agent"
 version = "0.1.0"
 description = "EmberSight LangGraph agent service for CAL FIRE IMT support"
 requires-python = ">=3.11"
-readme = "../README.md"
+readme = "README.md"
 
 dependencies = [
     # Web service
@@ -30,6 +30,12 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Test tooling. Installed by default (see default-groups below) so a fresh
+# `uv sync` followed by `uv run pytest` just works.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
 # Heavyweight scientific deps. PEP 735 dep groups, NOT installed by
 # default. Pull them with `uv sync --group science` when you need them
 # for real tool runs (pass 2).
@@ -50,6 +56,9 @@ packages = ["src/embersight_agent"]
 
 [tool.uv]
 package = true
-# Don't auto-install the heavyweight `science` group. Opt in with
-# `uv sync --group science` when needed.
-default-groups = []
+# Install the small `dev` group by default but not the heavyweight `science`
+# group. Opt in with `uv sync --group science` when needed.
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
