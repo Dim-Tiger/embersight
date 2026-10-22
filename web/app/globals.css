@@ -5,14 +5,43 @@
 @import "maplibre-gl/dist/maplibre-gl.css";
 
 :root {
+  /* Dark-theme defaults. Each value is an `R G B` triple so it can be
+     consumed by Tailwind's `rgb(var(--smoke-N) / <alpha-value>)` pattern. */
+  --smoke-50: 248 250 252;
+  --smoke-100: 241 245 249;
+  --smoke-200: 226 232 240;
+  --smoke-300: 203 213 225;
+  --smoke-400: 148 163 184;
+  --smoke-500: 100 116 139;
+  --smoke-600: 38 48 63;
+  --smoke-700: 26 34 48;
+  --smoke-800: 17 23 34;
+  --smoke-900: 11 15 20;
   color-scheme: dark;
+}
+
+html.light {
+  /* Flip the scale so the existing semantic usage holds: bg-smoke-900
+     (the main background) becomes white, text-smoke-200 (primary text)
+     becomes near-black, borders and muted text scale accordingly. */
+  --smoke-50: 11 15 20;
+  --smoke-100: 17 23 34;
+  --smoke-200: 26 34 48;
+  --smoke-300: 38 48 63;
+  --smoke-400: 100 116 139;
+  --smoke-500: 148 163 184;
+  --smoke-600: 203 213 225;
+  --smoke-700: 226 232 240;
+  --smoke-800: 241 245 249;
+  --smoke-900: 255 255 255;
+  color-scheme: light;
 }
 
 html,
 body {
   height: 100%;
-  background: #0b0f14;
-  color: #f8fafc;
+  background: rgb(var(--smoke-900));
+  color: rgb(var(--smoke-200));
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
 }
