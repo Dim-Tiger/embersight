@@ -15,6 +15,8 @@ export type AttentionItem = {
   title: string;
   /** Optional second line: source, threshold, or what to do. */
   detail?: ReactNode;
+  /** One-line version for the "Also flagged" overflow line. */
+  summary?: string;
   /** Optional call to action (e.g. jump to the approval queue). */
   action?: { label: string; onClick: () => void };
 };
@@ -29,16 +31,20 @@ export function AttentionStrip({
   asOf,
   emptyText,
   max = 3,
+  compact = false,
 }: {
   items: AttentionItem[];
   asOf?: ReactNode;
   emptyText?: string;
   max?: number;
+  /** Tighter cards for views where the strip shares the screen (Briefing). */
+  compact?: boolean;
 }) {
-  const sorted = [...items]
-    .sort((a, b) => SEVERITY_RANK[a.level] - SEVERITY_RANK[b.level])
-    .slice(0, max);
-  const hidden = items.length - sorted.length;
+  const ranked = [...items].sort(
+    (a, b) => SEVERITY_RANK[a.level] - SEVERITY_RANK[b.level],
+  );
+  const sorted = ranked.slice(0, max);
+  const hidden = ranked.slice(max);
   return (
     <section aria-label="Needs attention now">
       <div className="mb-2 flex items-baseline justify-between gap-3">
@@ -62,29 +68,46 @@ export function AttentionStrip({
           }`}
         >
           {sorted.map((it) => (
-            <AttentionCard key={it.id} item={it} />
+            <AttentionCard key={it.id} item={it} compact={compact} />
           ))}
         </ol>
       )}
-      {hidden > 0 && (
-        <p className="mt-1.5 text-[11px] text-smoke-400">
-          +{hidden} more flagged below.
+      {hidden.length > 0 && (
+        // Name what did not fit instead of a bare count, so nothing
+        // important is silently out of view.
+        <p className="mt-1.5 text-[12px] text-smoke-300">
+          <span className="font-semibold">Also flagged:</span>{" "}
+          {hidden.map(oneLine).join(" · ")}
         </p>
       )}
     </section>
   );
 }
 
-function AttentionCard({ item }: { item: AttentionItem }) {
+// Titles written to follow the number ("structures inside the cone") start
+// lower-case; prefix the number for those, use the title alone otherwise.
+function oneLine(it: AttentionItem): string {
+  if (it.summary) return it.summary;
+  const continues = /^[a-z]/.test(it.title);
+  return continues && it.value ? `${it.value} ${it.unit ?? ""} ${it.title}`.replace(/\s+/g, " ") : it.title;
+}
+
+function AttentionCard({ item, compact }: { item: AttentionItem; compact?: boolean }) {
   const s = SEVERITY[item.level];
   return (
     <li
-      className={`flex min-w-0 flex-col gap-1.5 rounded-md border border-l-4 border-smoke-700 bg-smoke-800 px-3.5 py-3 ${s.edge}`}
+      className={`flex min-w-0 flex-col rounded-md border border-l-4 border-smoke-700 bg-smoke-800 ${
+        compact ? "gap-1 px-3 py-2" : "gap-1.5 px-3.5 py-3"
+      } ${s.edge}`}
     >
-      <SeverityBadge level={item.level} />
+      <div>
+        <SeverityBadge level={item.level} />
+      </div>
       {item.value != null && (
         <div className="flex items-baseline gap-1.5">
-          <span className="text-[28px] font-bold leading-none tabular-nums text-smoke-100">
+          <span
+            className={`${compact ? "text-[22px]" : "text-[28px]"} font-bold leading-none tabular-nums text-smoke-100`}
+          >
             {item.value}
           </span>
           {item.unit && (
@@ -98,14 +121,18 @@ function AttentionCard({ item }: { item: AttentionItem }) {
         {item.title}
       </p>
       {item.detail && (
-        <div className="text-[12px] leading-snug text-smoke-300">
+        <div
+          className={`text-[12px] leading-snug text-smoke-300 ${compact ? "line-clamp-2" : ""}`}
+        >
           {item.detail}
         </div>
       )}
       {item.action && (
         <button
           onClick={item.action.onClick}
-          className="mt-auto inline-flex w-fit items-center gap-1 rounded border border-smoke-600 bg-smoke-700 px-2.5 py-1 text-[12px] font-semibold text-smoke-100 hover:border-ember-500 hover:bg-ember-900/40"
+          className={`mt-auto inline-flex w-fit items-center gap-1 rounded border border-smoke-600 bg-smoke-700 font-semibold text-smoke-100 hover:border-ember-500 hover:bg-ember-900/40 ${
+            compact ? "px-2 py-0.5 text-[11.5px]" : "px-2.5 py-1 text-[12px]"
+          }`}
         >
           {item.action.label}
           <ArrowRight className="h-3.5 w-3.5" aria-hidden />

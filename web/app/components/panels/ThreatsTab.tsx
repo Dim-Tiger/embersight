@@ -82,7 +82,14 @@ export function ThreatsTab() {
             </h2>
             <AsOf ts={asOf} />
           </div>
-          <AgentStatusRow agents={THREAT_AGENTS} />
+          <AgentStatusRow
+            agents={THREAT_AGENTS}
+            gaps={{
+              values_at_risk: failed.size ? `${failed.size} of 6 data sources failed` : null,
+              terrain_fuel: terrain ? terrainDataGap(tp) : null,
+              spread_simulation: sp.cone_impact?.error ?? null,
+            }}
+          />
         </header>
 
         <AttentionStrip

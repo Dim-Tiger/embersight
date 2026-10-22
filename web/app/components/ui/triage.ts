@@ -221,7 +221,7 @@ export function terrainDataGap(tp: TerrainPayload): string | null {
   if (tp.fetch_error) return `LANDFIRE fetch failed: ${tp.fetch_error}`;
   const top = topFuelClass(tp);
   if (top?.nodata) {
-    return `Dominant fuel class is "no data" (${top.code}) for ${fmtNum((top.fraction ?? 0) * 100, 0)}% of the area; verify fuel model in the field.`;
+    return `LANDFIRE returned "no data" (-9999) as the dominant fuel class for ${fmtNum((top.fraction ?? 0) * 100, 0)}% of the area. Verify the fuel model in the field.`;
   }
   return null;
 }
@@ -234,10 +234,22 @@ export type RoutingLike = {
   candidates?: unknown[];
 };
 
+/** Capitalise and end with a full stop, so backend reason strings read as sentences. */
+export function sentence(s: string): string {
+  const t = s.trim();
+  if (!t) return t;
+  const cap = t[0].toUpperCase() + t.slice(1);
+  return /[.!?]$/.test(cap) ? cap : `${cap}.`;
+}
+
 export function routingDataGap(rp: RoutingLike, conf?: number): string | null {
-  if (rp.stub) return rp.reason ?? "OpenStreetMap road data could not be fetched.";
+  if (rp.stub) {
+    return rp.reason
+      ? `${sentence(rp.reason)} OpenStreetMap road data could not be fetched.`
+      : "OpenStreetMap road data could not be fetched.";
+  }
   if ((rp.candidates?.length ?? 0) === 0 && (rp.osm_failures?.length ?? 0) > 0) {
-    return `OpenStreetMap (Overpass) failed: ${rp.osm_failures!.join(", ")}`;
+    return `OpenStreetMap (Overpass) failed: ${rp.osm_failures!.join(", ")}.`;
   }
   if (conf != null && conf < 0.2) return "Routing data badly degraded.";
   return null;
@@ -376,6 +388,7 @@ export function threatAttention(args: {
       value: fmtNum(fl, 0),
       unit: "ft flame length",
       title: band.meaning,
+      summary: `${fmtNum(fl, 0)} ft flames at the head`,
       detail:
         typeof ros === "number"
           ? `Head spreading ${fmtNum(ros, 1)} chains/h (${fmtNum((ros * 66) / 5280, 1)} mph).`

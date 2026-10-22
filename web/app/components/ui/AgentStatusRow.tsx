@@ -17,7 +17,15 @@ export function confidenceWord(c: number): "high" | "medium" | "low" {
  * at the top of the tab (the banner's event log moves into a collapsed
  * section further down).
  */
-export function AgentStatusRow({ agents }: { agents: readonly string[] }) {
+export function AgentStatusRow({
+  agents,
+  gaps = {},
+}: {
+  agents: readonly string[];
+  /** Per-agent data-gap reason. A high confidence score with a failed
+   * source must not read as "high", so a gap overrides the band. */
+  gaps?: Partial<Record<string, string | null>>;
+}) {
   const statuses = useStore((s) => s.agentStatuses);
   const outputs = useStore((s) => s.agentOutputs);
   const done = useStore((s) => s.done);
@@ -49,10 +57,11 @@ export function AgentStatusRow({ agents }: { agents: readonly string[] }) {
           cls = "border-sev-warning-edge text-smoke-100";
         } else if (status === "done" && out) {
           const word = confidenceWord(out.confidence);
-          Icon = word === "low" ? CloudOff : CircleCheck;
-          text = `${Math.round(out.confidence * 100)}% conf · ${word}`;
+          const gap = gaps[a];
+          Icon = word === "low" || gap ? CloudOff : CircleCheck;
+          text = `${Math.round(out.confidence * 100)}% conf · ${gap ? "data gap" : word}`;
           cls =
-            word === "low"
+            word === "low" || gap
               ? "border-sev-degraded-edge text-smoke-100"
               : "border-smoke-600 text-smoke-200";
         } else if (status === "done") {
@@ -66,6 +75,7 @@ export function AgentStatusRow({ agents }: { agents: readonly string[] }) {
         return (
           <li
             key={a}
+            title={gaps[a] ?? out?.confidence_driver ?? undefined}
             className={`inline-flex items-center gap-1.5 rounded-full border bg-smoke-800 px-2.5 py-1 text-[11px] ${cls}`}
           >
             <Icon
