@@ -87,6 +87,22 @@ def test_offline_weather_run_says_wind_is_assumed():
     assert "wind_dir_deg" in out.payload["assumed_inputs"]
 
 
+def test_synthetic_red_flag_alert_is_in_effect_when_shown():
+    from datetime import datetime, timedelta
+
+    from embersight_agent.state import TestOverrides
+
+    inputs: dict = {"nws_alerts": []}
+    weather_wind._apply_test_overrides(
+        inputs, TestOverrides(enabled=True, alert_preset="red_flag_warning")
+    )
+    props = inputs["nws_alerts"][0]["properties"]
+    effective = datetime.fromisoformat(props["effective"])
+    expires = datetime.fromisoformat(props["expires"])
+    assert expires - effective == timedelta(hours=weather_wind.SYNTHETIC_ALERT_HOURS)
+    assert props["ends"] == props["expires"]
+
+
 # ---- HRRR / RTMA grid-relative wind --------------------------------------------
 
 

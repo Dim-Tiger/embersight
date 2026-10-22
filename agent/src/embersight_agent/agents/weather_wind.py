@@ -25,7 +25,7 @@ import json
 import os
 import pathlib
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..state import (
@@ -441,6 +441,9 @@ async def _gather_inputs(lat: float, lon: float) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+# How long a dev-panel synthetic alert stays in effect after issuance.
+SYNTHETIC_ALERT_HOURS = 12
+
 _ALERT_PRESETS: dict[str, dict[str, str]] = {
     "red_flag_warning": {
         "event": "Red Flag Warning",
@@ -486,10 +489,11 @@ def _apply_test_overrides(inputs: dict[str, Any], overrides: Any) -> None:
     preset = getattr(overrides, "alert_preset", "none")
     if preset and preset != "none" and preset in _ALERT_PRESETS:
         p = _ALERT_PRESETS[preset]
-        now_iso = datetime.now(timezone.utc).isoformat()
-        ends_iso = (
-            datetime.now(timezone.utc).replace(microsecond=0)
-        ).isoformat()
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now.isoformat()
+        # A real Red Flag Warning runs for hours; ending it at issuance made
+        # the demo alert show up already expired.
+        ends_iso = (now + timedelta(hours=SYNTHETIC_ALERT_HOURS)).isoformat()
         inputs["nws_alerts"] = [
             {
                 "type": "Feature",
