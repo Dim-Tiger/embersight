@@ -111,12 +111,19 @@ type OverpassElement = {
 
 // Overpass mirrors — overpass-api.de aggressively rate-limits and
 // occasionally 403s. We round-robin through the public mirrors until one
-// answers. Order: main → kumi.systems → osm.ch (community-maintained).
+// answers. Order: main → kumi.systems → private.coffee, the same three
+// full-planet mirrors the agent service uses. (overpass.osm.ch only holds
+// Switzerland, so for a California bbox it answered 200 with zero elements
+// and the layer showed "0" instead of an error.)
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.osm.ch/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
 ];
+
+// Give up on a mirror a little after the query's own server-side timeout,
+// so one hung host cannot stall the layer for minutes.
+const MIRROR_TIMEOUT_MS = (OVERPASS_TIMEOUT_S + 5) * 1000;
 
 async function fetchOverpass(
   src: InfraSource,
@@ -142,6 +149,7 @@ async function fetchOverpass(
         },
         body: new URLSearchParams({ data: query }).toString(),
         next: { revalidate: src.revalidate },
+        signal: AbortSignal.timeout(MIRROR_TIMEOUT_MS),
       });
       if (!r.ok) {
         lastErr = `overpass ${r.status} @ ${new URL(endpoint).host}`;
